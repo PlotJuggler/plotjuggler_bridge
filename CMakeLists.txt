@@ -32,11 +32,14 @@ include_directories(
 # Create library
 add_library(${PROJECT_NAME}_lib
   src/middleware/zmq_middleware.cpp
+  src/topic_discovery.cpp
+  src/schema_extractor.cpp
 )
 
 target_link_libraries(${PROJECT_NAME}_lib
   zstd::libzstd_shared
   zmq
+  dl  # For dlopen/dlsym used in schema extraction
 )
 
 ament_target_dependencies(${PROJECT_NAME}_lib
@@ -75,6 +78,8 @@ if(BUILD_TESTING)
   # Add unit tests
   ament_add_gtest(${PROJECT_NAME}_tests
     tests/unit/test_middleware.cpp
+    tests/unit/test_topic_discovery.cpp
+    tests/unit/test_schema_extractor.cpp
   )
 
   target_link_libraries(${PROJECT_NAME}_tests
