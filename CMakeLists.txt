@@ -34,6 +34,8 @@ add_library(${PROJECT_NAME}_lib
   src/middleware/zmq_middleware.cpp
   src/topic_discovery.cpp
   src/schema_extractor.cpp
+  src/message_buffer.cpp
+  src/generic_subscription_manager.cpp
 )
 
 target_link_libraries(${PROJECT_NAME}_lib
@@ -80,6 +82,8 @@ if(BUILD_TESTING)
     tests/unit/test_middleware.cpp
     tests/unit/test_topic_discovery.cpp
     tests/unit/test_schema_extractor.cpp
+    tests/unit/test_message_buffer.cpp
+    tests/unit/test_generic_subscription_manager.cpp
   )
 
   target_link_libraries(${PROJECT_NAME}_tests
