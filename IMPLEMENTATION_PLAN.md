@@ -26,6 +26,7 @@ Implement a C++ ROS2 bridge server that forwards ROS2 topic content over the net
   - `rosidl_runtime_cpp`
   - `gtest` (for unit tests)
 - Add ZeroMQ (cppzmq) from 3rdparty folder
+- Add ZSTD compression library (using FindZSTD.cmake)
 - Configure C++17 standard
 - Set up include directories for headers
 
@@ -340,14 +341,24 @@ Create `AggregatedMessageSerializer` class with:
 - `std::vector<uint8_t> serialize()` method to build final buffer
 - `void clear()` method to reset for next cycle
 
+#### 5.1.1 ZSTD Compression
+- After serialization, compress the aggregated message using ZSTD
+- Add compression wrapper function:
+  - `std::vector<uint8_t> compress_zstd(const std::vector<uint8_t>& data)`
+  - Use appropriate compression level (e.g., ZSTD_CLEVEL_DEFAULT or 3)
+  - Handle compression errors gracefully
+- The compressed buffer is what gets published via PUB socket
+- Add decompression to Python test client for validation
+
 #### 5.2 50 Hz Publisher Timer
 - Create ROS2 timer running at 50 Hz (20ms period)
 - Timer callback should:
   1. Query MessageBuffer for all new messages since last publish
   2. If no new messages, skip (don't publish empty aggregation)
   3. Build aggregated message using AggregatedMessageSerializer
-  4. Publish via middleware PUB socket
-  5. Track last publish timestamp
+  4. Compress the serialized buffer using ZSTD
+  5. Publish compressed buffer via middleware PUB socket
+  6. Track last publish timestamp and compression statistics
 
 #### 5.3 Message Buffer Coordination
 - MessageBuffer should track "last read" timestamp per topic
@@ -360,12 +371,17 @@ Create `AggregatedMessageSerializer` class with:
   - Test serialization format with known messages
   - Verify byte layout matches specification
   - Test empty aggregation handling
+  - Test ZSTD compression/decompression round-trip
+  - Verify compression reduces message size
 - Integration tests:
   - Python client subscribes to topics
-  - Client receives and deserializes aggregated messages
+  - Client receives compressed data
+  - Client decompresses using zstandard library
+  - Client deserializes aggregated messages
   - Verify message count, topic names, timestamps
   - Verify message data integrity (compare with source)
   - Measure actual publish rate (should be ~50 Hz)
+  - Measure compression ratio and performance impact
 
 **Test Command**:
 ```bash
@@ -498,6 +514,9 @@ Create `tests/integration/test_client.py` with:
   - Receive aggregated messages
 
 #### 7.2 Message Deserialization
+- Implement ZSTD decompression first:
+  - Use Python `zstandard` library to decompress received data
+  - Handle decompression errors
 - Implement deserializer matching server's serialization format:
   - Parse aggregated message header (message count)
   - Extract each message: topic, timestamps, data
@@ -575,6 +594,8 @@ Create tests using Google Test (gtest):
 - Test deserialization
 - Test edge cases (empty messages, large messages)
 - Test endianness handling
+- Test ZSTD compression/decompression
+- Test compression error handling
 
 **test_subscription_manager.cpp**:
 - Test subscription reference counting
@@ -799,10 +820,12 @@ Before considering the project complete:
 ### External Libraries
 - ZeroMQ (libzmq)
 - cppzmq (headers in 3rdparty/)
+- ZSTD (libzstd) - for compression
 - nlohmann/json or simple hand-crafted JSON serializer
 
 ### Python (for test client)
 - pyzmq
+- zstandard - for ZSTD decompression
 - argparse
 - struct (built-in)
 - json (built-in)

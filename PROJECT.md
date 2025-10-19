@@ -51,6 +51,8 @@ This aggregated message contains:
 
 We will serialize this ourself, no need to use any external library.
 
+**Compression**: The aggregated message should be compressed using ZSTD before being published to the client via the PUB-SUB socket. This reduces network bandwidth and improves performance when dealing with large messages.
+
 ## Middleware
 
 We will use ZeroMQ, but we will include an **abstract class** to allow us to change this to a different middleware in the future, if we need to.
