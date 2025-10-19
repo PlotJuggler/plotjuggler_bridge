@@ -123,9 +123,10 @@ private:
    - Reference counting for shared subscriptions across clients
 
 5. **Message Buffer**
-   - Thread-safe circular buffer per topic
+   - Thread-safe buffer per topic with automatic cleanup
    - Stores: topic name, publish time, receive time, serialized CDR data
-   - Max size: configurable (default 1000 messages)
+   - Auto-deletes messages older than 1 second to prevent unbounded memory growth
+   - Cleanup triggered on every message addition
 
 6. **Session Manager**
    - Tracks client sessions using ZMQ connection identity
@@ -288,13 +289,13 @@ pj_ros_bridge/
 
 ## Implementation Status
 
-**Current Milestone**: Planning complete
-**Next Steps**: Begin Milestone 1 - Project Setup & Infrastructure
+**Current Milestone**: Milestone 3 completed
+**Next Steps**: Begin Milestone 4 - Client Session Management
 
 ### Milestone Checklist
-- [ ] Milestone 1: Project Setup & Infrastructure
-- [ ] Milestone 2: Topic Discovery & Schema Extraction
-- [ ] Milestone 3: Generic Subscription & Message Buffering
+- [x] Milestone 1: Project Setup & Infrastructure (completed 2025-10-19)
+- [x] Milestone 2: Topic Discovery & Schema Extraction (completed 2025-10-19)
+- [x] Milestone 3: Generic Subscription & Message Buffering (completed 2025-10-19)
 - [ ] Milestone 4: Client Session Management
 - [ ] Milestone 5: Message Aggregation & Publishing
 - [ ] Milestone 6: Main Server Integration & Configuration
@@ -302,6 +303,26 @@ pj_ros_bridge/
 - [ ] Milestone 8: Unit Test Suite
 - [ ] Milestone 9: Error Handling & Robustness
 - [ ] Milestone 10: Documentation & Polish
+
+### Completed Components
+
+**Milestone 1** (branch: claude/milestone_1):
+- MiddlewareInterface abstract class
+- ZmqMiddleware implementation (REP/PUB sockets)
+- CMakeLists.txt and package.xml setup
+- Unit tests: 9 tests passing
+
+**Milestone 2** (branch: claude/milestone_2):
+- TopicDiscovery class (discovers topics, filters system topics)
+- SchemaExtractor class (runtime introspection with dlopen)
+- nlohmann/json integration
+- Unit tests: 18 total tests passing
+
+**Milestone 3** (branch: claude/milestone_3):
+- MessageBuffer class with 1-second auto-cleanup
+- GenericSubscriptionManager with reference counting
+- Thread-safe operations
+- Unit tests: 36 total tests passing
 
 ## Important Design Decisions
 
@@ -384,12 +405,12 @@ python3 tests/integration/test_client.py --subscribe <topics>
 
 Default values (to be implemented):
 ```yaml
-req_port: 5555          # REQ-REP API port
-pub_port: 5556          # PUB data stream port
-publish_rate: 50.0      # Hz - aggregation publish rate
-session_timeout: 10.0   # seconds - client heartbeat timeout
-buffer_size: 1000       # messages - max per topic buffer
-topic_filter: ""        # regex - filter topics (optional)
+req_port: 5555              # REQ-REP API port
+pub_port: 5556              # PUB data stream port
+publish_rate: 50.0          # Hz - aggregation publish rate
+session_timeout: 10.0       # seconds - client heartbeat timeout
+message_retention: 1.0      # seconds - max age of buffered messages
+topic_filter: ""            # regex - filter topics (optional)
 ```
 
 ## Known Challenges & Solutions
@@ -467,5 +488,6 @@ ros2 bag play DATA/sample.mcap
 ---
 
 **Last Updated**: 2025-10-19
-**Project Phase**: Planning Complete, Ready for Implementation
-**Current Focus**: Milestone 1 - Project Setup & Infrastructure
+**Project Phase**: Active Implementation
+**Current Focus**: Milestone 4 - Client Session Management
+**Test Status**: 36 unit tests passing (9 middleware, 4 discovery, 5 schema, 8 buffer, 10 subscription)
