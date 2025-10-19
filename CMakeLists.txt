@@ -1,26 +1,89 @@
 cmake_minimum_required(VERSION 3.8)
 project(pj_ros_bridge)
 
+# Compiler settings
 if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
   add_compile_options(-Wall -Wextra -Wpedantic)
 endif()
 
-# find dependencies
-find_package(ament_cmake REQUIRED)
-# uncomment the following section in order to fill in
-# further dependencies manually.
-# find_package(<dependency> REQUIRED)
+# Set C++17 standard
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# Add cmake module path for custom find modules
+list(APPEND CMAKE_MODULE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
+
+# Find ROS2 dependencies
+find_package(ament_cmake REQUIRED)
+find_package(rclcpp REQUIRED)
+find_package(rosbag2_cpp REQUIRED)
+find_package(rosidl_typesupport_introspection_cpp REQUIRED)
+find_package(rosidl_runtime_cpp REQUIRED)
+
+# Find external dependencies
+find_package(ZSTD REQUIRED)
+
+# Include directories
+include_directories(
+  include
+  ${CMAKE_CURRENT_SOURCE_DIR}/3rdparty
+)
+
+# Create library
+add_library(${PROJECT_NAME}_lib
+  src/middleware/zmq_middleware.cpp
+)
+
+target_link_libraries(${PROJECT_NAME}_lib
+  zstd::libzstd_shared
+  zmq
+)
+
+ament_target_dependencies(${PROJECT_NAME}_lib
+  rclcpp
+  rosbag2_cpp
+  rosidl_typesupport_introspection_cpp
+  rosidl_runtime_cpp
+)
+
+# Install headers
+install(
+  DIRECTORY include/
+  DESTINATION include
+)
+
+# Install library
+install(
+  TARGETS ${PROJECT_NAME}_lib
+  EXPORT ${PROJECT_NAME}_libTargets
+  ARCHIVE DESTINATION lib
+  LIBRARY DESTINATION lib
+  RUNTIME DESTINATION bin
+)
+
+# Testing
 if(BUILD_TESTING)
+  find_package(ament_cmake_gtest REQUIRED)
   find_package(ament_lint_auto REQUIRED)
-  # the following line skips the linter which checks for copyrights
-  # comment the line when a copyright and license is added to all source files
+
+  # Skip copyright and cpplint for now
   set(ament_cmake_copyright_FOUND TRUE)
-  # the following line skips cpplint (only works in a git repo)
-  # comment the line when this package is in a git repo and when
-  # a copyright and license is added to all source files
   set(ament_cmake_cpplint_FOUND TRUE)
+
   ament_lint_auto_find_test_dependencies()
+
+  # Add unit tests
+  ament_add_gtest(${PROJECT_NAME}_tests
+    tests/unit/test_middleware.cpp
+  )
+
+  target_link_libraries(${PROJECT_NAME}_tests
+    ${PROJECT_NAME}_lib
+  )
+
+  ament_target_dependencies(${PROJECT_NAME}_tests
+    rclcpp
+  )
 endif()
 
 ament_package()
