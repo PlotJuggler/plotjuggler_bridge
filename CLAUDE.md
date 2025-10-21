@@ -149,7 +149,14 @@ private:
    - Timeout: 10 seconds without heartbeat
    - Manages per-client subscriptions
 
-7. **Message Aggregation**
+7. **Bridge Server** (NEW - Milestone 4)
+   - Main orchestrator integrating all components
+   - Handles API request/response loop
+   - Routes commands (get_topics, subscribe, heartbeat)
+   - Manages session timeouts with 1 Hz timer
+   - Creates message buffer callbacks for subscriptions
+
+8. **Message Aggregation** (TODO - Milestone 5)
    - 50 Hz timer collects new messages from all active topics
    - Custom binary serialization format
    - ZSTD compression applied to serialized data
@@ -243,29 +250,30 @@ pj_ros_bridge/
 │   ├── topic_discovery.hpp
 │   ├── schema_extractor.hpp
 │   ├── message_buffer.hpp
-│   ├── session_manager.hpp
+│   ├── session_manager.hpp          [✓ Milestone 4]
 │   ├── generic_subscription_manager.hpp
-│   └── bridge_server.hpp
+│   └── bridge_server.hpp             [✓ Milestone 4]
 ├── src/
 │   ├── middleware/
 │   │   └── zmq_middleware.cpp
 │   ├── topic_discovery.cpp
 │   ├── schema_extractor.cpp
 │   ├── message_buffer.cpp
-│   ├── session_manager.cpp
+│   ├── session_manager.cpp           [✓ Milestone 4]
 │   ├── generic_subscription_manager.cpp
-│   ├── bridge_server.cpp
-│   └── main.cpp
+│   ├── bridge_server.cpp             [✓ Milestone 4]
+│   └── main.cpp                      [TODO: Milestone 6]
 ├── tests/
 │   ├── unit/
+│   │   ├── test_middleware.cpp
+│   │   ├── test_topic_discovery.cpp
+│   │   ├── test_schema_extractor.cpp
 │   │   ├── test_message_buffer.cpp
-│   │   ├── test_session_manager.cpp
-│   │   ├── test_serialization.cpp
-│   │   ├── test_subscription_manager.cpp
-│   │   └── test_schema_extractor.cpp
+│   │   ├── test_generic_subscription_manager.cpp
+│   │   └── test_session_manager.cpp  [✓ Milestone 4]
 │   └── integration/
-│       ├── test_client.py
-│       └── test_full_workflow.py
+│       ├── test_client.py            [TODO: Milestone 7]
+│       └── test_full_workflow.py     [TODO: Milestone 7]
 ├── 3rdparty/
 │   ├── cppzmq/ (ZeroMQ C++ headers)
 │   └── nlohmann/ (JSON library header)
@@ -313,14 +321,14 @@ pj_ros_bridge/
 
 ## Implementation Status
 
-**Current Milestone**: Milestone 3 completed
-**Next Steps**: Begin Milestone 4 - Client Session Management
+**Current Milestone**: Milestone 4 completed
+**Next Steps**: Begin Milestone 5 - Message Aggregation & Publishing
 
 ### Milestone Checklist
 - [x] Milestone 1: Project Setup & Infrastructure (completed 2025-10-19)
 - [x] Milestone 2: Topic Discovery & Schema Extraction (completed 2025-10-19)
 - [x] Milestone 3: Generic Subscription & Message Buffering (completed 2025-10-19)
-- [ ] Milestone 4: Client Session Management
+- [x] Milestone 4: Client Session Management (completed 2025-10-21)
 - [ ] Milestone 5: Message Aggregation & Publishing
 - [ ] Milestone 6: Main Server Integration & Configuration
 - [ ] Milestone 7: Python Test Client Development
@@ -349,6 +357,16 @@ pj_ros_bridge/
 - SchemaExtractor uses depth-first traversal for nested message definitions
 - Reference schema files in DATA/ for test validation
 - Unit tests: 34 total tests passing (all green)
+
+**Milestone 4** (development branch):
+- SessionManager class with client session tracking
+- Session timeout monitoring (10 second default timeout)
+- Heartbeat management
+- Per-client subscription tracking
+- BridgeServer class integrating all components
+- API request handlers (get_topics, subscribe, heartbeat)
+- Session cleanup on timeout
+- Unit tests: 44 total tests passing (all green)
 
 ## Important Design Decisions
 
@@ -518,6 +536,6 @@ ros2 bag play DATA/sample.mcap
 
 **Last Updated**: 2025-10-21
 **Project Phase**: Active Implementation
-**Current Focus**: Milestone 4 - Client Session Management
-**Test Status**: 34 unit tests passing (9 middleware, 4 discovery, 3 schema, 8 buffer, 10 subscription)
+**Current Focus**: Milestone 5 - Message Aggregation & Publishing
+**Test Status**: 44 unit tests passing (9 middleware, 4 discovery, 3 schema, 8 buffer, 10 subscription, 10 session)
 **Linter Status**: All linters passing (cppcheck, lint_cmake, xmllint; uncrustify removed)
