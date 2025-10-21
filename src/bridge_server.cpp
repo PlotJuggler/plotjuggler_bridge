@@ -5,19 +5,24 @@
 
 #include <nlohmann/json.hpp>
 
+#include "pj_ros_bridge/message_serializer.hpp"
+
 using json = nlohmann::json;
 
 namespace pj_ros_bridge {
 
 BridgeServer::BridgeServer(
     std::shared_ptr<rclcpp::Node> node, std::shared_ptr<MiddlewareInterface> middleware, int req_port, int pub_port,
-    double session_timeout)
+    double session_timeout, double publish_rate)
     : node_(node),
       middleware_(middleware),
       req_port_(req_port),
       pub_port_(pub_port),
       session_timeout_(session_timeout),
-      initialized_(false) {}
+      publish_rate_(publish_rate),
+      initialized_(false),
+      total_messages_published_(0),
+      total_bytes_published_(0) {}
 
 bool BridgeServer::initialize() {
   if (initialized_) {
@@ -49,6 +54,13 @@ bool BridgeServer::initialize() {
   session_timeout_timer_ = node_->create_wall_timer(std::chrono::seconds(1), [this]() { check_session_timeouts(); });
 
   RCLCPP_INFO(node_->get_logger(), "Session timeout monitoring started");
+
+  // Create message publisher timer (default: 50 Hz)
+  auto publish_period_ms = static_cast<int64_t>(1000.0 / publish_rate_);
+  publish_timer_ = node_->create_wall_timer(
+      std::chrono::milliseconds(publish_period_ms), [this]() { publish_aggregated_messages(); });
+
+  RCLCPP_INFO(node_->get_logger(), "Message aggregation publisher started at %.1f Hz", publish_rate_);
 
   initialized_ = true;
   RCLCPP_INFO(node_->get_logger(), "Bridge server initialization complete");
@@ -325,6 +337,59 @@ void BridgeServer::cleanup_session(const std::string& client_id) {
 
 size_t BridgeServer::get_active_session_count() const {
   return session_manager_->session_count();
+}
+
+std::pair<uint64_t, uint64_t> BridgeServer::get_publish_stats() const {
+  std::lock_guard<std::mutex> lock(stats_mutex_);
+  return {total_messages_published_, total_bytes_published_};
+}
+
+void BridgeServer::publish_aggregated_messages() {
+  // Get all new messages from buffer
+  auto messages = message_buffer_->get_new_messages();
+
+  if (messages.empty()) {
+    // No new messages, skip publishing
+    return;
+  }
+
+  try {
+    // Create serializer and add all messages
+    AggregatedMessageSerializer serializer;
+    for (const auto& msg : messages) {
+      serializer.add_message(msg.topic_name, msg.publish_timestamp_ns, msg.receive_timestamp_ns, msg.data);
+    }
+
+    // Serialize to binary format
+    auto serialized_data = serializer.serialize();
+
+    if (serialized_data.empty()) {
+      RCLCPP_WARN(node_->get_logger(), "Serialized data is empty despite having messages");
+      return;
+    }
+
+    // Compress with ZSTD
+    auto compressed_data = AggregatedMessageSerializer::compress_zstd(serialized_data);
+
+    // Publish via middleware
+    bool success = middleware_->publish_data(compressed_data);
+
+    if (success) {
+      // Update statistics
+      std::lock_guard<std::mutex> lock(stats_mutex_);
+      total_messages_published_ += messages.size();
+      total_bytes_published_ += compressed_data.size();
+
+      RCLCPP_DEBUG(
+          node_->get_logger(), "Published %zu messages (%zu bytes raw, %zu bytes compressed, %.1f%% ratio)",
+          messages.size(), serialized_data.size(), compressed_data.size(),
+          100.0 * static_cast<double>(compressed_data.size()) / static_cast<double>(serialized_data.size()));
+    } else {
+      RCLCPP_ERROR(node_->get_logger(), "Failed to publish aggregated messages");
+    }
+  } catch (const std::exception& e) {
+    RCLCPP_ERROR(node_->get_logger(), "Error publishing aggregated messages: %s", e.what());
+  }
 }
 
 }  // namespace pj_ros_bridge

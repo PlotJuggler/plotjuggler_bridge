@@ -156,11 +156,12 @@ private:
    - Manages session timeouts with 1 Hz timer
    - Creates message buffer callbacks for subscriptions
 
-8. **Message Aggregation** (TODO - Milestone 5)
+8. **Message Aggregation** (NEW - Milestone 5)
    - 50 Hz timer collects new messages from all active topics
-   - Custom binary serialization format
+   - Custom binary serialization format (little-endian)
    - ZSTD compression applied to serialized data
    - Published via ZMQ PUB socket
+   - Statistics tracking (total messages/bytes published)
 
 ### Message Serialization Format
 
@@ -321,15 +322,15 @@ pj_ros_bridge/
 
 ## Implementation Status
 
-**Current Milestone**: Milestone 4 completed
-**Next Steps**: Begin Milestone 5 - Message Aggregation & Publishing
+**Current Milestone**: Milestone 5 completed
+**Next Steps**: Begin Milestone 6 - Main Server Integration & Configuration
 
 ### Milestone Checklist
 - [x] Milestone 1: Project Setup & Infrastructure (completed 2025-10-19)
 - [x] Milestone 2: Topic Discovery & Schema Extraction (completed 2025-10-19)
 - [x] Milestone 3: Generic Subscription & Message Buffering (completed 2025-10-19)
 - [x] Milestone 4: Client Session Management (completed 2025-10-21)
-- [ ] Milestone 5: Message Aggregation & Publishing
+- [x] Milestone 5: Message Aggregation & Publishing (completed 2025-10-21)
 - [ ] Milestone 6: Main Server Integration & Configuration
 - [ ] Milestone 7: Python Test Client Development
 - [ ] Milestone 8: Unit Test Suite
@@ -358,7 +359,7 @@ pj_ros_bridge/
 - Reference schema files in DATA/ for test validation
 - Unit tests: 34 total tests passing (all green)
 
-**Milestone 4** (development branch):
+**Milestone 4** (milestone_4 branch):
 - SessionManager class with client session tracking
 - Session timeout monitoring (10 second default timeout)
 - Heartbeat management
@@ -367,6 +368,15 @@ pj_ros_bridge/
 - API request handlers (get_topics, subscribe, heartbeat)
 - Session cleanup on timeout
 - Unit tests: 44 total tests passing (all green)
+
+**Milestone 5** (development branch):
+- AggregatedMessageSerializer class with custom binary format
+- Little-endian serialization (uint16_t, uint32_t, uint64_t)
+- ZSTD compression/decompression wrappers
+- 50 Hz publisher timer in BridgeServer
+- Automatic message aggregation and publishing
+- Publish statistics tracking (messages, bytes)
+- Unit tests: 55 total tests passing (11 new serializer tests)
 
 ## Important Design Decisions
 
@@ -536,6 +546,6 @@ ros2 bag play DATA/sample.mcap
 
 **Last Updated**: 2025-10-21
 **Project Phase**: Active Implementation
-**Current Focus**: Milestone 5 - Message Aggregation & Publishing
-**Test Status**: 44 unit tests passing (9 middleware, 4 discovery, 3 schema, 8 buffer, 10 subscription, 10 session)
+**Current Focus**: Milestone 6 - Main Server Integration & Configuration
+**Test Status**: 55 unit tests passing (9 middleware, 4 discovery, 3 schema, 8 buffer, 10 subscription, 10 session, 11 serializer)
 **Linter Status**: All linters passing (cppcheck, lint_cmake, xmllint; uncrustify removed)

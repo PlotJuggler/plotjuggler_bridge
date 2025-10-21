@@ -45,6 +45,7 @@ add_library(${PROJECT_NAME}_lib
   src/message_buffer.cpp
   src/generic_subscription_manager.cpp
   src/session_manager.cpp
+  src/message_serializer.cpp
   src/bridge_server.cpp
 )
 
@@ -85,6 +86,7 @@ if(BUILD_TESTING)
     tests/unit/test_message_buffer.cpp
     tests/unit/test_generic_subscription_manager.cpp
     tests/unit/test_session_manager.cpp
+    tests/unit/test_message_serializer.cpp
   )
 
   target_link_libraries(${PROJECT_NAME}_tests

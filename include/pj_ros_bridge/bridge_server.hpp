@@ -37,10 +37,11 @@ class BridgeServer {
    * @param req_port REQ-REP socket port (default: 5555)
    * @param pub_port PUB socket port (default: 5556)
    * @param session_timeout Session timeout in seconds (default: 10.0)
+   * @param publish_rate Message aggregation publish rate in Hz (default: 50.0)
    */
   explicit BridgeServer(
       std::shared_ptr<rclcpp::Node> node, std::shared_ptr<MiddlewareInterface> middleware, int req_port = 5555,
-      int pub_port = 5556, double session_timeout = 10.0);
+      int pub_port = 5556, double session_timeout = 10.0, double publish_rate = 50.0);
 
   /**
    * @brief Initialize the bridge server
@@ -63,6 +64,12 @@ class BridgeServer {
    * @return Number of active sessions
    */
   size_t get_active_session_count() const;
+
+  /**
+   * @brief Get statistics about published messages
+   * @return Pair of (total_messages_published, total_bytes_published)
+   */
+  std::pair<uint64_t, uint64_t> get_publish_stats() const;
 
  private:
   /**
@@ -106,6 +113,11 @@ class BridgeServer {
    */
   void cleanup_session(const std::string& client_id);
 
+  /**
+   * @brief Timer callback to publish aggregated messages at fixed rate
+   */
+  void publish_aggregated_messages();
+
   // ROS2 components
   std::shared_ptr<rclcpp::Node> node_;
 
@@ -119,14 +131,21 @@ class BridgeServer {
 
   // Timers
   rclcpp::TimerBase::SharedPtr session_timeout_timer_;
+  rclcpp::TimerBase::SharedPtr publish_timer_;
 
   // Configuration
   int req_port_;
   int pub_port_;
   double session_timeout_;
+  double publish_rate_;
 
   // State
   bool initialized_;
+
+  // Statistics
+  uint64_t total_messages_published_;
+  uint64_t total_bytes_published_;
+  mutable std::mutex stats_mutex_;
 };
 
 }  // namespace pj_ros_bridge
