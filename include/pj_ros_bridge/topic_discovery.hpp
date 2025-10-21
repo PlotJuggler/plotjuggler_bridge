@@ -15,19 +15,17 @@
 #ifndef PJ_ROS_BRIDGE__TOPIC_DISCOVERY_HPP_
 #define PJ_ROS_BRIDGE__TOPIC_DISCOVERY_HPP_
 
-#include <rclcpp/rclcpp.hpp>
 #include <map>
+#include <rclcpp/rclcpp.hpp>
 #include <string>
 #include <vector>
 
-namespace pj_ros_bridge
-{
+namespace pj_ros_bridge {
 
 /**
  * @brief Structure to hold topic information
  */
-struct TopicInfo
-{
+struct TopicInfo {
   std::string name;
   std::string type;
 };
@@ -40,9 +38,8 @@ struct TopicInfo
  *
  * Thread safety: Not thread-safe. External synchronization required.
  */
-class TopicDiscovery
-{
-public:
+class TopicDiscovery {
+ public:
   explicit TopicDiscovery(rclcpp::Node::SharedPtr node);
 
   /**
@@ -66,7 +63,7 @@ public:
    */
   bool refresh();
 
-private:
+ private:
   rclcpp::Node::SharedPtr node_;
   std::vector<TopicInfo> topics_;
 

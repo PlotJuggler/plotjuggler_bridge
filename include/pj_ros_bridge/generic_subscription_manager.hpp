@@ -15,26 +15,23 @@
 #ifndef PJ_ROS_BRIDGE__GENERIC_SUBSCRIPTION_MANAGER_HPP_
 #define PJ_ROS_BRIDGE__GENERIC_SUBSCRIPTION_MANAGER_HPP_
 
-#include <rclcpp/rclcpp.hpp>
-#include <rclcpp/generic_subscription.hpp>
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <rclcpp/generic_subscription.hpp>
+#include <rclcpp/rclcpp.hpp>
 #include <string>
 #include <unordered_map>
 
-namespace pj_ros_bridge
-{
+namespace pj_ros_bridge {
 
 /**
  * @brief Callback function for received messages
  *
  * Parameters: topic_name, serialized_data, receive_timestamp_ns
  */
-using MessageCallback = std::function<void(
-  const std::string&,
-  const std::shared_ptr<rclcpp::SerializedMessage>&,
-  uint64_t)>;
+using MessageCallback =
+    std::function<void(const std::string&, const std::shared_ptr<rclcpp::SerializedMessage>&, uint64_t)>;
 
 /**
  * @brief Manages generic subscriptions to ROS2 topics
@@ -44,9 +41,8 @@ using MessageCallback = std::function<void(
  *
  * Thread safety: All public methods are thread-safe
  */
-class GenericSubscriptionManager
-{
-public:
+class GenericSubscriptionManager {
+ public:
   explicit GenericSubscriptionManager(rclcpp::Node::SharedPtr node);
 
   /**
@@ -59,10 +55,7 @@ public:
    * @param callback Callback function for received messages
    * @return true if subscription created/incremented, false on error
    */
-  bool subscribe(
-    const std::string& topic_name,
-    const std::string& topic_type,
-    MessageCallback callback);
+  bool subscribe(const std::string& topic_name, const std::string& topic_type, MessageCallback callback);
 
   /**
    * @brief Unsubscribe from a topic
@@ -95,9 +88,8 @@ public:
    */
   void unsubscribe_all();
 
-private:
-  struct SubscriptionInfo
-  {
+ private:
+  struct SubscriptionInfo {
     std::shared_ptr<rclcpp::GenericSubscription> subscription;
     std::string topic_type;
     MessageCallback callback;
