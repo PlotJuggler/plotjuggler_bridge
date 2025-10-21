@@ -322,8 +322,8 @@ pj_ros_bridge/
 
 ## Implementation Status
 
-**Current Milestone**: Milestone 5 completed
-**Next Steps**: Begin Milestone 6 - Main Server Integration & Configuration
+**Current Milestone**: Milestone 6 completed
+**Next Steps**: Begin Milestone 7 - Python Test Client Development
 
 ### Milestone Checklist
 - [x] Milestone 1: Project Setup & Infrastructure (completed 2025-10-19)
@@ -331,7 +331,7 @@ pj_ros_bridge/
 - [x] Milestone 3: Generic Subscription & Message Buffering (completed 2025-10-19)
 - [x] Milestone 4: Client Session Management (completed 2025-10-21)
 - [x] Milestone 5: Message Aggregation & Publishing (completed 2025-10-21)
-- [ ] Milestone 6: Main Server Integration & Configuration
+- [x] Milestone 6: Main Server Integration & Configuration (completed 2025-10-21)
 - [ ] Milestone 7: Python Test Client Development
 - [ ] Milestone 8: Unit Test Suite
 - [ ] Milestone 9: Error Handling & Robustness
@@ -369,7 +369,7 @@ pj_ros_bridge/
 - Session cleanup on timeout
 - Unit tests: 44 total tests passing (all green)
 
-**Milestone 5** (development branch):
+**Milestone 5** (milestone_5 branch):
 - AggregatedMessageSerializer class with custom binary format
 - Little-endian serialization (uint16_t, uint32_t, uint64_t)
 - ZSTD compression/decompression wrappers
@@ -377,6 +377,15 @@ pj_ros_bridge/
 - Automatic message aggregation and publishing
 - Publish statistics tracking (messages, bytes)
 - Unit tests: 55 total tests passing (11 new serializer tests)
+
+**Milestone 6** (development branch):
+- main.cpp entry point with full integration
+- ROS2 parameter configuration (req_port, pub_port, publish_rate, session_timeout)
+- Signal handlers for graceful shutdown (SIGINT, SIGTERM)
+- Main processing loop (100 Hz for API requests + ROS2 spin)
+- Executable creation and installation (pj_ros_bridge_node)
+- Configuration logging and final statistics display
+- Complete server lifecycle management
 
 ## Important Design Decisions
 
@@ -532,8 +541,15 @@ pre-commit run -a
 # Test
 colcon test --packages-select pj_ros_bridge && colcon test-result --all
 
-# Run
-ros2 run pj_ros_bridge bridge_server
+# Run server (default configuration)
+ros2 run pj_ros_bridge pj_ros_bridge_node
+
+# Run server with custom parameters
+ros2 run pj_ros_bridge pj_ros_bridge_node --ros-args \
+  -p req_port:=5557 \
+  -p pub_port:=5558 \
+  -p publish_rate:=30.0 \
+  -p session_timeout:=15.0
 
 # Inspect rosbag
 ros2 bag info DATA/sample.mcap
@@ -546,6 +562,7 @@ ros2 bag play DATA/sample.mcap
 
 **Last Updated**: 2025-10-21
 **Project Phase**: Active Implementation
-**Current Focus**: Milestone 6 - Main Server Integration & Configuration
+**Current Focus**: Milestone 7 - Python Test Client Development
 **Test Status**: 55 unit tests passing (9 middleware, 4 discovery, 3 schema, 8 buffer, 10 subscription, 10 session, 11 serializer)
 **Linter Status**: All linters passing (cppcheck, lint_cmake, xmllint; uncrustify removed)
+**Executable**: pj_ros_bridge_node ready to run

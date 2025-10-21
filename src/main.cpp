@@ -1,0 +1,100 @@
+// Copyright 2025
+// ROS2 Bridge - Main Entry Point
+
+#include <csignal>
+#include <memory>
+#include <rclcpp/rclcpp.hpp>
+
+#include "pj_ros_bridge/bridge_server.hpp"
+#include "pj_ros_bridge/middleware/zmq_middleware.hpp"
+
+// Global flag for shutdown handling
+std::atomic<bool> g_shutdown_requested{false};
+
+void signal_handler(int signal) {
+  if (signal == SIGINT || signal == SIGTERM) {
+    RCLCPP_INFO(rclcpp::get_logger("pj_ros_bridge"), "Shutdown signal received");
+    g_shutdown_requested = true;
+  }
+}
+
+int main(int argc, char** argv) {
+  // Initialize ROS2
+  rclcpp::init(argc, argv);
+
+  // Create node
+  auto node = std::make_shared<rclcpp::Node>("pj_ros_bridge");
+
+  RCLCPP_INFO(node->get_logger(), "Starting pj_ros_bridge server...");
+
+  // Declare and get parameters
+  node->declare_parameter<int>("req_port", 5555);
+  node->declare_parameter<int>("pub_port", 5556);
+  node->declare_parameter<double>("publish_rate", 50.0);
+  node->declare_parameter<double>("session_timeout", 10.0);
+
+  int req_port = node->get_parameter("req_port").as_int();
+  int pub_port = node->get_parameter("pub_port").as_int();
+  double publish_rate = node->get_parameter("publish_rate").as_double();
+  double session_timeout = node->get_parameter("session_timeout").as_double();
+
+  RCLCPP_INFO(
+      node->get_logger(), "Configuration: REQ port=%d, PUB port=%d, publish_rate=%.1f Hz, session_timeout=%.1f s",
+      req_port, pub_port, publish_rate, session_timeout);
+
+  try {
+    // Create middleware
+    auto middleware = std::make_shared<pj_ros_bridge::ZmqMiddleware>();
+
+    // Create bridge server
+    auto bridge_server = std::make_shared<pj_ros_bridge::BridgeServer>(
+        node, middleware, req_port, pub_port, session_timeout, publish_rate);
+
+    // Initialize server
+    if (!bridge_server->initialize()) {
+      RCLCPP_ERROR(node->get_logger(), "Failed to initialize bridge server");
+      rclcpp::shutdown();
+      return 1;
+    }
+
+    RCLCPP_INFO(node->get_logger(), "Bridge server initialized successfully");
+    RCLCPP_INFO(
+        node->get_logger(), "Ready to accept connections on ports %d (API) and %d (data stream)", req_port, pub_port);
+
+    // Install signal handlers
+    std::signal(SIGINT, signal_handler);
+    std::signal(SIGTERM, signal_handler);
+
+    // Main loop
+    rclcpp::WallRate loop_rate(std::chrono::milliseconds(10));  // 100 Hz
+    while (rclcpp::ok() && !g_shutdown_requested) {
+      // Process any pending API requests
+      bridge_server->process_requests();
+
+      // Spin ROS2 callbacks (timers for session timeout and publishing)
+      rclcpp::spin_some(node);
+
+      // Sleep to maintain loop rate
+      loop_rate.sleep();
+    }
+
+    // Graceful shutdown
+    RCLCPP_INFO(node->get_logger(), "Shutting down bridge server...");
+
+    // Get final statistics
+    auto [total_messages, total_bytes] = bridge_server->get_publish_stats();
+    RCLCPP_INFO(
+        node->get_logger(), "Final statistics: %lu messages published, %lu bytes transmitted", total_messages,
+        total_bytes);
+
+    RCLCPP_INFO(node->get_logger(), "Bridge server shutdown complete");
+
+  } catch (const std::exception& e) {
+    RCLCPP_ERROR(node->get_logger(), "Exception in main: %s", e.what());
+    rclcpp::shutdown();
+    return 1;
+  }
+
+  rclcpp::shutdown();
+  return 0;
+}

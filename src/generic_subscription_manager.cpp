@@ -41,7 +41,7 @@ bool GenericSubscriptionManager::subscribe(
       callback(topic_name, msg, receive_time);
     };
 
-    auto subscription = node_->create_generic_subscription(topic_name, topic_type, rclcpp::QoS(10), sub_callback);
+    auto subscription = node_->create_generic_subscription(topic_name, topic_type, rclcpp::QoS(100), sub_callback);
 
     SubscriptionInfo info;
     info.subscription = subscription;

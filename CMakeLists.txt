@@ -59,6 +59,24 @@ ament_target_dependencies(${PROJECT_NAME}_lib
   rclcpp
 )
 
+# Create executable
+add_executable(${PROJECT_NAME}_node
+  src/main.cpp
+)
+
+target_link_libraries(${PROJECT_NAME}_node
+  ${PROJECT_NAME}_lib
+)
+
+ament_target_dependencies(${PROJECT_NAME}_node
+  rclcpp
+)
+
+# Install executable
+install(TARGETS ${PROJECT_NAME}_node
+  DESTINATION lib/${PROJECT_NAME}
+)
+
 # Install headers
 install(
   DIRECTORY include/
