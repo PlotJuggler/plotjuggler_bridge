@@ -15,6 +15,7 @@ list(APPEND CMAKE_MODULE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
 
 # Find ROS2 dependencies
 find_package(ament_cmake REQUIRED)
+find_package(ament_index_cpp REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(rosbag2_cpp REQUIRED)
 find_package(rosidl_typesupport_introspection_cpp REQUIRED)
@@ -28,6 +29,16 @@ include_directories(
   include
   ${CMAKE_CURRENT_SOURCE_DIR}/3rdparty
 )
+
+##################################################################################
+
+# ----  Trick to pass an absolute path to C++ code  ----
+get_filename_component(DATA_PATH "${CMAKE_CURRENT_LIST_DIR}/DATA" ABSOLUTE)
+configure_file(data_path.hpp.in "${CMAKE_BINARY_DIR}/include/data_path.hpp" @ONLY)
+add_library(data_path INTERFACE IMPORTED)
+target_include_directories(data_path INTERFACE ${CMAKE_BINARY_DIR}/include)
+
+##################################################################################
 
 # Create library
 add_library(${PROJECT_NAME}_lib
@@ -45,6 +56,7 @@ target_link_libraries(${PROJECT_NAME}_lib
 )
 
 ament_target_dependencies(${PROJECT_NAME}_lib
+  ament_index_cpp
   rclcpp
   rosbag2_cpp
   rosidl_typesupport_introspection_cpp
@@ -88,6 +100,7 @@ if(BUILD_TESTING)
 
   target_link_libraries(${PROJECT_NAME}_tests
     ${PROJECT_NAME}_lib
+    data_path
   )
 
   ament_target_dependencies(${PROJECT_NAME}_tests

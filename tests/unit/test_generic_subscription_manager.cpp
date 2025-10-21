@@ -13,23 +13,22 @@
 // limitations under the License.
 
 #include <gtest/gtest.h>
-#include "pj_ros_bridge/generic_subscription_manager.hpp"
+
 #include <rclcpp/rclcpp.hpp>
+
+#include "pj_ros_bridge/generic_subscription_manager.hpp"
 
 using namespace pj_ros_bridge;
 
-class GenericSubscriptionManagerTest : public ::testing::Test
-{
-protected:
-  void SetUp() override
-  {
+class GenericSubscriptionManagerTest : public ::testing::Test {
+ protected:
+  void SetUp() override {
     rclcpp::init(0, nullptr);
     node_ = std::make_shared<rclcpp::Node>("test_subscription_manager");
     manager_ = std::make_unique<GenericSubscriptionManager>(node_);
   }
 
-  void TearDown() override
-  {
+  void TearDown() override {
     manager_.reset();
     node_.reset();
     rclcpp::shutdown();
@@ -39,13 +38,9 @@ protected:
   std::unique_ptr<GenericSubscriptionManager> manager_;
 };
 
-TEST_F(GenericSubscriptionManagerTest, Subscribe)
-{
+TEST_F(GenericSubscriptionManagerTest, Subscribe) {
   bool callback_called = false;
-  auto callback = [&callback_called](
-    const std::string&,
-    const std::shared_ptr<rclcpp::SerializedMessage>&,
-    uint64_t) {
+  auto callback = [&callback_called](const std::string&, const std::shared_ptr<rclcpp::SerializedMessage>&, uint64_t) {
     callback_called = true;
   };
 
@@ -56,8 +51,7 @@ TEST_F(GenericSubscriptionManagerTest, Subscribe)
   EXPECT_EQ(manager_->get_reference_count("/test_topic"), 1);
 }
 
-TEST_F(GenericSubscriptionManagerTest, SubscribeTwiceIncreasesReferenceCount)
-{
+TEST_F(GenericSubscriptionManagerTest, SubscribeTwiceIncreasesReferenceCount) {
   auto callback1 = [](const std::string&, const std::shared_ptr<rclcpp::SerializedMessage>&, uint64_t) {};
   auto callback2 = [](const std::string&, const std::shared_ptr<rclcpp::SerializedMessage>&, uint64_t) {};
 
@@ -67,8 +61,7 @@ TEST_F(GenericSubscriptionManagerTest, SubscribeTwiceIncreasesReferenceCount)
   EXPECT_EQ(manager_->get_reference_count("/test_topic"), 2);
 }
 
-TEST_F(GenericSubscriptionManagerTest, Unsubscribe)
-{
+TEST_F(GenericSubscriptionManagerTest, Unsubscribe) {
   auto callback = [](const std::string&, const std::shared_ptr<rclcpp::SerializedMessage>&, uint64_t) {};
 
   manager_->subscribe("/test_topic", "std_msgs/msg/String", callback);
@@ -80,8 +73,7 @@ TEST_F(GenericSubscriptionManagerTest, Unsubscribe)
   EXPECT_FALSE(manager_->is_subscribed("/test_topic"));
 }
 
-TEST_F(GenericSubscriptionManagerTest, UnsubscribeDecrementsReferenceCount)
-{
+TEST_F(GenericSubscriptionManagerTest, UnsubscribeDecrementsReferenceCount) {
   auto callback = [](const std::string&, const std::shared_ptr<rclcpp::SerializedMessage>&, uint64_t) {};
 
   manager_->subscribe("/test_topic", "std_msgs/msg/String", callback);
@@ -100,15 +92,13 @@ TEST_F(GenericSubscriptionManagerTest, UnsubscribeDecrementsReferenceCount)
   EXPECT_FALSE(manager_->is_subscribed("/test_topic"));
 }
 
-TEST_F(GenericSubscriptionManagerTest, UnsubscribeNonExistentTopic)
-{
+TEST_F(GenericSubscriptionManagerTest, UnsubscribeNonExistentTopic) {
   bool result = manager_->unsubscribe("/non_existent_topic");
 
   EXPECT_FALSE(result);
 }
 
-TEST_F(GenericSubscriptionManagerTest, IsSubscribed)
-{
+TEST_F(GenericSubscriptionManagerTest, IsSubscribed) {
   auto callback = [](const std::string&, const std::shared_ptr<rclcpp::SerializedMessage>&, uint64_t) {};
 
   EXPECT_FALSE(manager_->is_subscribed("/test_topic"));
@@ -118,13 +108,11 @@ TEST_F(GenericSubscriptionManagerTest, IsSubscribed)
   EXPECT_TRUE(manager_->is_subscribed("/test_topic"));
 }
 
-TEST_F(GenericSubscriptionManagerTest, GetReferenceCountForNonExistentTopic)
-{
+TEST_F(GenericSubscriptionManagerTest, GetReferenceCountForNonExistentTopic) {
   EXPECT_EQ(manager_->get_reference_count("/non_existent_topic"), 0);
 }
 
-TEST_F(GenericSubscriptionManagerTest, UnsubscribeAll)
-{
+TEST_F(GenericSubscriptionManagerTest, UnsubscribeAll) {
   auto callback = [](const std::string&, const std::shared_ptr<rclcpp::SerializedMessage>&, uint64_t) {};
 
   manager_->subscribe("/topic1", "std_msgs/msg/String", callback);
@@ -142,8 +130,7 @@ TEST_F(GenericSubscriptionManagerTest, UnsubscribeAll)
   EXPECT_FALSE(manager_->is_subscribed("/topic3"));
 }
 
-TEST_F(GenericSubscriptionManagerTest, SubscribeWithInvalidType)
-{
+TEST_F(GenericSubscriptionManagerTest, SubscribeWithInvalidType) {
   auto callback = [](const std::string&, const std::shared_ptr<rclcpp::SerializedMessage>&, uint64_t) {};
 
   // Try to subscribe with an invalid message type
@@ -153,8 +140,7 @@ TEST_F(GenericSubscriptionManagerTest, SubscribeWithInvalidType)
   EXPECT_FALSE(manager_->is_subscribed("/test_topic"));
 }
 
-TEST_F(GenericSubscriptionManagerTest, MultipleTopicsIndependent)
-{
+TEST_F(GenericSubscriptionManagerTest, MultipleTopicsIndependent) {
   auto callback = [](const std::string&, const std::shared_ptr<rclcpp::SerializedMessage>&, uint64_t) {};
 
   manager_->subscribe("/topic1", "std_msgs/msg/String", callback);

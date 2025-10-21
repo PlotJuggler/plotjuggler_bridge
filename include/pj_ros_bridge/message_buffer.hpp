@@ -15,22 +15,20 @@
 #ifndef PJ_ROS_BRIDGE__MESSAGE_BUFFER_HPP_
 #define PJ_ROS_BRIDGE__MESSAGE_BUFFER_HPP_
 
-#include <rclcpp/rclcpp.hpp>
 #include <chrono>
 #include <deque>
 #include <mutex>
+#include <rclcpp/rclcpp.hpp>
 #include <string>
 #include <unordered_map>
 #include <vector>
 
-namespace pj_ros_bridge
-{
+namespace pj_ros_bridge {
 
 /**
  * @brief Structure to hold a buffered message
  */
-struct BufferedMessage
-{
+struct BufferedMessage {
   std::string topic_name;
   uint64_t publish_timestamp_ns;  // Nanoseconds since epoch
   uint64_t receive_timestamp_ns;  // Nanoseconds since epoch
@@ -45,9 +43,8 @@ struct BufferedMessage
  *
  * Thread safety: All public methods are thread-safe
  */
-class MessageBuffer
-{
-public:
+class MessageBuffer {
+ public:
   MessageBuffer();
 
   /**
@@ -61,10 +58,8 @@ public:
    * @param data Serialized message data
    */
   void add_message(
-    const std::string& topic_name,
-    uint64_t publish_timestamp_ns,
-    uint64_t receive_timestamp_ns,
-    const std::vector<uint8_t>& data);
+      const std::string& topic_name, uint64_t publish_timestamp_ns, uint64_t receive_timestamp_ns,
+      const std::vector<uint8_t>& data);
 
   /**
    * @brief Get all messages received since last read
@@ -93,7 +88,7 @@ public:
    */
   size_t size() const;
 
-private:
+ private:
   mutable std::mutex mutex_;
 
   // Buffer per topic

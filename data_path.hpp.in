@@ -1,0 +1,7 @@
+#pragma once
+
+#include <string>
+
+namespace Test {
+static const std::string DATA_PATH = "@DATA_PATH@/";
+}  // namespace Test

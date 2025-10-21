@@ -15,14 +15,13 @@
 #ifndef PJ_ROS_BRIDGE__MIDDLEWARE__ZMQ_MIDDLEWARE_HPP_
 #define PJ_ROS_BRIDGE__MIDDLEWARE__ZMQ_MIDDLEWARE_HPP_
 
-#include "pj_ros_bridge/middleware/middleware_interface.hpp"
-
-#include <zmq.hpp>
 #include <memory>
 #include <mutex>
+#include <zmq.hpp>
 
-namespace pj_ros_bridge
-{
+#include "pj_ros_bridge/middleware/middleware_interface.hpp"
+
+namespace pj_ros_bridge {
 
 /**
  * @brief ZeroMQ implementation of MiddlewareInterface
@@ -33,9 +32,8 @@ namespace pj_ros_bridge
  *
  * Thread safety: All public methods are thread-safe
  */
-class ZmqMiddleware : public MiddlewareInterface
-{
-public:
+class ZmqMiddleware : public MiddlewareInterface {
+ public:
   ZmqMiddleware();
   ~ZmqMiddleware() override;
 
@@ -53,7 +51,7 @@ public:
   std::string get_client_identity() const override;
   bool is_ready() const override;
 
-private:
+ private:
   std::unique_ptr<zmq::context_t> context_;
   std::unique_ptr<zmq::socket_t> rep_socket_;
   std::unique_ptr<zmq::socket_t> pub_socket_;

@@ -13,82 +13,106 @@
 // limitations under the License.
 
 #include <gtest/gtest.h>
-#include "pj_ros_bridge/schema_extractor.hpp"
 
-#include <nlohmann/json.hpp>
+#include <fstream>
+#include <sstream>
+
+#include "data_path.hpp"
+#include "pj_ros_bridge/schema_extractor.hpp"
 
 using namespace pj_ros_bridge;
 
-class SchemaExtractorTest : public ::testing::Test
-{
-protected:
-  void SetUp() override
-  {
+// Helper function to read expected schema from file
+std::string read_expected_schema(const std::string& filename) {
+  std::string filepath = Test::DATA_PATH + filename;
+  std::ifstream file(filepath);
+  if (!file.is_open()) {
+    return "";
+  }
+  std::stringstream buffer;
+  buffer << file.rdbuf();
+  return buffer.str();
+}
+
+class SchemaExtractorTest : public ::testing::Test {
+ protected:
+  void SetUp() override {
     extractor_ = std::make_unique<SchemaExtractor>();
   }
 
-  void TearDown() override
-  {
+  void TearDown() override {
     extractor_.reset();
   }
 
   std::unique_ptr<SchemaExtractor> extractor_;
 };
 
-TEST_F(SchemaExtractorTest, ExtractSchemaForStdMsgsString)
-{
-  // std_msgs/String should be available in any ROS2 installation
-  auto schema = extractor_->extract_schema("std_msgs/msg/String");
+TEST_F(SchemaExtractorTest, PointCloud2SchemaMatchesExpected) {
+  // Read expected schema from file
+  std::string expected = read_expected_schema("sensor_msgs-pointcloud2.txt");
+  ASSERT_FALSE(expected.empty()) << "Failed to read expected schema file";
 
-  // Schema should not be null
-  EXPECT_FALSE(schema.is_null());
+  // Extract actual schema
+  std::string actual = extractor_->get_message_definition("sensor_msgs/msg/PointCloud2");
+  ASSERT_FALSE(actual.empty()) << "Failed to extract schema for sensor_msgs/msg/PointCloud2";
 
-  if (!schema.is_null()) {
-    // Should have properties
-    EXPECT_TRUE(schema.contains("properties"));
+  // Remove comments from both schemas for comparison
+  std::string expected_no_comments = remove_comments_from_schema(expected);
+  std::string actual_no_comments = remove_comments_from_schema(actual);
 
-    // std_msgs/String has a "data" field
-    if (schema.contains("properties")) {
-      EXPECT_TRUE(schema["properties"].contains("data"));
-    }
+  // Compare schemas without comments
+  EXPECT_EQ(actual_no_comments, expected_no_comments) << "Schema mismatch for sensor_msgs/msg/PointCloud2";
+
+  if (actual_no_comments != expected_no_comments) {
+    // For debugging, print both schemas without comments
+    std::cout << "Expected Schema (no comments):\n" << expected_no_comments << std::endl;
+    std::cout << "Actual Schema (no comments):\n" << actual_no_comments << std::endl;
   }
 }
 
-TEST_F(SchemaExtractorTest, GetSchemaJsonReturnsString)
-{
-  auto json_str = extractor_->get_schema_json("std_msgs/msg/String");
+TEST_F(SchemaExtractorTest, ImuSchemaMatchesExpected) {
+  // Read expected schema from file
+  std::string expected = read_expected_schema("sensor_msgs-imu.txt");
+  ASSERT_FALSE(expected.empty()) << "Failed to read expected schema file";
 
-  // Should return a non-empty string for valid message type
-  EXPECT_FALSE(json_str.empty());
+  // Extract actual schema
+  std::string actual = extractor_->get_message_definition("sensor_msgs/msg/Imu");
+  ASSERT_FALSE(actual.empty()) << "Failed to extract schema for sensor_msgs/msg/Imu";
 
-  // Should be valid JSON
-  if (!json_str.empty()) {
-    EXPECT_NO_THROW({
-      auto parsed = nlohmann::json::parse(json_str);
-    });
+  // Remove comments from both schemas for comparison
+  std::string expected_no_comments = remove_comments_from_schema(expected);
+  std::string actual_no_comments = remove_comments_from_schema(actual);
+
+  // Compare schemas without comments
+  EXPECT_EQ(actual_no_comments, expected_no_comments) << "Schema mismatch for sensor_msgs/msg/Imu";
+
+  if (actual_no_comments != expected_no_comments) {
+    // For debugging, print both schemas without comments
+    std::cout << "Expected Schema (no comments):\n" << expected_no_comments << std::endl;
+    std::cout << "Actual Schema (no comments):\n" << actual_no_comments << std::endl;
   }
 }
 
-TEST_F(SchemaExtractorTest, InvalidMessageTypeReturnsNull)
-{
-  auto schema = extractor_->extract_schema("invalid/msg/Type");
+TEST_F(SchemaExtractorTest, PoseWithCovarianceStampedSchemaMatchesExpected) {
+  // Read expected schema from file
+  std::string expected = read_expected_schema("pose_with_covariance_stamped.txt");
+  ASSERT_FALSE(expected.empty()) << "Failed to read expected schema file";
 
-  // Should return null for invalid type
-  EXPECT_TRUE(schema.is_null());
-}
+  // Extract actual schema
+  std::string actual = extractor_->get_message_definition("geometry_msgs/msg/PoseWithCovarianceStamped");
+  ASSERT_FALSE(actual.empty()) << "Failed to extract schema for geometry_msgs/msg/PoseWithCovarianceStamped";
 
-TEST_F(SchemaExtractorTest, InvalidMessageTypeReturnsEmptyString)
-{
-  auto json_str = extractor_->get_schema_json("invalid/msg/Type");
+  // Remove comments from both schemas for comparison
+  std::string expected_no_comments = remove_comments_from_schema(expected);
+  std::string actual_no_comments = remove_comments_from_schema(actual);
 
-  // Should return empty string for invalid type
-  EXPECT_TRUE(json_str.empty());
-}
+  // Compare schemas without comments
+  EXPECT_EQ(actual_no_comments, expected_no_comments)
+      << "Schema mismatch for geometry_msgs/msg/PoseWithCovarianceStamped";
 
-TEST_F(SchemaExtractorTest, MalformedMessageTypeReturnsNull)
-{
-  // Missing /msg/ part
-  auto schema = extractor_->extract_schema("std_msgs/String");
-
-  EXPECT_TRUE(schema.is_null());
+  if (actual_no_comments != expected_no_comments) {
+    // For debugging, print both schemas without comments
+    std::cout << "Expected Schema (no comments):\n" << expected_no_comments << std::endl;
+    std::cout << "Actual Schema (no comments):\n" << actual_no_comments << std::endl;
+  }
 }

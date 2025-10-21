@@ -13,25 +13,23 @@
 // limitations under the License.
 
 #include <gtest/gtest.h>
-#include "pj_ros_bridge/topic_discovery.hpp"
 
-#include <rclcpp/rclcpp.hpp>
 #include <memory>
+#include <rclcpp/rclcpp.hpp>
+
+#include "pj_ros_bridge/topic_discovery.hpp"
 
 using namespace pj_ros_bridge;
 
-class TopicDiscoveryTest : public ::testing::Test
-{
-protected:
-  void SetUp() override
-  {
+class TopicDiscoveryTest : public ::testing::Test {
+ protected:
+  void SetUp() override {
     rclcpp::init(0, nullptr);
     node_ = rclcpp::Node::make_shared("test_topic_discovery_node");
     discovery_ = std::make_unique<TopicDiscovery>(node_);
   }
 
-  void TearDown() override
-  {
+  void TearDown() override {
     discovery_.reset();
     node_.reset();
     rclcpp::shutdown();
@@ -41,28 +39,24 @@ protected:
   std::unique_ptr<TopicDiscovery> discovery_;
 };
 
-TEST_F(TopicDiscoveryTest, DiscoverTopicsReturnsVector)
-{
+TEST_F(TopicDiscoveryTest, DiscoverTopicsReturnsVector) {
   auto topics = discovery_->discover_topics();
   // Should return a vector (may be empty if no topics are publishing)
   EXPECT_TRUE(topics.empty() || !topics.empty());
 }
 
-TEST_F(TopicDiscoveryTest, GetTopicsAfterDiscovery)
-{
+TEST_F(TopicDiscoveryTest, GetTopicsAfterDiscovery) {
   discovery_->discover_topics();
   auto topics = discovery_->get_topics();
   // Should return the cached topics
   EXPECT_TRUE(topics.empty() || !topics.empty());
 }
 
-TEST_F(TopicDiscoveryTest, RefreshSucceeds)
-{
+TEST_F(TopicDiscoveryTest, RefreshSucceeds) {
   EXPECT_TRUE(discovery_->refresh());
 }
 
-TEST_F(TopicDiscoveryTest, FilteredTopicsNotIncluded)
-{
+TEST_F(TopicDiscoveryTest, FilteredTopicsNotIncluded) {
   // The discovery should filter out system topics like /rosout
   auto topics = discovery_->discover_topics();
 

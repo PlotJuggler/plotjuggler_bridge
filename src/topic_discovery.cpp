@@ -14,16 +14,11 @@
 
 #include "pj_ros_bridge/topic_discovery.hpp"
 
-namespace pj_ros_bridge
-{
+namespace pj_ros_bridge {
 
-TopicDiscovery::TopicDiscovery(rclcpp::Node::SharedPtr node)
-: node_(node)
-{
-}
+TopicDiscovery::TopicDiscovery(rclcpp::Node::SharedPtr node) : node_(node) {}
 
-std::vector<TopicInfo> TopicDiscovery::discover_topics()
-{
+std::vector<TopicInfo> TopicDiscovery::discover_topics() {
   topics_.clear();
 
   auto topic_names_and_types = node_->get_topic_names_and_types();
@@ -46,13 +41,11 @@ std::vector<TopicInfo> TopicDiscovery::discover_topics()
   return topics_;
 }
 
-std::vector<TopicInfo> TopicDiscovery::get_topics() const
-{
+std::vector<TopicInfo> TopicDiscovery::get_topics() const {
   return topics_;
 }
 
-bool TopicDiscovery::refresh()
-{
+bool TopicDiscovery::refresh() {
   try {
     discover_topics();
     return true;
@@ -61,14 +54,9 @@ bool TopicDiscovery::refresh()
   }
 }
 
-bool TopicDiscovery::should_filter_topic(const std::string& topic_name) const
-{
+bool TopicDiscovery::should_filter_topic(const std::string& topic_name) const {
   // Filter out ROS2 system topics
-  static const std::vector<std::string> kSystemTopics = {
-    "/rosout",
-    "/parameter_events",
-    "/robot_description"
-  };
+  static const std::vector<std::string> kSystemTopics = {"/rosout", "/parameter_events", "/robot_description"};
 
   for (const auto& system_topic : kSystemTopics) {
     if (topic_name == system_topic) {

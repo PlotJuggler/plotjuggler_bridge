@@ -15,43 +15,36 @@
 #ifndef PJ_ROS_BRIDGE__SCHEMA_EXTRACTOR_HPP_
 #define PJ_ROS_BRIDGE__SCHEMA_EXTRACTOR_HPP_
 
-#include <nlohmann/json.hpp>
-#include <string>
 #include <memory>
+#include <set>
+#include <sstream>
+#include <string>
 
-namespace pj_ros_bridge
-{
+namespace pj_ros_bridge {
 
 /**
- * @brief Extracts message schemas using runtime introspection
+ * @brief Extracts message definitions in ROS2 interface text format
  *
- * This class uses rosidl_typesupport_introspection_cpp to extract
- * message schemas at runtime without compile-time knowledge of types.
+ * This class reads .msg files from ROS2 packages and recursively expands
+ * nested message types to produce the full message definition text.
  *
  * Thread safety: Thread-safe for concurrent reads of different types.
  */
-class SchemaExtractor
-{
-public:
+class SchemaExtractor {
+ public:
   SchemaExtractor() = default;
 
   /**
-   * @brief Extract schema for a given message type
+   * @brief Get message definition text
+   *
+   * Returns the message definition in ROS2 interface format (same as ros2 interface show).
    *
    * @param message_type Full message type name (e.g., "std_msgs/msg/String")
-   * @return JSON object containing the schema, or null on failure
+   * @return Message definition text, or empty string on failure
    */
-  nlohmann::json extract_schema(const std::string& message_type);
+  std::string get_message_definition(const std::string& message_type);
 
-  /**
-   * @brief Get schema as JSON string
-   *
-   * @param message_type Full message type name
-   * @return JSON string representation of schema, or empty string on failure
-   */
-  std::string get_schema_json(const std::string& message_type);
-
-private:
+ private:
   /**
    * @brief Convert ROS2 type string to library and type name
    *
@@ -63,19 +56,27 @@ private:
    * @param type_name Output: type name
    * @return true if conversion successful, false otherwise
    */
-  bool parse_message_type(
-    const std::string& message_type,
-    std::string& library_name,
-    std::string& type_name) const;
+  bool parse_message_type(const std::string& message_type, std::string& library_name, std::string& type_name) const;
 
   /**
-   * @brief Build JSON schema from introspection data
+   * @brief Recursively build message definition text from .msg files
    *
-   * @param type_support Pointer to type support introspection data
-   * @return JSON object containing the schema
+   * Reads .msg files from /opt/ros/DISTRO/share/{package}/msg/ and recursively
+   * expands nested message types with ================MSG: separators.
+   *
+   * @param package_name Package name (e.g., "sensor_msgs")
+   * @param type_name Type name (e.g., "PointCloud2")
+   * @param output Output stream to write the definition to
+   * @param processed_types Set of already processed types to avoid duplicates
+   * @param is_root Whether this is the root type (no separator)
+   * @return true if successful, false otherwise
    */
-  nlohmann::json build_schema_from_introspection(const void* type_support);
+  bool build_message_definition_recursive(
+      const std::string& package_name, const std::string& type_name, std::ostringstream& output,
+      std::set<std::string>& processed_types, bool is_root) const;
 };
+
+std::string remove_comments_from_schema(const std::string& schema);
 
 }  // namespace pj_ros_bridge
 

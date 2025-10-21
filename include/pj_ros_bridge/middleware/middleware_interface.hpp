@@ -20,8 +20,7 @@
 #include <string>
 #include <vector>
 
-namespace pj_ros_bridge
-{
+namespace pj_ros_bridge {
 
 /**
  * @brief Abstract interface for middleware implementations
@@ -31,9 +30,8 @@ namespace pj_ros_bridge
  *
  * Thread safety: Implementations should be thread-safe for concurrent calls.
  */
-class MiddlewareInterface
-{
-public:
+class MiddlewareInterface {
+ public:
   virtual ~MiddlewareInterface() = default;
 
   /**

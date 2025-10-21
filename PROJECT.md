@@ -57,7 +57,7 @@ We will serialize this ourself, no need to use any external library.
 
 We will use ZeroMQ, but we will include an **abstract class** to allow us to change this to a different middleware in the future, if we need to.
 
-We will use a REQ-REP pattenr for the API between trhe client and the server, and a PUB-SUB for the aggregated messages at 50 Hz published by the server. 
+We will use a REQ-REP pattenr for the API between trhe client and the server, and a PUB-SUB for the aggregated messages at 50 Hz published by the server.
 
 ## How to otbain the schemas
 
@@ -72,5 +72,3 @@ During the development, we want to test periodically some feature.
 
 We will play a rosbag to start publishing topics that the server can subscribe to. We will use a dumy client written in Python, for simplicity.
 The name of the topics to subscribe to will be passed to the client as command line arguments.
-
-

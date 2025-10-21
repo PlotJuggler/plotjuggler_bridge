@@ -13,78 +13,68 @@
 // limitations under the License.
 
 #include <gtest/gtest.h>
-#include "pj_ros_bridge/middleware/zmq_middleware.hpp"
 
 #include <chrono>
 #include <thread>
 
+#include "pj_ros_bridge/middleware/zmq_middleware.hpp"
+
 using namespace pj_ros_bridge;
 
-class MiddlewareTest : public ::testing::Test
-{
-protected:
-  void SetUp() override
-  {
+class MiddlewareTest : public ::testing::Test {
+ protected:
+  void SetUp() override {
     middleware_ = std::make_unique<ZmqMiddleware>();
   }
 
-  void TearDown() override
-  {
+  void TearDown() override {
     middleware_.reset();
   }
 
   std::unique_ptr<ZmqMiddleware> middleware_;
 };
 
-TEST_F(MiddlewareTest, InitializationSuccess)
-{
+TEST_F(MiddlewareTest, InitializationSuccess) {
   EXPECT_FALSE(middleware_->is_ready());
   EXPECT_TRUE(middleware_->initialize(15555, 15556));
   EXPECT_TRUE(middleware_->is_ready());
 }
 
-TEST_F(MiddlewareTest, InitializationTwiceFails)
-{
+TEST_F(MiddlewareTest, InitializationTwiceFails) {
   EXPECT_TRUE(middleware_->initialize(15555, 15556));
   EXPECT_FALSE(middleware_->initialize(15555, 15556));  // Second init should fail
 }
 
-TEST_F(MiddlewareTest, ShutdownWithoutInitialization)
-{
+TEST_F(MiddlewareTest, ShutdownWithoutInitialization) {
   // Should not crash
   middleware_->shutdown();
   EXPECT_FALSE(middleware_->is_ready());
 }
 
-TEST_F(MiddlewareTest, ShutdownAfterInitialization)
-{
+TEST_F(MiddlewareTest, ShutdownAfterInitialization) {
   EXPECT_TRUE(middleware_->initialize(15555, 15556));
   EXPECT_TRUE(middleware_->is_ready());
   middleware_->shutdown();
   EXPECT_FALSE(middleware_->is_ready());
 }
 
-TEST_F(MiddlewareTest, ReceiveRequestWithoutInitialization)
-{
+TEST_F(MiddlewareTest, ReceiveRequestWithoutInitialization) {
   std::vector<uint8_t> data;
   std::string client_id;
   EXPECT_FALSE(middleware_->receive_request(data, client_id));
 }
 
-TEST_F(MiddlewareTest, SendReplyWithoutInitialization)
-{
+TEST_F(MiddlewareTest, SendReplyWithoutInitialization) {
   std::vector<uint8_t> data = {1, 2, 3};
   EXPECT_FALSE(middleware_->send_reply(data));
 }
 
-TEST_F(MiddlewareTest, PublishDataWithoutInitialization)
-{
+TEST_F(MiddlewareTest, PublishDataWithoutInitialization) {
   std::vector<uint8_t> data = {1, 2, 3};
   EXPECT_FALSE(middleware_->publish_data(data));
 }
 
-TEST_F(MiddlewareTest, PublishDataAfterInitialization)
-{
+TEST_F(MiddlewareTest, PublishDataAfterInitialization) {
   ASSERT_TRUE(middleware_->initialize(15555, 15556));
 
   // Give sockets time to bind
@@ -94,8 +84,7 @@ TEST_F(MiddlewareTest, PublishDataAfterInitialization)
   EXPECT_TRUE(middleware_->publish_data(data));
 }
 
-TEST_F(MiddlewareTest, ReceiveRequestTimeout)
-{
+TEST_F(MiddlewareTest, ReceiveRequestTimeout) {
   ASSERT_TRUE(middleware_->initialize(15555, 15556));
 
   // Give sockets time to bind
@@ -108,8 +97,7 @@ TEST_F(MiddlewareTest, ReceiveRequestTimeout)
   EXPECT_FALSE(middleware_->receive_request(data, client_id));
 }
 
-int main(int argc, char** argv)
-{
+int main(int argc, char** argv) {
   testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();
 }

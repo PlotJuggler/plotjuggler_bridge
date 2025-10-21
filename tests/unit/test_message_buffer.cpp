@@ -13,20 +13,20 @@
 // limitations under the License.
 
 #include <gtest/gtest.h>
-#include "pj_ros_bridge/message_buffer.hpp"
-#include <thread>
+
 #include <chrono>
+#include <thread>
+
+#include "pj_ros_bridge/message_buffer.hpp"
 
 using namespace pj_ros_bridge;
 
-class MessageBufferTest : public ::testing::Test
-{
-protected:
+class MessageBufferTest : public ::testing::Test {
+ protected:
   MessageBuffer buffer_;
 };
 
-TEST_F(MessageBufferTest, AddAndGetMessages)
-{
+TEST_F(MessageBufferTest, AddAndGetMessages) {
   std::vector<uint8_t> data1 = {1, 2, 3};
   std::vector<uint8_t> data2 = {4, 5, 6};
 
@@ -57,8 +57,7 @@ TEST_F(MessageBufferTest, AddAndGetMessages)
   EXPECT_TRUE(found_topic2);
 }
 
-TEST_F(MessageBufferTest, GetNewMessagesOnlyReturnsNew)
-{
+TEST_F(MessageBufferTest, GetNewMessagesOnlyReturnsNew) {
   std::vector<uint8_t> data1 = {1, 2, 3};
   std::vector<uint8_t> data2 = {4, 5, 6};
 
@@ -89,8 +88,7 @@ TEST_F(MessageBufferTest, GetNewMessagesOnlyReturnsNew)
   EXPECT_EQ(messages2[0].topic_name, "topic2");
 }
 
-TEST_F(MessageBufferTest, GetNewMessagesByTopic)
-{
+TEST_F(MessageBufferTest, GetNewMessagesByTopic) {
   std::vector<uint8_t> data1 = {1, 2, 3};
   std::vector<uint8_t> data2 = {4, 5, 6};
   std::vector<uint8_t> data3 = {7, 8, 9};
@@ -114,15 +112,18 @@ TEST_F(MessageBufferTest, GetNewMessagesByTopic)
   bool found_data1 = false;
   bool found_data3 = false;
   for (const auto& msg : messages) {
-    if (msg.data == data1) found_data1 = true;
-    if (msg.data == data3) found_data3 = true;
+    if (msg.data == data1) {
+      found_data1 = true;
+    }
+    if (msg.data == data3) {
+      found_data3 = true;
+    }
   }
   EXPECT_TRUE(found_data1);
   EXPECT_TRUE(found_data3);
 }
 
-TEST_F(MessageBufferTest, Clear)
-{
+TEST_F(MessageBufferTest, Clear) {
   std::vector<uint8_t> data = {1, 2, 3};
 
   auto now = std::chrono::system_clock::now();
@@ -141,8 +142,7 @@ TEST_F(MessageBufferTest, Clear)
   EXPECT_EQ(messages.size(), 0);
 }
 
-TEST_F(MessageBufferTest, Size)
-{
+TEST_F(MessageBufferTest, Size) {
   std::vector<uint8_t> data = {1, 2, 3};
 
   auto now = std::chrono::system_clock::now();
@@ -161,8 +161,7 @@ TEST_F(MessageBufferTest, Size)
   EXPECT_EQ(buffer_.size(), 3);
 }
 
-TEST_F(MessageBufferTest, AutoCleanupOldMessages)
-{
+TEST_F(MessageBufferTest, AutoCleanupOldMessages) {
   std::vector<uint8_t> data = {1, 2, 3};
 
   // Get current time
@@ -185,8 +184,7 @@ TEST_F(MessageBufferTest, AutoCleanupOldMessages)
   EXPECT_EQ(messages[0].topic_name, "topic2");
 }
 
-TEST_F(MessageBufferTest, CleanupPreservesRecentMessages)
-{
+TEST_F(MessageBufferTest, CleanupPreservesRecentMessages) {
   std::vector<uint8_t> data = {1, 2, 3};
 
   // Get current time
@@ -212,8 +210,7 @@ TEST_F(MessageBufferTest, CleanupPreservesRecentMessages)
   EXPECT_EQ(messages.size(), 2);
 }
 
-TEST_F(MessageBufferTest, ThreadSafety)
-{
+TEST_F(MessageBufferTest, ThreadSafety) {
   std::vector<uint8_t> data = {1, 2, 3};
   const int num_threads = 10;
   const int messages_per_thread = 100;

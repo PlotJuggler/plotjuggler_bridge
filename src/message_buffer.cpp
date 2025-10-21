@@ -14,20 +14,13 @@
 
 #include "pj_ros_bridge/message_buffer.hpp"
 
-namespace pj_ros_bridge
-{
+namespace pj_ros_bridge {
 
-MessageBuffer::MessageBuffer()
-: last_read_timestamp_ns_(get_current_time_ns())
-{
-}
+MessageBuffer::MessageBuffer() : last_read_timestamp_ns_(get_current_time_ns()) {}
 
 void MessageBuffer::add_message(
-  const std::string& topic_name,
-  uint64_t publish_timestamp_ns,
-  uint64_t receive_timestamp_ns,
-  const std::vector<uint8_t>& data)
-{
+    const std::string& topic_name, uint64_t publish_timestamp_ns, uint64_t receive_timestamp_ns,
+    const std::vector<uint8_t>& data) {
   std::lock_guard<std::mutex> lock(mutex_);
 
   // Cleanup old messages first
@@ -43,8 +36,7 @@ void MessageBuffer::add_message(
   topic_buffers_[topic_name].push_back(std::move(msg));
 }
 
-std::vector<BufferedMessage> MessageBuffer::get_new_messages()
-{
+std::vector<BufferedMessage> MessageBuffer::get_new_messages() {
   std::lock_guard<std::mutex> lock(mutex_);
 
   std::vector<BufferedMessage> new_messages;
@@ -64,8 +56,7 @@ std::vector<BufferedMessage> MessageBuffer::get_new_messages()
   return new_messages;
 }
 
-std::vector<BufferedMessage> MessageBuffer::get_new_messages(const std::string& topic_name)
-{
+std::vector<BufferedMessage> MessageBuffer::get_new_messages(const std::string& topic_name) {
   std::lock_guard<std::mutex> lock(mutex_);
 
   std::vector<BufferedMessage> new_messages;
@@ -85,15 +76,13 @@ std::vector<BufferedMessage> MessageBuffer::get_new_messages(const std::string& 
   return new_messages;
 }
 
-void MessageBuffer::clear()
-{
+void MessageBuffer::clear() {
   std::lock_guard<std::mutex> lock(mutex_);
   topic_buffers_.clear();
   last_read_timestamp_ns_ = get_current_time_ns();
 }
 
-size_t MessageBuffer::size() const
-{
+size_t MessageBuffer::size() const {
   std::lock_guard<std::mutex> lock(mutex_);
 
   size_t total = 0;
@@ -104,8 +93,7 @@ size_t MessageBuffer::size() const
   return total;
 }
 
-void MessageBuffer::cleanup_old_messages()
-{
+void MessageBuffer::cleanup_old_messages() {
   uint64_t current_time = get_current_time_ns();
 
   // Remove old messages from all topic buffers
@@ -132,8 +120,7 @@ void MessageBuffer::cleanup_old_messages()
   }
 }
 
-uint64_t MessageBuffer::get_current_time_ns()
-{
+uint64_t MessageBuffer::get_current_time_ns() {
   auto now = std::chrono::system_clock::now();
   auto duration = now.time_since_epoch();
   return std::chrono::duration_cast<std::chrono::nanoseconds>(duration).count();

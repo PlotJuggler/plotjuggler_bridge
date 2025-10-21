@@ -16,19 +16,12 @@
 
 #include <chrono>
 
-namespace pj_ros_bridge
-{
+namespace pj_ros_bridge {
 
-GenericSubscriptionManager::GenericSubscriptionManager(rclcpp::Node::SharedPtr node)
-: node_(node)
-{
-}
+GenericSubscriptionManager::GenericSubscriptionManager(rclcpp::Node::SharedPtr node) : node_(node) {}
 
 bool GenericSubscriptionManager::subscribe(
-  const std::string& topic_name,
-  const std::string& topic_type,
-  MessageCallback callback)
-{
+    const std::string& topic_name, const std::string& topic_type, MessageCallback callback) {
   std::lock_guard<std::mutex> lock(mutex_);
 
   auto it = subscriptions_.find(topic_name);
@@ -48,11 +41,7 @@ bool GenericSubscriptionManager::subscribe(
       callback(topic_name, msg, receive_time);
     };
 
-    auto subscription = node_->create_generic_subscription(
-      topic_name,
-      topic_type,
-      rclcpp::QoS(10),
-      sub_callback);
+    auto subscription = node_->create_generic_subscription(topic_name, topic_type, rclcpp::QoS(10), sub_callback);
 
     SubscriptionInfo info;
     info.subscription = subscription;
@@ -68,8 +57,7 @@ bool GenericSubscriptionManager::subscribe(
   }
 }
 
-bool GenericSubscriptionManager::unsubscribe(const std::string& topic_name)
-{
+bool GenericSubscriptionManager::unsubscribe(const std::string& topic_name) {
   std::lock_guard<std::mutex> lock(mutex_);
 
   auto it = subscriptions_.find(topic_name);
@@ -88,14 +76,12 @@ bool GenericSubscriptionManager::unsubscribe(const std::string& topic_name)
   return true;
 }
 
-bool GenericSubscriptionManager::is_subscribed(const std::string& topic_name) const
-{
+bool GenericSubscriptionManager::is_subscribed(const std::string& topic_name) const {
   std::lock_guard<std::mutex> lock(mutex_);
   return subscriptions_.find(topic_name) != subscriptions_.end();
 }
 
-size_t GenericSubscriptionManager::get_reference_count(const std::string& topic_name) const
-{
+size_t GenericSubscriptionManager::get_reference_count(const std::string& topic_name) const {
   std::lock_guard<std::mutex> lock(mutex_);
 
   auto it = subscriptions_.find(topic_name);
@@ -106,14 +92,12 @@ size_t GenericSubscriptionManager::get_reference_count(const std::string& topic_
   return 0;
 }
 
-void GenericSubscriptionManager::unsubscribe_all()
-{
+void GenericSubscriptionManager::unsubscribe_all() {
   std::lock_guard<std::mutex> lock(mutex_);
   subscriptions_.clear();
 }
 
-uint64_t GenericSubscriptionManager::get_current_time_ns()
-{
+uint64_t GenericSubscriptionManager::get_current_time_ns() {
   auto now = std::chrono::system_clock::now();
   auto duration = now.time_since_epoch();
   return std::chrono::duration_cast<std::chrono::nanoseconds>(duration).count();

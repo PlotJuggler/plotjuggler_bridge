@@ -14,80 +14,146 @@
 
 #include "pj_ros_bridge/schema_extractor.hpp"
 
-#include <rosidl_runtime_cpp/message_type_support_decl.hpp>
-#include <rosidl_typesupport_introspection_cpp/field_types.hpp>
-#include <rosidl_typesupport_introspection_cpp/identifier.hpp>
-#include <rosidl_typesupport_introspection_cpp/message_introspection.hpp>
-
-#include <dlfcn.h>
+#include <ament_index_cpp/get_package_share_directory.hpp>
+#include <fstream>
+#include <set>
 #include <sstream>
+#include <vector>
 
-namespace pj_ros_bridge
-{
+namespace pj_ros_bridge {
 
-using MessageMembers = rosidl_typesupport_introspection_cpp::MessageMembers;
-using MessageMember = rosidl_typesupport_introspection_cpp::MessageMember;
-
-nlohmann::json SchemaExtractor::extract_schema(const std::string& message_type)
-{
-  std::string library_name;
+std::string SchemaExtractor::get_message_definition(const std::string& message_type) {
+  std::string package_name;
   std::string type_name;
 
-  if (!parse_message_type(message_type, library_name, type_name)) {
-    return nlohmann::json();
-  }
-
-  // Construct the library file name
-  std::string lib_file_name = "lib" + library_name + "__rosidl_typesupport_introspection_cpp.so";
-
-  // Try to load the type support library
-  void* lib_handle = dlopen(lib_file_name.c_str(), RTLD_LAZY | RTLD_GLOBAL);
-  if (!lib_handle) {
-    // Library not found - this is expected for types not currently available
-    return nlohmann::json();
-  }
-
-  // Construct the symbol name for the type support function
-  std::string symbol_name = "rosidl_typesupport_introspection_cpp__get_message_type_support_handle__" +
-    library_name + "__msg__" + type_name;
-
-  using TypeSupportFunc = const rosidl_message_type_support_t* (*)();
-  auto type_support_func = reinterpret_cast<TypeSupportFunc>(dlsym(lib_handle, symbol_name.c_str()));
-
-  if (!type_support_func) {
-    dlclose(lib_handle);
-    return nlohmann::json();
-  }
-
-  const rosidl_message_type_support_t* type_support = type_support_func();
-
-  if (!type_support) {
-    dlclose(lib_handle);
-    return nlohmann::json();
-  }
-
-  auto schema = build_schema_from_introspection(type_support->data);
-
-  // Don't close the library - it might be needed later
-  // dlclose(lib_handle);
-
-  return schema;
-}
-
-std::string SchemaExtractor::get_schema_json(const std::string& message_type)
-{
-  auto schema = extract_schema(message_type);
-  if (schema.is_null()) {
+  if (!parse_message_type(message_type, package_name, type_name)) {
     return "";
   }
-  return schema.dump(2);  // Pretty print with 2-space indent
+
+  // Build the message definition by reading .msg files from ROS2 share directory
+  // and recursively expanding nested types
+  std::ostringstream result;
+  std::set<std::string> processed_types;
+
+  if (!build_message_definition_recursive(package_name, type_name, result, processed_types, true)) {
+    return "";
+  }
+
+  return result.str();
+}
+
+bool SchemaExtractor::build_message_definition_recursive(
+    const std::string& package_name, const std::string& type_name, std::ostringstream& output,
+    std::set<std::string>& processed_types, bool is_root) const {
+  // Get package share directory
+  std::string package_share_dir;
+  try {
+    package_share_dir = ament_index_cpp::get_package_share_directory(package_name);
+  } catch (const std::exception& e) {
+    return false;
+  }
+
+  // Construct path to .msg file
+  std::string msg_file_path = package_share_dir + "/msg/" + type_name + ".msg";
+
+  std::ifstream msg_file(msg_file_path);
+  if (!msg_file.is_open()) {
+    return false;
+  }
+
+  const std::string full_type = package_name + "/" + type_name;
+
+  // Add separator for nested types (not for root type)
+  if (!is_root) {
+    output << "\n================================================================================\n";
+    output << "MSG: " << full_type << "\n";
+  }
+
+  // Read and process the .msg file line by line
+  std::string line;
+  std::vector<std::string> nested_types;
+
+  while (std::getline(msg_file, line)) {
+    output << line << "\n";
+
+    // Check if line contains a nested message type
+    // Format: "package_name/MessageType field_name" or "MessageType field_name"
+    std::istringstream line_stream(line);
+    std::string first_word;
+    line_stream >> first_word;
+
+    // Skip comments and empty lines
+    if (first_word.empty() || first_word[0] == '#') {
+      continue;
+    }
+
+    // Check if this is a nested message type
+    std::string nested_package;
+    std::string nested_type;
+
+    if (first_word.find('/') != std::string::npos) {
+      // Format: package_name/MessageType
+      size_t slash_pos = first_word.find('/');
+      nested_package = first_word.substr(0, slash_pos);
+      nested_type = first_word.substr(slash_pos + 1);
+
+      // Remove array brackets if present
+      size_t bracket_pos = nested_type.find('[');
+      if (bracket_pos != std::string::npos) {
+        nested_type = nested_type.substr(0, bracket_pos);
+      }
+    } else {
+      // Check if it's a built-in type or a local type
+      bool is_builtin =
+          (first_word == "bool" || first_word == "byte" || first_word == "char" || first_word == "float32" ||
+           first_word == "float64" || first_word == "int8" || first_word == "uint8" || first_word == "int16" ||
+           first_word == "uint16" || first_word == "int32" || first_word == "uint32" || first_word == "int64" ||
+           first_word == "uint64" || first_word == "string" || first_word == "wstring");
+
+      if (!is_builtin) {
+        // It's a local type in the same package
+        nested_package = package_name;
+        nested_type = first_word;
+
+        // Remove array brackets if present
+        size_t bracket_pos = nested_type.find('[');
+        if (bracket_pos != std::string::npos) {
+          nested_type = nested_type.substr(0, bracket_pos);
+        }
+      }
+    }
+
+    // If we found a nested type, add it to the list
+    if (!nested_type.empty()) {
+      std::string full_nested_type = nested_package + "/" + nested_type;
+      if (processed_types.find(full_nested_type) == processed_types.end()) {
+        processed_types.insert(full_nested_type);
+        nested_types.push_back(full_nested_type);
+      }
+    }
+  }
+  // std_msgs/Header always goes last
+  if (nested_types.size() >= 2) {
+    if (nested_types.at(0) == "std_msgs/Header") {
+      nested_types.push_back(nested_types.at(0));
+      nested_types.erase(nested_types.begin());
+    }
+  }
+
+  // Recursively process nested types in the order they appear
+  for (const auto& nested_full_type : nested_types) {
+    size_t slash_pos = nested_full_type.find('/');
+    std::string nested_pkg = nested_full_type.substr(0, slash_pos);
+    std::string nested_typ = nested_full_type.substr(slash_pos + 1);
+
+    build_message_definition_recursive(nested_pkg, nested_typ, output, processed_types, false);
+  }
+
+  return true;
 }
 
 bool SchemaExtractor::parse_message_type(
-  const std::string& message_type,
-  std::string& library_name,
-  std::string& type_name) const
-{
+    const std::string& message_type, std::string& library_name, std::string& type_name) const {
   // Expected format: "package_name/msg/MessageType"
   size_t first_slash = message_type.find('/');
   if (first_slash == std::string::npos) {
@@ -105,90 +171,38 @@ bool SchemaExtractor::parse_message_type(
   return true;
 }
 
-nlohmann::json SchemaExtractor::build_schema_from_introspection(const void* type_support)
-{
-  const auto* members = static_cast<const MessageMembers*>(type_support);
-  if (!members) {
-    return nlohmann::json();
-  }
+std::string remove_comments_from_schema(const std::string& schema) {
+  std::istringstream input(schema);
+  std::ostringstream output;
+  std::string line;
 
-  nlohmann::json schema;
-  schema["type"] = "object";
-  schema["properties"] = nlohmann::json::object();
+  while (std::getline(input, line)) {
+    // Find the position of '#' character
+    size_t comment_pos = line.find('#');
 
-  for (size_t i = 0; i < members->member_count_; ++i) {
-    const MessageMember& member = members->members_[i];
-    nlohmann::json field_schema;
+    if (comment_pos != std::string::npos) {
+      // Keep everything before the '#', trim trailing whitespace
+      std::string before_comment = line.substr(0, comment_pos);
 
-    // Handle different field types
-    switch (member.type_id_) {
-      case rosidl_typesupport_introspection_cpp::ROS_TYPE_BOOL:
-        field_schema["type"] = "boolean";
-        break;
-      case rosidl_typesupport_introspection_cpp::ROS_TYPE_BYTE:
-      case rosidl_typesupport_introspection_cpp::ROS_TYPE_UINT8:
-        field_schema["type"] = "uint8";
-        break;
-      case rosidl_typesupport_introspection_cpp::ROS_TYPE_CHAR:
-      case rosidl_typesupport_introspection_cpp::ROS_TYPE_INT8:
-        field_schema["type"] = "int8";
-        break;
-      case rosidl_typesupport_introspection_cpp::ROS_TYPE_UINT16:
-        field_schema["type"] = "uint16";
-        break;
-      case rosidl_typesupport_introspection_cpp::ROS_TYPE_INT16:
-        field_schema["type"] = "int16";
-        break;
-      case rosidl_typesupport_introspection_cpp::ROS_TYPE_UINT32:
-        field_schema["type"] = "uint32";
-        break;
-      case rosidl_typesupport_introspection_cpp::ROS_TYPE_INT32:
-        field_schema["type"] = "int32";
-        break;
-      case rosidl_typesupport_introspection_cpp::ROS_TYPE_UINT64:
-        field_schema["type"] = "uint64";
-        break;
-      case rosidl_typesupport_introspection_cpp::ROS_TYPE_INT64:
-        field_schema["type"] = "int64";
-        break;
-      case rosidl_typesupport_introspection_cpp::ROS_TYPE_FLOAT:
-        field_schema["type"] = "float32";
-        break;
-      case rosidl_typesupport_introspection_cpp::ROS_TYPE_DOUBLE:
-        field_schema["type"] = "float64";
-        break;
-      case rosidl_typesupport_introspection_cpp::ROS_TYPE_STRING:
-        field_schema["type"] = "string";
-        break;
-      case rosidl_typesupport_introspection_cpp::ROS_TYPE_MESSAGE:
-        // Nested message - recursively extract schema
-        if (member.members_) {
-          field_schema = build_schema_from_introspection(member.members_->data);
-        }
-        break;
-      default:
-        field_schema["type"] = "unknown";
-        break;
-    }
-
-    // Handle arrays
-    if (member.is_array_) {
-      nlohmann::json array_schema;
-      array_schema["type"] = "array";
-      array_schema["items"] = field_schema;
-
-      if (!member.is_upper_bound_ && member.array_size_ > 0) {
-        array_schema["maxItems"] = member.array_size_;
-        array_schema["minItems"] = member.array_size_;
+      // Trim trailing whitespace
+      size_t end = before_comment.find_last_not_of(" \t\r\n");
+      if (end != std::string::npos) {
+        before_comment = before_comment.substr(0, end + 1);
+      } else {
+        before_comment = "";
       }
 
-      schema["properties"][member.name_] = array_schema;
+      // Only add non-empty lines
+      if (!before_comment.empty()) {
+        output << before_comment << "\n";
+      }
     } else {
-      schema["properties"][member.name_] = field_schema;
+      // No comment, keep the whole line
+      output << line << "\n";
     }
   }
 
-  return schema;
+  return output.str();
 }
 
 }  // namespace pj_ros_bridge

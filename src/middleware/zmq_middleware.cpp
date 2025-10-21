@@ -17,23 +17,15 @@
 #include <sstream>
 #include <stdexcept>
 
-namespace pj_ros_bridge
-{
+namespace pj_ros_bridge {
 
-ZmqMiddleware::ZmqMiddleware()
-: initialized_(false),
-  req_port_(0),
-  pub_port_(0)
-{
-}
+ZmqMiddleware::ZmqMiddleware() : initialized_(false), req_port_(0), pub_port_(0) {}
 
-ZmqMiddleware::~ZmqMiddleware()
-{
+ZmqMiddleware::~ZmqMiddleware() {
   shutdown();
 }
 
-bool ZmqMiddleware::initialize(uint16_t req_port, uint16_t pub_port)
-{
+bool ZmqMiddleware::initialize(uint16_t req_port, uint16_t pub_port) {
   std::lock_guard<std::mutex> lock(mutex_);
 
   if (initialized_) {
@@ -77,8 +69,7 @@ bool ZmqMiddleware::initialize(uint16_t req_port, uint16_t pub_port)
   }
 }
 
-void ZmqMiddleware::shutdown()
-{
+void ZmqMiddleware::shutdown() {
   std::lock_guard<std::mutex> lock(mutex_);
 
   if (!initialized_) {
@@ -108,8 +99,7 @@ void ZmqMiddleware::shutdown()
   }
 }
 
-bool ZmqMiddleware::receive_request(std::vector<uint8_t>& data, std::string& client_identity)
-{
+bool ZmqMiddleware::receive_request(std::vector<uint8_t>& data, std::string& client_identity) {
   std::lock_guard<std::mutex> lock(mutex_);
 
   if (!initialized_ || !rep_socket_) {
@@ -131,8 +121,9 @@ bool ZmqMiddleware::receive_request(std::vector<uint8_t>& data, std::string& cli
     // For ZeroMQ REP socket, we use the routing ID if available
     // For now, we'll generate a simple identity based on connection
     // In a full implementation, we could use ZMQ_IDENTITY or router patterns
-    client_identity = "client_" + std::to_string(std::hash<std::string>{}(
-      std::string(static_cast<const char*>(message.data()), message.size())));
+    client_identity =
+        "client_" +
+        std::to_string(std::hash<std::string>{}(std::string(static_cast<const char*>(message.data()), message.size())));
 
     last_client_identity_ = client_identity;
 
@@ -142,8 +133,7 @@ bool ZmqMiddleware::receive_request(std::vector<uint8_t>& data, std::string& cli
   }
 }
 
-bool ZmqMiddleware::send_reply(const std::vector<uint8_t>& data)
-{
+bool ZmqMiddleware::send_reply(const std::vector<uint8_t>& data) {
   std::lock_guard<std::mutex> lock(mutex_);
 
   if (!initialized_ || !rep_socket_) {
@@ -161,8 +151,7 @@ bool ZmqMiddleware::send_reply(const std::vector<uint8_t>& data)
   }
 }
 
-bool ZmqMiddleware::publish_data(const std::vector<uint8_t>& data)
-{
+bool ZmqMiddleware::publish_data(const std::vector<uint8_t>& data) {
   std::lock_guard<std::mutex> lock(mutex_);
 
   if (!initialized_ || !pub_socket_) {
@@ -180,14 +169,12 @@ bool ZmqMiddleware::publish_data(const std::vector<uint8_t>& data)
   }
 }
 
-std::string ZmqMiddleware::get_client_identity() const
-{
+std::string ZmqMiddleware::get_client_identity() const {
   std::lock_guard<std::mutex> lock(mutex_);
   return last_client_identity_;
 }
 
-bool ZmqMiddleware::is_ready() const
-{
+bool ZmqMiddleware::is_ready() const {
   std::lock_guard<std::mutex> lock(mutex_);
   return initialized_;
 }
