@@ -59,11 +59,18 @@ We will use ZeroMQ, but we will include an **abstract class** to allow us to cha
 
 We will use a REQ-REP pattenr for the API between trhe client and the server, and a PUB-SUB for the aggregated messages at 50 Hz published by the server.
 
-## How to otbain the schemas
+## How to obtain the schemas
 
-You can learn how to read the schemas ofthe ROS2 topics from the code in rosbag2
+The schemas are obtained by reading .msg files directly from ROS2 package share directories.
 
+We use `ament_index_cpp::get_package_share_directory()` to locate the package, then read the .msg file from `<package_share>/msg/<MessageType>.msg`. Nested message types are recursively expanded using depth-first traversal.
+
+This approach is similar to rosbag2 MCAP storage implementation:
 https://github.com/ros2/rosbag2/blob/rolling/rosbag2_storage_mcap/src/mcap_storage.cpp
+
+**Key dependencies for this approach:**
+- `ament_index_cpp` - to locate package share directories
+- Access to installed ROS2 packages containing .msg files
 
 
 ## How to test it

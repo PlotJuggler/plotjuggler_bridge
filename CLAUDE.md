@@ -34,14 +34,19 @@ colcon test-result --verbose
 
 ## Test Data
 
-**Location**: `DATA/sample.mcap`
+**Location**: `DATA/` directory contains:
+- `sample.mcap` - Real rosbag data for testing
+- `sensor_msgs-pointcloud2.txt` - Reference schema for PointCloud2
+- `sensor_msgs-imu.txt` - Reference schema for IMU
+- `pose_with_covariance_stamped.txt` - Reference schema for PoseWithCovarianceStamped
+
 **Inspect rosbag**:
 ```bash
 source /opt/ros/humble/setup.bash
 ros2 bag info DATA/sample.mcap
 ```
 
-**Contents** (as of 2025-10-19):
+**sample.mcap Contents** (as of 2025-10-19):
 - Duration: ~37 minutes (2212 seconds)
 - 1,390,034 messages
 - Topics include custom types:
@@ -51,6 +56,8 @@ ros2 bag info DATA/sample.mcap
   - `ims_msgs::RoboticsInputs`
   - `AsensusMessaging::ArmState`
   - `AsensusMessaging::ArmOutput`
+
+**Note**: Reference schema files are used for unit test validation to ensure SchemaExtractor produces correct output.
 
 ## Coding Standards
 
@@ -91,6 +98,10 @@ private:
   - Allows `std::shared_ptr` as value param (for ROS2 callbacks)
 - **Comments**: Comprehensive documentation for classes and methods
 - **Testing**: Unit tests required for all core components (gtest)
+- **Code Formatting**: Use `pre-commit run -a` to format all code before committing
+  - Configured in `.pre-commit-config.yaml`
+  - Uses clang-format for C++ code
+  - Note: uncrustify linter removed from CMakeLists.txt (was failing on 3rdparty libs)
 
 ## Architecture Overview
 
@@ -114,9 +125,13 @@ private:
    - Filters system topics
 
 3. **Schema Extraction**
-   - Uses `rosidl_typesupport_introspection_cpp`
-   - Traverses `MessageMembers` structure at runtime
-   - Serializes to JSON format
+   - Uses `ament_index_cpp` to locate .msg files in ROS2 package share directories
+   - Reads .msg files directly and recursively expands nested types
+   - Uses depth-first traversal to build complete message definitions
+   - Reference schema files stored in DATA/ for test validation:
+     - `sensor_msgs-pointcloud2.txt`
+     - `sensor_msgs-imu.txt`
+     - `pose_with_covariance_stamped.txt`
 
 4. **Generic Subscription**
    - `rclcpp::GenericSubscription` for runtime topic subscription
@@ -252,12 +267,19 @@ pj_ros_bridge/
 │       ├── test_client.py
 │       └── test_full_workflow.py
 ├── 3rdparty/
-│   └── (cppzmq headers)
+│   ├── cppzmq/ (ZeroMQ C++ headers)
+│   └── nlohmann/ (JSON library header)
 ├── DATA/
-│   └── sample.mcap
+│   ├── sample.mcap
+│   ├── sensor_msgs-pointcloud2.txt (reference schema)
+│   ├── sensor_msgs-imu.txt (reference schema)
+│   └── pose_with_covariance_stamped.txt (reference schema)
+├── cmake/
+│   └── FindZSTD.cmake
 ├── CMakeLists.txt
 ├── package.xml
 ├── .clang-tidy
+├── .pre-commit-config.yaml
 ├── PROJECT.md
 ├── IMPLEMENTATION_PLAN.md
 ├── CLAUDE.md (this file)
@@ -266,19 +288,21 @@ pj_ros_bridge/
 
 ## Dependencies
 
-### ROS2 Packages
+### ROS2 Packages (Runtime)
 - `rclcpp` - ROS2 C++ client library
-- `rosbag2_cpp` - For rosbag utilities
-- `rosidl_typesupport_introspection_cpp` - Runtime type introspection
-- `rosidl_runtime_cpp` - Runtime type support utilities
-- `ament_cmake` - Build system
+- `ament_index_cpp` - Locate ROS2 package share directories
+- `ament_cmake` - Build system (buildtool)
+
+### ROS2 Packages (Test Only)
 - `ament_cmake_gtest` - Testing framework
+- `sensor_msgs` - Standard sensor message types for unit tests
+- `geometry_msgs` - Standard geometry message types for unit tests
 
 ### External Libraries
-- **ZeroMQ** (libzmq) - Networking middleware
-- **cppzmq** - C++ bindings for ZeroMQ (headers in 3rdparty/)
-- **ZSTD** (libzstd) - Compression library (FindZSTD.cmake in cmake/)
-- **JSON library** - For schema serialization (nlohmann/json or hand-crafted)
+- **ZeroMQ** (libzmq) - Networking middleware (system package)
+- **cppzmq** - C++ bindings for ZeroMQ (header-only, in 3rdparty/)
+- **ZSTD** (libzstd) - Compression library (system package, FindZSTD.cmake in cmake/)
+- **nlohmann/json** - JSON library (header-only, in 3rdparty/)
 
 ### Python (for test clients)
 - `pyzmq` - ZeroMQ Python bindings
@@ -322,7 +346,9 @@ pj_ros_bridge/
 - MessageBuffer class with 1-second auto-cleanup
 - GenericSubscriptionManager with reference counting
 - Thread-safe operations
-- Unit tests: 36 total tests passing
+- SchemaExtractor uses depth-first traversal for nested message definitions
+- Reference schema files in DATA/ for test validation
+- Unit tests: 34 total tests passing (all green)
 
 ## Important Design Decisions
 
@@ -351,11 +377,11 @@ pj_ros_bridge/
 **Rationale**: Balances latency vs. network overhead
 **Configuration**: Make configurable for different use cases
 
-### 6. Schema via Runtime Introspection
-**Decision**: Use `rosidl_typesupport_introspection_cpp` to extract schemas
-**Rationale**: No need for compile-time knowledge of message types
-**Challenge**: Complex custom types may require special handling
-**Fallback**: Use message definition text from type support if introspection insufficient
+### 6. Schema Extraction via .msg Files
+**Decision**: Read .msg files directly from ROS2 package share directories instead of runtime introspection
+**Rationale**: Simpler implementation, more reliable for complex types, matches rosbag2 approach
+**Implementation**: Use `ament_index_cpp` to locate packages, recursively expand nested types with depth-first traversal
+**Impact**: Requires ROS2 packages to be installed; produces identical schemas to rosbag2 MCAP storage
 
 ## Key References
 
@@ -461,9 +487,9 @@ Project complete when:
 5. Follow coding standards in .clang-tidy
 
 ### Before committing code:
-1. Run clang-tidy checks
-2. Run unit tests
-3. Test with sample.mcap rosbag
+1. Run `pre-commit run -a` to format all code
+2. Run unit tests: `colcon test --packages-select pj_ros_bridge`
+3. Test with sample.mcap rosbag (if applicable)
 4. Update documentation if needed
 5. Update milestone checklist in this file
 
@@ -472,8 +498,11 @@ Project complete when:
 # Build
 cd ~/ws_plotjuggler && source /opt/ros/humble/setup.bash && colcon build --packages-select pj_ros_bridge
 
+# Format code (before committing)
+pre-commit run -a
+
 # Test
-colcon test --packages-select pj_ros_bridge && colcon test-result --verbose
+colcon test --packages-select pj_ros_bridge && colcon test-result --all
 
 # Run
 ros2 run pj_ros_bridge bridge_server
@@ -487,7 +516,8 @@ ros2 bag play DATA/sample.mcap
 
 ---
 
-**Last Updated**: 2025-10-19
+**Last Updated**: 2025-10-21
 **Project Phase**: Active Implementation
 **Current Focus**: Milestone 4 - Client Session Management
-**Test Status**: 36 unit tests passing (9 middleware, 4 discovery, 5 schema, 8 buffer, 10 subscription)
+**Test Status**: 34 unit tests passing (9 middleware, 4 discovery, 3 schema, 8 buffer, 10 subscription)
+**Linter Status**: All linters passing (cppcheck, lint_cmake, xmllint; uncrustify removed)

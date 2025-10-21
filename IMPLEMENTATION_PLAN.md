@@ -21,9 +21,6 @@ Implement a C++ ROS2 bridge server that forwards ROS2 topic content over the net
 #### 1.1 Update CMakeLists.txt and package.xml
 - Add required dependencies:
   - `rclcpp`
-  - `rosbag2_cpp`
-  - `rosidl_typesupport_introspection_cpp`
-  - `rosidl_runtime_cpp`
   - `gtest` (for unit tests)
 - Add ZeroMQ (cppzmq) from 3rdparty folder
 - Add ZSTD compression library (using FindZSTD.cmake)
@@ -98,31 +95,35 @@ pj_ros_bridge/
 - Store topic name and type information
 
 #### 2.2 Schema Extraction
-Research and implement schema extraction using:
-- `rosidl_runtime_cpp` to get type support handles
-- `rosidl_typesupport_introspection_cpp` to traverse message structure
-- Create `SchemaExtractor` class with method `get_schema_json(topic_type)`
+Implement schema extraction by reading .msg files directly:
+- Use `ament_index_cpp::get_package_share_directory()` to locate ROS2 packages
+- Read .msg files from `<package_share>/msg/<MessageType>.msg`
+- Create `SchemaExtractor` class with method `get_message_definition(topic_type)`
 
 Key approach:
 ```cpp
-// Get type support using rosidl_runtime_cpp
-auto type_support = get_message_type_support_handle(msg_type);
+// Parse message type "package_name/msg/MessageType"
+std::string package_name, type_name;
+parse_message_type(message_type, package_name, type_name);
 
-// Get introspection typesupport
-auto intro_ts = get_message_typesupport_handle(
-    type_support,
-    rosidl_typesupport_introspection_cpp::typesupport_identifier);
+// Locate package share directory
+std::string package_share = ament_index_cpp::get_package_share_directory(package_name);
 
-// Access MessageMembers structure to build schema
-auto members = static_cast<const MessageMembers*>(intro_ts->data);
+// Read .msg file
+std::string msg_path = package_share + "/msg/" + type_name + ".msg";
+std::ifstream msg_file(msg_path);
+
+// Recursively expand nested types using depth-first traversal
+build_message_definition_recursive(package_name, type_name, output, processed_types);
 ```
 
-#### 2.3 JSON Schema Serialization
-- Create `SchemaSerializer` class
-- Implement recursive traversal of `MessageMembers` structure
-- Convert to JSON format matching client expectations
-- Include field names, types, array sizes, nested message definitions
-- Use a simple JSON library (nlohmann/json recommended, or hand-craft if simple enough)
+#### 2.3 Schema Format
+- The `get_message_definition()` method returns the complete message definition as a text string
+- Format matches ROS2 .msg file format with embedded nested definitions
+- Nested types are separated by `================================================================================` markers
+- Each nested type section starts with `MSG: package_name/TypeName`
+- This format is identical to what rosbag2 MCAP storage produces
+- No JSON serialization needed for schemas - they are returned as-is to clients
 
 #### 2.4 Implement "Get Topics" API Handler
 - Handle client request for topic list
@@ -140,9 +141,13 @@ auto members = static_cast<const MessageMembers*>(intro_ts->data);
 #### 2.5 Testing
 - Unit test topic discovery with sample.mcap playing
 - Unit test schema extraction for common message types:
-  - `std_msgs/msg/String`
+  - `sensor_msgs/msg/PointCloud2`
   - `sensor_msgs/msg/Imu`
-  - Custom types from sample.mcap (e.g., `ims_msgs/RoboticsInputs`)
+  - `geometry_msgs/msg/PoseWithCovarianceStamped`
+- Compare extracted schemas against reference files in DATA/:
+  - `sensor_msgs-pointcloud2.txt`
+  - `sensor_msgs-imu.txt`
+  - `pose_with_covariance_stamped.txt`
 - Integration test: Create simple Python client that:
   1. Connects to server
   2. Requests topic list
@@ -191,13 +196,14 @@ python3 tests/integration/test_client.py --command get_topics
 - Implement `get_messages_since(timestamp)` method for retrieving new messages
 - Implement `clear()` method for buffer reset
 
-#### 3.3 Timestamp Extraction
-- Messages should contain publish timestamp in header
-- For messages without standard header, use receive time as both timestamps
-- Create utility function `extract_timestamp(serialized_msg, msg_type)`:
-  - Use introspection to check if message has `std_msgs/Header`
-  - Extract `stamp` field if available
-  - Otherwise return current time
+#### 3.3 Timestamp Handling
+- Messages are stored with two timestamps:
+  - **Publish time**: Extracted from message header if present, otherwise use receive time
+  - **Receive time**: Timestamp when message arrives at the bridge (current time)
+- For messages with `std_msgs/Header`, the publish time comes from the `header.stamp` field
+- For messages without header, both timestamps are set to the receive time
+- Timestamp extraction can be done by checking message schema (from SchemaExtractor)
+- Note: Full CDR deserialization is not required - timestamps are metadata for the bridge
 
 #### 3.4 Message Callback Integration
 - Connect GenericSubscription callback to MessageBuffer
@@ -809,26 +815,28 @@ Before considering the project complete:
 
 ## Dependencies & Prerequisites
 
-### ROS2 Packages
-- rclcpp
-- rosbag2_cpp
-- rosidl_typesupport_introspection_cpp
-- rosidl_runtime_cpp
-- ament_cmake (build)
-- ament_cmake_gtest (testing)
+### ROS2 Packages (Runtime)
+- `rclcpp` - ROS2 C++ client library
+- `ament_index_cpp` - Locate ROS2 package share directories
+- `ament_cmake` - Build system (buildtool)
+
+### ROS2 Packages (Test Only)
+- `ament_cmake_gtest` - Testing framework
+- `sensor_msgs` - Standard sensor message types for unit tests
+- `geometry_msgs` - Standard geometry message types for unit tests
 
 ### External Libraries
-- ZeroMQ (libzmq)
-- cppzmq (headers in 3rdparty/)
-- ZSTD (libzstd) - for compression
-- nlohmann/json or simple hand-crafted JSON serializer
+- **ZeroMQ** (libzmq) - Networking middleware (system package)
+- **cppzmq** - C++ bindings for ZeroMQ (header-only, in 3rdparty/)
+- **ZSTD** (libzstd) - Compression library (system package)
+- **nlohmann/json** - JSON library (header-only, in 3rdparty/)
 
 ### Python (for test client)
-- pyzmq
-- zstandard - for ZSTD decompression
-- argparse
-- struct (built-in)
-- json (built-in)
+- `pyzmq` - ZeroMQ Python bindings
+- `zstandard` - ZSTD decompression library
+- `argparse` - CLI argument parsing (built-in)
+- `struct` - Binary serialization (built-in)
+- `json` - JSON parsing (built-in)
 
 ### Development Tools
 - ROS2 Humble

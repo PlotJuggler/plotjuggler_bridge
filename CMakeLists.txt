@@ -17,9 +17,6 @@ list(APPEND CMAKE_MODULE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
 find_package(ament_cmake REQUIRED)
 find_package(ament_index_cpp REQUIRED)
 find_package(rclcpp REQUIRED)
-find_package(rosbag2_cpp REQUIRED)
-find_package(rosidl_typesupport_introspection_cpp REQUIRED)
-find_package(rosidl_runtime_cpp REQUIRED)
 
 # Find external dependencies
 find_package(ZSTD REQUIRED)
@@ -52,15 +49,11 @@ add_library(${PROJECT_NAME}_lib
 target_link_libraries(${PROJECT_NAME}_lib
   zstd::libzstd_shared
   zmq
-  dl  # For dlopen/dlsym used in schema extraction
 )
 
 ament_target_dependencies(${PROJECT_NAME}_lib
   ament_index_cpp
   rclcpp
-  rosbag2_cpp
-  rosidl_typesupport_introspection_cpp
-  rosidl_runtime_cpp
 )
 
 # Install headers
@@ -81,13 +74,6 @@ install(
 # Testing
 if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
-  find_package(ament_lint_auto REQUIRED)
-
-  # Skip copyright and cpplint for now
-  set(ament_cmake_copyright_FOUND TRUE)
-  set(ament_cmake_cpplint_FOUND TRUE)
-
-  ament_lint_auto_find_test_dependencies()
 
   # Add unit tests
   ament_add_gtest(${PROJECT_NAME}_tests
