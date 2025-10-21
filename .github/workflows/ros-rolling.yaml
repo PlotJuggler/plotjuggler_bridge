@@ -1,10 +1,10 @@
-name: ROS2 Jazzy
+name: ROS2 Rolling
 
 on:
   push:
-    branches: [ develop, main ]
+    branches: [ development, main ]
   pull_request:
-    branches: [ develop, main ]
+    branches: [ development, main ]
   workflow_dispatch:
 
 jobs:

@@ -2,9 +2,9 @@ name: ROS2 Jazzy
 
 on:
   push:
-    branches: [ develop, main ]
+    branches: [ development, main ]
   pull_request:
-    branches: [ develop, main ]
+    branches: [ development, main ]
   workflow_dispatch:
 
 jobs:
