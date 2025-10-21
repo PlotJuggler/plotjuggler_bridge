@@ -263,7 +263,7 @@ pj_ros_bridge/
 │   ├── session_manager.cpp           [✓ Milestone 4]
 │   ├── generic_subscription_manager.cpp
 │   ├── bridge_server.cpp             [✓ Milestone 4]
-│   └── main.cpp                      [TODO: Milestone 6]
+│   └── main.cpp                      [✓ Milestone 6]
 ├── tests/
 │   ├── unit/
 │   │   ├── test_middleware.cpp
@@ -273,8 +273,7 @@ pj_ros_bridge/
 │   │   ├── test_generic_subscription_manager.cpp
 │   │   └── test_session_manager.cpp  [✓ Milestone 4]
 │   └── integration/
-│       ├── test_client.py            [TODO: Milestone 7]
-│       └── test_full_workflow.py     [TODO: Milestone 7]
+│       └── test_client.py            [✓ Milestone 7]
 ├── 3rdparty/
 │   ├── cppzmq/ (ZeroMQ C++ headers)
 │   └── nlohmann/ (JSON library header)
@@ -322,8 +321,8 @@ pj_ros_bridge/
 
 ## Implementation Status
 
-**Current Milestone**: Milestone 6 completed
-**Next Steps**: Begin Milestone 7 - Python Test Client Development
+**Current Milestone**: Milestone 7 completed
+**Next Steps**: Begin Milestone 8 - Unit Test Suite
 
 ### Milestone Checklist
 - [x] Milestone 1: Project Setup & Infrastructure (completed 2025-10-19)
@@ -332,7 +331,7 @@ pj_ros_bridge/
 - [x] Milestone 4: Client Session Management (completed 2025-10-21)
 - [x] Milestone 5: Message Aggregation & Publishing (completed 2025-10-21)
 - [x] Milestone 6: Main Server Integration & Configuration (completed 2025-10-21)
-- [ ] Milestone 7: Python Test Client Development
+- [x] Milestone 7: Python Test Client Development (completed 2025-10-21)
 - [ ] Milestone 8: Unit Test Suite
 - [ ] Milestone 9: Error Handling & Robustness
 - [ ] Milestone 10: Documentation & Polish
@@ -378,7 +377,7 @@ pj_ros_bridge/
 - Publish statistics tracking (messages, bytes)
 - Unit tests: 55 total tests passing (11 new serializer tests)
 
-**Milestone 6** (development branch):
+**Milestone 6** (milestone_6 branch):
 - main.cpp entry point with full integration
 - ROS2 parameter configuration (req_port, pub_port, publish_rate, session_timeout)
 - Signal handlers for graceful shutdown (SIGINT, SIGTERM)
@@ -386,6 +385,17 @@ pj_ros_bridge/
 - Executable creation and installation (pj_ros_bridge_node)
 - Configuration logging and final statistics display
 - Complete server lifecycle management
+
+**Milestone 7** (milestone_7 branch):
+- Python test client (tests/integration/test_client.py)
+- ZeroMQ integration (REQ-REP + PUB-SUB sockets)
+- ZSTD decompression using zstandard library
+- Binary message deserialization matching C++ format
+- Background heartbeat thread (1 second interval)
+- Command-line interface with argparse (get_topics, subscribe commands)
+- Statistics tracking (messages, bytes, rate per topic)
+- Latency calculation and display
+- Tested successfully with multiple topics at different rates
 
 ## Important Design Decisions
 
@@ -562,7 +572,8 @@ ros2 bag play DATA/sample.mcap
 
 **Last Updated**: 2025-10-21
 **Project Phase**: Active Implementation
-**Current Focus**: Milestone 7 - Python Test Client Development
+**Current Focus**: Milestone 8 - Unit Test Suite
 **Test Status**: 55 unit tests passing (9 middleware, 4 discovery, 3 schema, 8 buffer, 10 subscription, 10 session, 11 serializer)
+**Integration Test**: Python test client fully functional and tested
 **Linter Status**: All linters passing (cppcheck, lint_cmake, xmllint; uncrustify removed)
 **Executable**: pj_ros_bridge_node ready to run
