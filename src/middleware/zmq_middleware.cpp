@@ -25,11 +25,11 @@ ZmqMiddleware::~ZmqMiddleware() {
   shutdown();
 }
 
-bool ZmqMiddleware::initialize(uint16_t req_port, uint16_t pub_port) {
+tl::expected<void, std::string> ZmqMiddleware::initialize(uint16_t req_port, uint16_t pub_port) {
   std::lock_guard<std::mutex> lock(mutex_);
 
   if (initialized_) {
-    return false;  // Already initialized
+    return tl::unexpected("Middleware already initialized");
   }
 
   try {
@@ -45,27 +45,52 @@ bool ZmqMiddleware::initialize(uint16_t req_port, uint16_t pub_port) {
     rep_socket_->set(zmq::sockopt::rcvtimeo, kZmqReceiveTimeout);
 
     std::string rep_address = "tcp://*:" + std::to_string(req_port);
-    rep_socket_->bind(rep_address);
+    try {
+      rep_socket_->bind(rep_address);
+    } catch (const zmq::error_t& e) {
+      pub_socket_.reset();
+      rep_socket_.reset();
+      context_.reset();
+      return tl::unexpected(
+          "Failed to bind REP socket to port " + std::to_string(req_port) + ": " + std::string(e.what()) + " (errno " +
+          std::to_string(e.num()) + ")");
+    }
 
     // Create and bind PUB socket for data streaming
     pub_socket_ = std::make_unique<zmq::socket_t>(*context_, zmq::socket_type::pub);
     pub_socket_->set(zmq::sockopt::linger, linger);
 
     std::string pub_address = "tcp://*:" + std::to_string(pub_port);
-    pub_socket_->bind(pub_address);
+    try {
+      pub_socket_->bind(pub_address);
+    } catch (const zmq::error_t& e) {
+      pub_socket_.reset();
+      rep_socket_.reset();
+      context_.reset();
+      return tl::unexpected(
+          "Failed to bind PUB socket to port " + std::to_string(pub_port) + ": " + std::string(e.what()) + " (errno " +
+          std::to_string(e.num()) + ")");
+    }
 
     req_port_ = req_port;
     pub_port_ = pub_port;
     initialized_ = true;
 
-    return true;
+    return {};  // Success
   } catch (const zmq::error_t& e) {
     // Cleanup on error
     pub_socket_.reset();
     rep_socket_.reset();
     context_.reset();
     initialized_ = false;
-    return false;
+    return tl::unexpected(
+        "ZMQ initialization failed: " + std::string(e.what()) + " (errno " + std::to_string(e.num()) + ")");
+  } catch (const std::exception& e) {
+    pub_socket_.reset();
+    rep_socket_.reset();
+    context_.reset();
+    initialized_ = false;
+    return tl::unexpected("Unexpected error during initialization: " + std::string(e.what()));
   }
 }
 

@@ -33,13 +33,12 @@ bool BridgeServer::initialize() {
   RCLCPP_INFO(node_->get_logger(), "Initializing bridge server...");
 
   // Initialize middleware
-  try {
-    middleware_->initialize(req_port_, pub_port_);
-    RCLCPP_INFO(node_->get_logger(), "Middleware initialized (REQ port: %d, PUB port: %d)", req_port_, pub_port_);
-  } catch (const std::exception& e) {
-    RCLCPP_ERROR(node_->get_logger(), "Failed to initialize middleware: %s", e.what());
+  auto result = middleware_->initialize(req_port_, pub_port_);
+  if (!result) {
+    RCLCPP_ERROR(node_->get_logger(), "Failed to initialize middleware: %s", result.error().c_str());
     return false;
   }
+  RCLCPP_INFO(node_->get_logger(), "Middleware initialized (REQ port: %d, PUB port: %d)", req_port_, pub_port_);
 
   // Create components
   topic_discovery_ = std::make_unique<TopicDiscovery>(node_);
@@ -217,13 +216,20 @@ std::string BridgeServer::handle_subscribe(const std::string& client_id, const s
     topic_types[topic.name] = topic.type;
   }
 
-  // Subscribe to new topics
+  // Subscribe to new topics - track successes and failures
   json schemas = json::object();
+  json failures = json::array();
+  std::unordered_set<std::string> successfully_subscribed;
+
   for (const auto& topic_name : topics_to_add) {
     // Check if topic exists
     if (topic_types.find(topic_name) == topic_types.end()) {
       RCLCPP_WARN(
           node_->get_logger(), "Client '%s' requested non-existent topic '%s'", client_id.c_str(), topic_name.c_str());
+      json failure;
+      failure["topic"] = topic_name;
+      failure["reason"] = "Topic does not exist";
+      failures.push_back(failure);
       continue;
     }
 
@@ -241,6 +247,10 @@ std::string BridgeServer::handle_subscribe(const std::string& client_id, const s
     bool success = subscription_manager_->subscribe(topic_name, topic_type, callback);
     if (!success) {
       RCLCPP_ERROR(node_->get_logger(), "Failed to subscribe to topic '%s'", topic_name.c_str());
+      json failure;
+      failure["topic"] = topic_name;
+      failure["reason"] = "Subscription manager failed to create subscription";
+      failures.push_back(failure);
       continue;
     }
 
@@ -248,6 +258,7 @@ std::string BridgeServer::handle_subscribe(const std::string& client_id, const s
     try {
       std::string schema = schema_extractor_->get_message_definition(topic_type);
       schemas[topic_name] = schema;
+      successfully_subscribed.insert(topic_name);
 
       RCLCPP_INFO(
           node_->get_logger(), "Client '%s' subscribed to topic '%s' (type: %s)", client_id.c_str(), topic_name.c_str(),
@@ -255,6 +266,10 @@ std::string BridgeServer::handle_subscribe(const std::string& client_id, const s
     } catch (const std::exception& e) {
       RCLCPP_ERROR(node_->get_logger(), "Failed to get schema for topic '%s': %s", topic_name.c_str(), e.what());
       subscription_manager_->unsubscribe(topic_name);
+      json failure;
+      failure["topic"] = topic_name;
+      failure["reason"] = std::string("Schema extraction failed: ") + e.what();
+      failures.push_back(failure);
     }
   }
 
@@ -264,13 +279,35 @@ std::string BridgeServer::handle_subscribe(const std::string& client_id, const s
     RCLCPP_INFO(node_->get_logger(), "Client '%s' unsubscribed from topic '%s'", client_id.c_str(), topic_name.c_str());
   }
 
-  // Update session subscriptions
-  session_manager_->update_subscriptions(client_id, requested_topics);
+  // Update session subscriptions with only successfully subscribed topics
+  std::unordered_set<std::string> final_subscriptions = current_subs;
+  for (const auto& topic : successfully_subscribed) {
+    final_subscriptions.insert(topic);
+  }
+  for (const auto& topic : topics_to_remove) {
+    final_subscriptions.erase(topic);
+  }
+  session_manager_->update_subscriptions(client_id, final_subscriptions);
 
   // Build response
   json response;
-  response["status"] = "success";
+  if (failures.empty()) {
+    response["status"] = "success";
+  } else if (schemas.empty()) {
+    // All subscriptions failed
+    response["status"] = "error";
+    response["error_code"] = "ALL_SUBSCRIPTIONS_FAILED";
+    response["message"] = "Failed to subscribe to all requested topics";
+  } else {
+    // Partial success
+    response["status"] = "partial_success";
+    response["message"] = "Some subscriptions failed";
+  }
+
   response["schemas"] = schemas;
+  if (!failures.empty()) {
+    response["failures"] = failures;
+  }
 
   return response.dump();
 }

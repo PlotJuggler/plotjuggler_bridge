@@ -43,7 +43,7 @@ class ZmqMiddleware : public MiddlewareInterface {
   ZmqMiddleware(ZmqMiddleware&&) = delete;
   ZmqMiddleware& operator=(ZmqMiddleware&&) = delete;
 
-  bool initialize(uint16_t req_port, uint16_t pub_port) override;
+  tl::expected<void, std::string> initialize(uint16_t req_port, uint16_t pub_port) override;
   void shutdown() override;
   bool receive_request(std::vector<uint8_t>& data, std::string& client_identity) override;
   bool send_reply(const std::vector<uint8_t>& data) override;

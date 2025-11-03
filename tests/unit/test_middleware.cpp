@@ -36,13 +36,18 @@ class MiddlewareTest : public ::testing::Test {
 
 TEST_F(MiddlewareTest, InitializationSuccess) {
   EXPECT_FALSE(middleware_->is_ready());
-  EXPECT_TRUE(middleware_->initialize(15555, 15556));
+  auto result = middleware_->initialize(15555, 15556);
+  EXPECT_TRUE(result.has_value());
   EXPECT_TRUE(middleware_->is_ready());
 }
 
 TEST_F(MiddlewareTest, InitializationTwiceFails) {
-  EXPECT_TRUE(middleware_->initialize(15555, 15556));
-  EXPECT_FALSE(middleware_->initialize(15555, 15556));  // Second init should fail
+  auto result1 = middleware_->initialize(15555, 15556);
+  EXPECT_TRUE(result1.has_value());
+
+  auto result2 = middleware_->initialize(15555, 15556);  // Second init should fail
+  EXPECT_FALSE(result2.has_value());
+  EXPECT_FALSE(result2.error().empty());
 }
 
 TEST_F(MiddlewareTest, ShutdownWithoutInitialization) {
@@ -52,7 +57,8 @@ TEST_F(MiddlewareTest, ShutdownWithoutInitialization) {
 }
 
 TEST_F(MiddlewareTest, ShutdownAfterInitialization) {
-  EXPECT_TRUE(middleware_->initialize(15555, 15556));
+  auto result = middleware_->initialize(15555, 15556);
+  EXPECT_TRUE(result.has_value());
   EXPECT_TRUE(middleware_->is_ready());
   middleware_->shutdown();
   EXPECT_FALSE(middleware_->is_ready());
@@ -75,7 +81,8 @@ TEST_F(MiddlewareTest, PublishDataWithoutInitialization) {
 }
 
 TEST_F(MiddlewareTest, PublishDataAfterInitialization) {
-  ASSERT_TRUE(middleware_->initialize(15555, 15556));
+  auto result = middleware_->initialize(15555, 15556);
+  ASSERT_TRUE(result.has_value());
 
   // Give sockets time to bind
   std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -85,7 +92,8 @@ TEST_F(MiddlewareTest, PublishDataAfterInitialization) {
 }
 
 TEST_F(MiddlewareTest, ReceiveRequestTimeout) {
-  ASSERT_TRUE(middleware_->initialize(15555, 15556));
+  auto result = middleware_->initialize(15555, 15556);
+  ASSERT_TRUE(result.has_value());
 
   // Give sockets time to bind
   std::this_thread::sleep_for(std::chrono::milliseconds(100));

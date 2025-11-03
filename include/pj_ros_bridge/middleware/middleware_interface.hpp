@@ -20,6 +20,8 @@
 #include <string>
 #include <vector>
 
+#include "tl/expected.hpp"
+
 namespace pj_ros_bridge {
 
 /**
@@ -39,9 +41,9 @@ class MiddlewareInterface {
    *
    * @param req_port Port for REQ-REP pattern (client API requests)
    * @param pub_port Port for PUB-SUB pattern (data streaming)
-   * @return true if initialization successful, false otherwise
+   * @return void on success, error message string on failure
    */
-  virtual bool initialize(uint16_t req_port, uint16_t pub_port) = 0;
+  virtual tl::expected<void, std::string> initialize(uint16_t req_port, uint16_t pub_port) = 0;
 
   /**
    * @brief Shutdown the middleware and cleanup resources
