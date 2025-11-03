@@ -42,10 +42,8 @@ If two clients request to subscribe to the same ROS2 topic, we should not subscr
 We are aggregating multiple DDS messages into a single one.
 This aggregated message contains:
 
-- Then number of messages
-- For each of them:
+- For each of message:
      - The name of the topic (string is serialized as 2 bytes per length N, followed by the N characters)
-     - The time when it was published (uint64 time since epoch in nanoseconds)
      - The time when it was received (uint64 time since epoch in nanoseconds)
      - The serialized message buffer, as 4 bytes length, followed by the buffer itself
 
