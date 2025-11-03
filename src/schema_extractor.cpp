@@ -16,13 +16,25 @@
 
 #include <ament_index_cpp/get_package_share_directory.hpp>
 #include <fstream>
+#include <mutex>
 #include <set>
+#include <shared_mutex>
 #include <sstream>
 #include <vector>
 
 namespace pj_ros_bridge {
 
 std::string SchemaExtractor::get_message_definition(const std::string& message_type) {
+  // Level 1 cache: Check if complete definition is cached
+  {
+    std::shared_lock<std::shared_mutex> lock(cache_mutex_);
+    auto it = definition_cache_.find(message_type);
+    if (it != definition_cache_.end()) {
+      return it->second;
+    }
+  }
+
+  // Cache miss - build the definition
   std::string package_name;
   std::string type_name;
 
@@ -39,29 +51,64 @@ std::string SchemaExtractor::get_message_definition(const std::string& message_t
     return "";
   }
 
-  return result.str();
+  std::string definition = result.str();
+
+  // Store in cache
+  {
+    std::unique_lock<std::shared_mutex> lock(cache_mutex_);
+    definition_cache_[message_type] = definition;
+  }
+
+  return definition;
 }
 
 bool SchemaExtractor::build_message_definition_recursive(
     const std::string& package_name, const std::string& type_name, std::ostringstream& output,
     std::set<std::string>& processed_types, bool is_root) const {
-  // Get package share directory
-  std::string package_share_dir;
-  try {
-    package_share_dir = ament_index_cpp::get_package_share_directory(package_name);
-  } catch (const std::exception& e) {
-    return false;
-  }
-
-  // Construct path to .msg file
-  std::string msg_file_path = package_share_dir + "/msg/" + type_name + ".msg";
-
-  std::ifstream msg_file(msg_file_path);
-  if (!msg_file.is_open()) {
-    return false;
-  }
-
   const std::string full_type = package_name + "/" + type_name;
+
+  // Level 2 cache: Check if .msg file content is cached
+  std::string msg_content;
+  {
+    std::shared_lock<std::shared_mutex> lock(cache_mutex_);
+    auto it = msg_file_cache_.find(full_type);
+    if (it != msg_file_cache_.end()) {
+      msg_content = it->second;
+    }
+  }
+
+  // Cache miss - read the .msg file
+  if (msg_content.empty()) {
+    // Get package share directory
+    std::string package_share_dir;
+    try {
+      package_share_dir = ament_index_cpp::get_package_share_directory(package_name);
+    } catch (const std::exception& e) {
+      return false;
+    }
+
+    // Construct path to .msg file
+    std::string msg_file_path = package_share_dir + "/msg/" + type_name + ".msg";
+
+    std::ifstream msg_file(msg_file_path);
+    if (!msg_file.is_open()) {
+      return false;
+    }
+
+    // Read entire file into string
+    std::ostringstream content_stream;
+    std::string line;
+    while (std::getline(msg_file, line)) {
+      content_stream << line << "\n";
+    }
+    msg_content = content_stream.str();
+
+    // Store in cache
+    {
+      std::unique_lock<std::shared_mutex> lock(cache_mutex_);
+      msg_file_cache_[full_type] = msg_content;
+    }
+  }
 
   // Add separator for nested types (not for root type)
   if (!is_root) {
@@ -69,11 +116,12 @@ bool SchemaExtractor::build_message_definition_recursive(
     output << "MSG: " << full_type << "\n";
   }
 
-  // Read and process the .msg file line by line
+  // Process the .msg file content line by line
+  std::istringstream msg_stream(msg_content);
   std::string line;
   std::vector<std::string> nested_types;
 
-  while (std::getline(msg_file, line)) {
+  while (std::getline(msg_stream, line)) {
     output << line << "\n";
 
     // Check if line contains a nested message type

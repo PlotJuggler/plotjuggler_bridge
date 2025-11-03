@@ -17,8 +17,10 @@
 
 #include <memory>
 #include <set>
+#include <shared_mutex>
 #include <sstream>
 #include <string>
+#include <unordered_map>
 
 namespace pj_ros_bridge {
 
@@ -28,7 +30,11 @@ namespace pj_ros_bridge {
  * This class reads .msg files from ROS2 packages and recursively expands
  * nested message types to produce the full message definition text.
  *
- * Thread safety: Thread-safe for concurrent reads of different types.
+ * Implements two-level caching:
+ * - Level 1: Complete message definitions (final output)
+ * - Level 2: Raw .msg file contents
+ *
+ * Thread safety: Thread-safe for concurrent access using shared_mutex.
  */
 class SchemaExtractor {
  public:
@@ -38,6 +44,7 @@ class SchemaExtractor {
    * @brief Get message definition text
    *
    * Returns the message definition in ROS2 interface format (same as ros2 interface show).
+   * Results are cached for subsequent calls.
    *
    * @param message_type Full message type name (e.g., "std_msgs/msg/String")
    * @return Message definition text, or empty string on failure
@@ -74,6 +81,15 @@ class SchemaExtractor {
   bool build_message_definition_recursive(
       const std::string& package_name, const std::string& type_name, std::ostringstream& output,
       std::set<std::string>& processed_types, bool is_root) const;
+
+  // Level 1 cache: Complete message definitions (key: "package/msg/Type")
+  mutable std::unordered_map<std::string, std::string> definition_cache_;
+
+  // Level 2 cache: Raw .msg file contents (key: "package/Type")
+  mutable std::unordered_map<std::string, std::string> msg_file_cache_;
+
+  // Thread safety: shared_mutex allows multiple readers or one writer
+  mutable std::shared_mutex cache_mutex_;
 };
 
 std::string remove_comments_from_schema(const std::string& schema);

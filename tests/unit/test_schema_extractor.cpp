@@ -116,3 +116,38 @@ TEST_F(SchemaExtractorTest, PoseWithCovarianceStampedSchemaMatchesExpected) {
     std::cout << "Actual Schema (no comments):\n" << actual_no_comments << std::endl;
   }
 }
+
+TEST_F(SchemaExtractorTest, CachingReturnsSameResult) {
+  const std::string message_type = "sensor_msgs/msg/PointCloud2";
+
+  // First call - cache miss
+  std::string first_result = extractor_->get_message_definition(message_type);
+  ASSERT_FALSE(first_result.empty()) << "First call failed to extract schema";
+
+  // Second call - should use cache
+  std::string second_result = extractor_->get_message_definition(message_type);
+  ASSERT_FALSE(second_result.empty()) << "Second call failed to extract schema";
+
+  // Results should be identical
+  EXPECT_EQ(first_result, second_result) << "Cached result differs from original";
+}
+
+TEST_F(SchemaExtractorTest, CachingWorksForMultipleTypes) {
+  const std::string type1 = "sensor_msgs/msg/PointCloud2";
+  const std::string type2 = "sensor_msgs/msg/Imu";
+
+  // Get both schemas twice
+  std::string result1a = extractor_->get_message_definition(type1);
+  std::string result2a = extractor_->get_message_definition(type2);
+  std::string result1b = extractor_->get_message_definition(type1);
+  std::string result2b = extractor_->get_message_definition(type2);
+
+  ASSERT_FALSE(result1a.empty());
+  ASSERT_FALSE(result2a.empty());
+  ASSERT_FALSE(result1b.empty());
+  ASSERT_FALSE(result2b.empty());
+
+  // Cached results should match originals
+  EXPECT_EQ(result1a, result1b) << "Cached PointCloud2 differs from original";
+  EXPECT_EQ(result2a, result2b) << "Cached Imu differs from original";
+}
