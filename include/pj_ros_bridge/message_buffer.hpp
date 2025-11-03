@@ -26,55 +26,57 @@
 namespace pj_ros_bridge {
 
 /**
- * @brief Structure to hold a buffered message
+ * @brief Structure to hold a buffered message with zero-copy semantics
+ *
+ * Uses shared_ptr to avoid copying message data. The same SerializedMessage
+ * can be referenced by multiple BufferedMessage instances without duplication.
  */
 struct BufferedMessage {
-  std::string topic_name;
-  uint64_t publish_timestamp_ns;  // Nanoseconds since epoch
-  uint64_t receive_timestamp_ns;  // Nanoseconds since epoch
-  std::vector<uint8_t> data;
+  uint64_t timestamp_ns;                           ///< Receive timestamp in nanoseconds since epoch
+  std::shared_ptr<rclcpp::SerializedMessage> msg;  ///< Shared pointer to serialized ROS2 message (zero-copy)
 };
 
 /**
- * @brief Thread-safe message buffer with automatic cleanup
+ * @brief Thread-safe message buffer with zero-copy and move semantics
  *
- * Stores messages per topic with automatic removal of messages
- * older than 1 second to prevent unbounded memory growth.
+ * Design principles:
+ * - Zero-copy: Messages stored as shared_ptr to avoid data duplication
+ * - Move semantics: Buffer ownership transferred via std::swap() in move_messages()
+ * - Auto-cleanup: Messages older than 1 second are automatically removed
+ * - Thread-safe: All public methods use mutex protection
  *
- * Thread safety: All public methods are thread-safe
+ * The buffer stores messages per topic and uses std::swap() for efficient
+ * ownership transfer, avoiding any message copying during read operations.
  */
 class MessageBuffer {
  public:
   MessageBuffer();
 
   /**
-   * @brief Add a message to the buffer
+   * @brief Add a message to the buffer (zero-copy)
    *
+   * The message is stored as a shared_ptr, avoiding any data copying.
    * Automatically cleans up old messages before adding.
    *
    * @param topic_name Topic name
-   * @param publish_timestamp_ns Publish timestamp in nanoseconds since epoch
-   * @param receive_timestamp_ns Receive timestamp in nanoseconds since epoch
-   * @param data Serialized message data
+   * @param timestamp_ns Receive timestamp in nanoseconds since epoch
+   * @param serialized_msg Shared pointer to serialized ROS2 message (ownership shared, not transferred)
    */
   void add_message(
-      const std::string& topic_name, uint64_t publish_timestamp_ns, uint64_t receive_timestamp_ns,
-      const std::vector<uint8_t>& data);
+      const std::string& topic_name, uint64_t timestamp_ns, std::shared_ptr<rclcpp::SerializedMessage> serialized_msg);
 
   /**
-   * @brief Get all messages received since last read
+   * @brief Move entire buffer out atomically (zero-copy via std::swap)
    *
-   * @return Vector of messages received since last get_new_messages() call
-   */
-  std::vector<BufferedMessage> get_new_messages();
-
-  /**
-   * @brief Get new messages for a specific topic
+   * This method uses std::swap() to transfer buffer ownership without copying.
+   * After the call:
+   * - out_messages contains all buffered messages grouped by topic
+   * - Internal buffer is cleared
+   * - last_read_timestamp is updated to current time
    *
-   * @param topic_name Topic name to filter by
-   * @return Vector of messages for the specified topic
+   * @param out_messages Output parameter that receives the buffer contents via swap
    */
-  std::vector<BufferedMessage> get_new_messages(const std::string& topic_name);
+  void move_messages(std::unordered_map<std::string, std::deque<BufferedMessage>>& out_messages);
 
   /**
    * @brief Clear all buffered messages

@@ -233,12 +233,8 @@ std::string BridgeServer::handle_subscribe(const std::string& client_id, const s
     auto callback = [this, topic_name](
                         const std::string& topic, const std::shared_ptr<rclcpp::SerializedMessage>& msg,
                         uint64_t receive_time_ns) {
-      // Extract message data
-      const auto& rcl_msg = msg->get_rcl_serialized_message();
-      std::vector<uint8_t> data(rcl_msg.buffer, rcl_msg.buffer + rcl_msg.buffer_length);
-
       // For now, use receive time as publish time (TODO: extract from message header)
-      message_buffer_->add_message(topic, receive_time_ns, receive_time_ns, data);
+      message_buffer_->add_message(topic, receive_time_ns, msg);
     };
 
     // Subscribe via subscription manager
@@ -346,7 +342,8 @@ std::pair<uint64_t, uint64_t> BridgeServer::get_publish_stats() const {
 
 void BridgeServer::publish_aggregated_messages() {
   // Get all new messages from buffer
-  auto messages = message_buffer_->get_new_messages();
+  std::unordered_map<std::string, std::deque<BufferedMessage>> messages;
+  message_buffer_->move_messages(messages);
 
   if (messages.empty()) {
     // No new messages, skip publishing
@@ -356,20 +353,15 @@ void BridgeServer::publish_aggregated_messages() {
   try {
     // Create serializer and add all messages
     AggregatedMessageSerializer serializer;
-    for (const auto& msg : messages) {
-      serializer.add_message(msg.topic_name, msg.publish_timestamp_ns, msg.receive_timestamp_ns, msg.data);
-    }
-
-    // Serialize to binary format
-    auto serialized_data = serializer.serialize();
-
-    if (serialized_data.empty()) {
-      RCLCPP_WARN(node_->get_logger(), "Serialized data is empty despite having messages");
-      return;
+    for (const auto& [topic, msgs] : messages) {
+      for (const auto& msg : msgs) {
+        serializer.serialize_message(topic, msg.timestamp_ns, *(msg.msg));
+      }
     }
 
     // Compress with ZSTD
-    auto compressed_data = AggregatedMessageSerializer::compress_zstd(serialized_data);
+    std::vector<uint8_t> compressed_data;
+    AggregatedMessageSerializer::compress_zstd(serializer.get_serialized_data(), compressed_data);
 
     // Publish via middleware
     bool success = middleware_->publish_data(compressed_data);
@@ -380,10 +372,10 @@ void BridgeServer::publish_aggregated_messages() {
       total_messages_published_ += messages.size();
       total_bytes_published_ += compressed_data.size();
 
-      RCLCPP_DEBUG(
-          node_->get_logger(), "Published %zu messages (%zu bytes raw, %zu bytes compressed, %.1f%% ratio)",
-          messages.size(), serialized_data.size(), compressed_data.size(),
-          100.0 * static_cast<double>(compressed_data.size()) / static_cast<double>(serialized_data.size()));
+      // RCLCPP_DEBUG(
+      //     node_->get_logger(), "Published %zu messages (%zu bytes raw, %zu bytes compressed, %.1f%% ratio)",
+      //     messages.size(), serialized_data.size(), compressed_data.size(),
+      //     100.0 * static_cast<double>(compressed_data.size()) / static_cast<double>(serialized_data.size()));
     } else {
       RCLCPP_ERROR(node_->get_logger(), "Failed to publish aggregated messages");
     }

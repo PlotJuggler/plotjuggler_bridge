@@ -15,7 +15,9 @@
       "intelliSenseMode": "gcc-x64",
       "compilerPath": "/usr/bin/gcc",
       "cStandard": "gnu11",
-      "cppStandard": "c++14"
+      "cppStandard": "c++14",
+      "configurationProvider": "ms-vscode.cmake-tools",
+      "compileCommands": "/home/davide/ws_plotjuggler/build/compile_commands.json"
     }
   ],
   "version": 4

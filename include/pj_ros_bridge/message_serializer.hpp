@@ -5,23 +5,27 @@
 #define PJ_ROS_BRIDGE__MESSAGE_SERIALIZER_HPP_
 
 #include <cstdint>
+#include <rclcpp/rclcpp.hpp>
 #include <string>
 #include <vector>
 
 namespace pj_ros_bridge {
 
 /**
- * @brief Serializes aggregated messages to custom binary format
+ * @brief Serializes aggregated messages using streaming zero-copy approach
  *
- * Binary format specification:
- * - Number of messages (uint32_t)
- * - For each message:
- *   - Topic name length (uint16_t)
+ * Design principles:
+ * - Streaming API: Messages serialized immediately to output buffer (no intermediate storage)
+ * - Zero-copy: Reads directly from SerializedMessage without data duplication
+ * - No header: Messages serialized sequentially without placeholder or count header
+ * - Little-endian: All multi-byte values use little-endian byte order
+ *
+ * Binary format specification (per message):
+ *   - Topic name length (uint16_t little-endian)
  *   - Topic name (N bytes UTF-8)
- *   - Publish timestamp (uint64_t nanoseconds since epoch)
- *   - Receive timestamp (uint64_t nanoseconds since epoch)
- *   - Message data length (uint32_t)
- *   - Message data (N bytes - CDR serialized)
+ *   - Timestamp (uint64_t nanoseconds since epoch, little-endian)
+ *   - Message data length (int32_t little-endian)
+ *   - Message data (N bytes - CDR serialized from ROS2)
  *
  * Thread safety: Not thread-safe, use from single thread only
  */
@@ -33,70 +37,56 @@ class AggregatedMessageSerializer {
   AggregatedMessageSerializer();
 
   /**
-   * @brief Add a message to the aggregation
+   * @brief Serialize a message directly to the output buffer
    *
    * @param topic_name Topic name
-   * @param publish_time_ns Publish timestamp in nanoseconds since epoch
-   * @param receive_time_ns Receive timestamp in nanoseconds since epoch
-   * @param data Serialized message data (CDR format)
+   * @param timestamp_ns Timestamp in nanoseconds since epoch
+   * @param serialized_msg ROS2 serialized message (CDR format)
    */
-  void add_message(
-      const std::string& topic_name, uint64_t publish_time_ns, uint64_t receive_time_ns,
-      const std::vector<uint8_t>& data);
+  void serialize_message(
+      const std::string& topic_name, uint64_t timestamp_ns, const rclcpp::SerializedMessage& serialized_msg);
 
   /**
-   * @brief Serialize all added messages to binary format
-   *
-   * @return Serialized binary data
+   * @brief Get reference to the serialized data buffer
    */
-  std::vector<uint8_t> serialize() const;
+  const std::vector<uint8_t>& get_serialized_data() const {
+    return serialized_data_;
+  }
 
   /**
-   * @brief Clear all messages and reset for next aggregation cycle
+   * @brief Clear the buffer for next aggregation cycle
    */
   void clear();
 
   /**
-   * @brief Get the number of messages added
-   *
-   * @return Number of messages
-   */
-  size_t message_count() const;
-
-  /**
-   * @brief Compress data using ZSTD
+   * @brief Compress data using ZSTD (compression level 1)
    *
    * @param data Data to compress
-   * @param compression_level ZSTD compression level (default: 3)
-   * @return Compressed data
+   * @param compressed_data Output parameter - receives compressed data
    * @throws std::runtime_error if compression fails
    */
-  static std::vector<uint8_t> compress_zstd(const std::vector<uint8_t>& data, int compression_level = 3);
+  static void compress_zstd(const std::vector<uint8_t>& data, std::vector<uint8_t>& compressed_data);
 
   /**
    * @brief Decompress ZSTD data
    *
    * @param compressed_data Compressed data
-   * @return Decompressed data
+   * @param decompressed Output parameter - receives decompressed data
    * @throws std::runtime_error if decompression fails
    */
-  static std::vector<uint8_t> decompress_zstd(const std::vector<uint8_t>& compressed_data);
+  static void decompress_zstd(const std::vector<uint8_t>& compressed_data, std::vector<uint8_t>& decompressed);
 
  private:
-  struct Message {
-    std::string topic_name;
-    uint64_t publish_time_ns;
-    uint64_t receive_time_ns;
-    std::vector<uint8_t> data;
-  };
-
-  std::vector<Message> messages_;
+  // Buffer for serialized data
+  std::vector<uint8_t> serialized_data_;
 
   /**
    * @brief Write a value to buffer in little-endian format
    */
   template <typename T>
   static void write_le(std::vector<uint8_t>& buffer, T value);
+
+  static void write_str(std::vector<uint8_t>& buffer, const std::string& str);
 };
 
 }  // namespace pj_ros_bridge

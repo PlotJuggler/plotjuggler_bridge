@@ -19,8 +19,7 @@ namespace pj_ros_bridge {
 MessageBuffer::MessageBuffer() : last_read_timestamp_ns_(get_current_time_ns()) {}
 
 void MessageBuffer::add_message(
-    const std::string& topic_name, uint64_t publish_timestamp_ns, uint64_t receive_timestamp_ns,
-    const std::vector<uint8_t>& data) {
+    const std::string& topic_name, uint64_t timestamp_ns, std::shared_ptr<rclcpp::SerializedMessage> serialized_msg) {
   std::lock_guard<std::mutex> lock(mutex_);
 
   // Cleanup old messages first
@@ -28,52 +27,17 @@ void MessageBuffer::add_message(
 
   // Add the new message
   BufferedMessage msg;
-  msg.topic_name = topic_name;
-  msg.publish_timestamp_ns = publish_timestamp_ns;
-  msg.receive_timestamp_ns = receive_timestamp_ns;
-  msg.data = data;
+  msg.timestamp_ns = timestamp_ns;
+  msg.msg = std::move(serialized_msg);
 
   topic_buffers_[topic_name].push_back(std::move(msg));
 }
 
-std::vector<BufferedMessage> MessageBuffer::get_new_messages() {
+void MessageBuffer::move_messages(std::unordered_map<std::string, std::deque<BufferedMessage>>& out_messages) {
   std::lock_guard<std::mutex> lock(mutex_);
-
-  std::vector<BufferedMessage> new_messages;
-
-  // Collect messages received after last read
-  for (auto& [topic, buffer] : topic_buffers_) {
-    for (const auto& msg : buffer) {
-      if (msg.receive_timestamp_ns > last_read_timestamp_ns_) {
-        new_messages.push_back(msg);
-      }
-    }
-  }
-
-  // Update last read timestamp
+  std::swap(out_messages, topic_buffers_);
+  topic_buffers_.clear();
   last_read_timestamp_ns_ = get_current_time_ns();
-
-  return new_messages;
-}
-
-std::vector<BufferedMessage> MessageBuffer::get_new_messages(const std::string& topic_name) {
-  std::lock_guard<std::mutex> lock(mutex_);
-
-  std::vector<BufferedMessage> new_messages;
-
-  auto it = topic_buffers_.find(topic_name);
-  if (it != topic_buffers_.end()) {
-    for (const auto& msg : it->second) {
-      if (msg.receive_timestamp_ns > last_read_timestamp_ns_) {
-        new_messages.push_back(msg);
-      }
-    }
-  }
-
-  // Update last read timestamp
-  last_read_timestamp_ns_ = get_current_time_ns();
-
-  return new_messages;
 }
 
 void MessageBuffer::clear() {
@@ -101,7 +65,7 @@ void MessageBuffer::cleanup_old_messages() {
     // Remove messages older than kMaxMessageAgeNs
     while (!buffer.empty()) {
       const auto& oldest_msg = buffer.front();
-      if (current_time - oldest_msg.receive_timestamp_ns > kMaxMessageAgeNs) {
+      if (current_time - oldest_msg.timestamp_ns > kMaxMessageAgeNs) {
         buffer.pop_front();
       } else {
         // Messages are ordered by time, so we can stop here

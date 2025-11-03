@@ -65,21 +65,26 @@ int main(int argc, char** argv) {
     std::signal(SIGINT, signal_handler);
     std::signal(SIGTERM, signal_handler);
 
-    // Main loop
-    rclcpp::WallRate loop_rate(std::chrono::milliseconds(10));  // 100 Hz
+    // Create ROS timer to process API requests at 100 Hz
+    auto request_timer = node->create_wall_timer(
+        std::chrono::milliseconds(10),  // 100 Hz
+        [&bridge_server]() { bridge_server->process_requests(); });
+
+    // Create single-threaded executor and add node
+    rclcpp::executors::SingleThreadedExecutor executor;
+    executor.add_node(node);
+
+    // Spin until shutdown is requested
     while (rclcpp::ok() && !g_shutdown_requested) {
-      // Process any pending API requests
-      bridge_server->process_requests();
-
-      // Spin ROS2 callbacks (timers for session timeout and publishing)
-      rclcpp::spin_some(node);
-
-      // Sleep to maintain loop rate
-      loop_rate.sleep();
+      executor.spin_some(std::chrono::milliseconds(100));
     }
 
     // Graceful shutdown
     RCLCPP_INFO(node->get_logger(), "Shutting down bridge server...");
+
+    // Cancel timer and remove node from executor
+    request_timer->cancel();
+    executor.remove_node(node);
 
     // Get final statistics
     auto [total_messages, total_bytes] = bridge_server->get_publish_stats();

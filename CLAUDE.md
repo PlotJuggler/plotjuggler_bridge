@@ -139,9 +139,11 @@ private:
 
 5. **Message Buffer**
    - Thread-safe buffer per topic with automatic cleanup
-   - Stores: topic name, publish time, receive time, serialized CDR data
+   - Zero-copy design using `shared_ptr<SerializedMessage>`
+   - Stores: timestamp and shared pointer to serialized message data
    - Auto-deletes messages older than 1 second to prevent unbounded memory growth
    - Cleanup triggered on every message addition
+   - Move semantics: `move_messages()` atomically transfers buffer ownership via `std::swap()`
 
 6. **Session Manager**
    - Tracks client sessions using ZMQ connection identity
@@ -165,19 +167,24 @@ private:
 
 ### Message Serialization Format
 
-Custom binary format for aggregated messages (before compression):
+**Streaming Binary Format** (before compression):
+- No header or message count placeholder
+- Messages are serialized directly in sequence:
 ```
-- Number of messages (uint32_t)
-- For each message:
-  - Topic name length (uint16_t)
+For each message:
+  - Topic name length (uint16_t little-endian)
   - Topic name (N bytes UTF-8)
-  - Publish timestamp (uint64_t nanoseconds since epoch)
-  - Receive timestamp (uint64_t nanoseconds since epoch)
-  - Message data length (uint32_t)
-  - Message data (N bytes - CDR serialized)
+  - Publish timestamp (uint64_t nanoseconds since epoch, little-endian)
+  - Receive timestamp (uint64_t nanoseconds since epoch, little-endian)
+  - Message data length (int32_t little-endian)
+  - Message data (N bytes - CDR serialized from ROS2)
 ```
 
-**ZSTD Compression**: After serialization, the aggregated message is compressed using ZSTD before being published via the PUB-SUB socket. This reduces network bandwidth and improves performance for large messages.
+**Design Philosophy**:
+- **Zero-copy**: Messages pass via `shared_ptr<SerializedMessage>` to avoid data copying
+- **Streaming**: Messages serialized immediately to output buffer (no intermediate storage)
+- **Move semantics**: Buffer ownership transferred atomically via `std::swap()`
+- **ZSTD Compression**: Final buffer compressed (level 1) before publishing via ZMQ PUB socket
 
 ### API Protocol
 
@@ -570,10 +577,13 @@ ros2 bag play DATA/sample.mcap
 
 ---
 
-**Last Updated**: 2025-10-21
-**Project Phase**: Active Implementation
-**Current Focus**: Milestone 8 - Unit Test Suite
-**Test Status**: 55 unit tests passing (9 middleware, 4 discovery, 3 schema, 8 buffer, 10 subscription, 10 session, 11 serializer)
+**Last Updated**: 2025-11-03
+**Project Phase**: Active Implementation - API Refactor Complete
+**Current Focus**: Zero-copy, move-based API implementation
+**Test Status**: 59 unit tests passing (9 middleware, 4 discovery, 3 schema, 10 buffer, 10 subscription, 10 session, 13 serializer)
+**API Changes**:
+- MessageBuffer: Zero-copy using `shared_ptr<SerializedMessage>`, move semantics via `move_messages()`
+- Serializer: Streaming API, no placeholder header, out-parameter compression
 **Integration Test**: Python test client fully functional and tested
 **Linter Status**: All linters passing (cppcheck, lint_cmake, xmllint; uncrustify removed)
 **Executable**: pj_ros_bridge_node ready to run

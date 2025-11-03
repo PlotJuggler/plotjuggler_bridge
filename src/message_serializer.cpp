@@ -10,86 +10,47 @@
 
 namespace pj_ros_bridge {
 
-AggregatedMessageSerializer::AggregatedMessageSerializer() {
-  messages_.reserve(100);  // Reserve space for typical aggregation
-}
+AggregatedMessageSerializer::AggregatedMessageSerializer() {}
 
-void AggregatedMessageSerializer::add_message(
-    const std::string &topic_name, uint64_t publish_time_ns, uint64_t receive_time_ns,
-    const std::vector<uint8_t> &data) {
-  Message msg;
-  msg.topic_name = topic_name;
-  msg.publish_time_ns = publish_time_ns;
-  msg.receive_time_ns = receive_time_ns;
-  msg.data = data;
-  messages_.push_back(std::move(msg));
-}
+void AggregatedMessageSerializer::serialize_message(
+    const std::string &topic_name, uint64_t timestamp_ns, const rclcpp::SerializedMessage &serialized_msg) {
+  write_str(serialized_data_, topic_name);
 
-std::vector<uint8_t> AggregatedMessageSerializer::serialize() const {
-  std::vector<uint8_t> buffer;
+  // Publish timestamp (uint64_t)
+  write_le(serialized_data_, timestamp_ns);
 
-  // Calculate approximate size to minimize reallocations
-  size_t estimated_size = sizeof(uint32_t);  // message count
-  for (const auto &msg : messages_) {
-    estimated_size += sizeof(uint16_t) +       // topic name length
-                      msg.topic_name.size() +  // topic name
-                      sizeof(uint64_t) * 2 +   // timestamps
-                      sizeof(uint32_t) +       // data length
-                      msg.data.size();         // data
-  }
-  buffer.reserve(estimated_size);
+  // Receive timestamp (uint64_t)
+  write_le(serialized_data_, timestamp_ns);
 
-  // Write message count
-  write_le(buffer, static_cast<uint32_t>(messages_.size()));
+  // Message data length (uint32_t)
+  int32_t msg_size = static_cast<int32_t>(serialized_msg.size());
+  write_le(serialized_data_, msg_size);
 
-  // Write each message
-  for (const auto &msg : messages_) {
-    // Topic name length (uint16_t)
-    if (msg.topic_name.size() > UINT16_MAX) {
-      throw std::runtime_error("Topic name too long: " + msg.topic_name);
-    }
-    write_le(buffer, static_cast<uint16_t>(msg.topic_name.size()));
-
-    // Topic name (UTF-8 bytes)
-    buffer.insert(buffer.end(), msg.topic_name.begin(), msg.topic_name.end());
-
-    // Publish timestamp (uint64_t)
-    write_le(buffer, msg.publish_time_ns);
-
-    // Receive timestamp (uint64_t)
-    write_le(buffer, msg.receive_time_ns);
-
-    // Message data length (uint32_t)
-    write_le(buffer, static_cast<uint32_t>(msg.data.size()));
-
-    // Message data (CDR bytes)
-    buffer.insert(buffer.end(), msg.data.begin(), msg.data.end());
-  }
-
-  return buffer;
+  // Message data (CDR bytes) using memcpy
+  const uint8_t *read_ptr = static_cast<const uint8_t *>(serialized_msg.get_rcl_serialized_message().buffer);
+  uint8_t *dest_ptr = serialized_data_.data() + serialized_data_.size();
+  // allocate and copy
+  serialized_data_.resize(serialized_data_.size() + msg_size);
+  std::memcpy(dest_ptr, read_ptr, msg_size);
 }
 
 void AggregatedMessageSerializer::clear() {
-  messages_.clear();
+  serialized_data_.clear();
 }
 
-size_t AggregatedMessageSerializer::message_count() const {
-  return messages_.size();
-}
-
-std::vector<uint8_t> AggregatedMessageSerializer::compress_zstd(
-    const std::vector<uint8_t> &data, int compression_level) {
+void AggregatedMessageSerializer::compress_zstd(
+    const std::vector<uint8_t> &data, std::vector<uint8_t> &compressed_data) {
+  compressed_data.clear();
   if (data.empty()) {
-    return {};
+    return;
   }
 
   // Get maximum compressed size
   size_t max_compressed_size = ZSTD_compressBound(data.size());
-  std::vector<uint8_t> compressed(max_compressed_size);
+  compressed_data.resize(max_compressed_size);
 
   // Compress
-  size_t compressed_size =
-      ZSTD_compress(compressed.data(), compressed.size(), data.data(), data.size(), compression_level);
+  size_t compressed_size = ZSTD_compress(compressed_data.data(), compressed_data.size(), data.data(), data.size(), 1);
 
   // Check for errors
   if (ZSTD_isError(compressed_size)) {
@@ -97,13 +58,14 @@ std::vector<uint8_t> AggregatedMessageSerializer::compress_zstd(
   }
 
   // Resize to actual compressed size
-  compressed.resize(compressed_size);
-  return compressed;
+  compressed_data.resize(compressed_size);
 }
 
-std::vector<uint8_t> AggregatedMessageSerializer::decompress_zstd(const std::vector<uint8_t> &compressed_data) {
+void AggregatedMessageSerializer::decompress_zstd(
+    const std::vector<uint8_t> &compressed_data, std::vector<uint8_t> &decompressed) {
+  decompressed.clear();
   if (compressed_data.empty()) {
-    return {};
+    return;
   }
 
   // Get decompressed size
@@ -115,9 +77,7 @@ std::vector<uint8_t> AggregatedMessageSerializer::decompress_zstd(const std::vec
   if (decompressed_size == ZSTD_CONTENTSIZE_UNKNOWN) {
     throw std::runtime_error("ZSTD: original size unknown");
   }
-
-  // Allocate buffer for decompressed data
-  std::vector<uint8_t> decompressed(decompressed_size);
+  decompressed.resize(decompressed_size);
 
   // Decompress
   size_t result =
@@ -127,8 +87,6 @@ std::vector<uint8_t> AggregatedMessageSerializer::decompress_zstd(const std::vec
   if (ZSTD_isError(result)) {
     throw std::runtime_error(std::string("ZSTD decompression failed: ") + ZSTD_getErrorName(result));
   }
-
-  return decompressed;
 }
 
 template <typename T>
@@ -137,6 +95,13 @@ void AggregatedMessageSerializer::write_le(std::vector<uint8_t> &buffer, T value
   for (size_t i = 0; i < sizeof(T); ++i) {
     buffer.push_back(static_cast<uint8_t>((value >> (i * 8)) & 0xFF));
   }
+}
+
+void AggregatedMessageSerializer::write_str(std::vector<uint8_t> &buffer, const std::string &str) {
+  // Write string length
+  write_le<uint16_t>(buffer, static_cast<uint16_t>(str.size()));
+  // Write string data
+  buffer.insert(buffer.end(), str.begin(), str.end());
 }
 
 // Explicit template instantiations
