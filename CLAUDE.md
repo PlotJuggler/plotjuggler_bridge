@@ -367,7 +367,7 @@ See IMPLEMENTATION_PLAN.md for detailed milestone history. Key milestones 1-9 ar
 - Fixed serializer dangling pointer UB, wire format alignment, signal handler
 - Extracted duplicated time utility, fixed stats counting
 - Python test client updated for websocket-client library
-- 64 unit tests passing
+- 69 unit tests passing
 
 ## Important Design Decisions
 
@@ -423,7 +423,7 @@ See IMPLEMENTATION_PLAN.md for detailed milestone history. Key milestones 1-9 ar
 - Component isolation
 - Thread safety verification
 - Edge case handling
-- 64 tests across 7 test files
+- 69 tests across 7 test files
 
 ### Integration Tests (Python)
 - Full workflow testing with real rosbag data
@@ -537,12 +537,22 @@ ros2 bag play DATA/sample.mcap
 # Python test client
 pip install websocket-client zstandard
 python3 tests/integration/test_client.py --port 8080 --subscribe /topic1 /topic2
+
+# Build with Thread Sanitizer (TSAN)
+colcon build --packages-select pj_ros_bridge --build-base build_tsan --install-base install_tsan --cmake-args -DCMAKE_BUILD_TYPE=Release -DENABLE_TSAN=ON
+# Run TSAN tests (setarch needed on kernel 6.x for ASLR compat)
+TSAN_OPTIONS="suppressions=tsan_suppressions.txt" setarch $(uname -m) -R build_tsan/pj_ros_bridge/pj_ros_bridge_tests
+
+# Build with Address Sanitizer (ASAN)
+colcon build --packages-select pj_ros_bridge --build-base build_asan --install-base install_asan --cmake-args -DCMAKE_BUILD_TYPE=Release -DENABLE_ASAN=ON
+# Run ASAN tests
+ASAN_OPTIONS="new_delete_type_mismatch=0" LSAN_OPTIONS="suppressions=asan_suppressions.txt" build_asan/pj_ros_bridge/pj_ros_bridge_tests
 ```
 
 ---
 
-**Last Updated**: 2026-02-02
-**Project Phase**: WebSocket migration complete, bug fixes applied
+**Last Updated**: 2026-02-03
+**Project Phase**: WebSocket migration complete, bug fixes applied, sanitizer builds added
 **Middleware**: IXWebSocket (replaced ZeroMQ)
-**Test Status**: 64 unit tests passing (9 websocket middleware, 4 discovery, 3 schema, 10 buffer, 10 subscription, 10 session, 18 serializer)
+**Test Status**: 69 unit tests passing (11 websocket middleware, 4 discovery, 5 schema, 11 buffer, 11 subscription, 11 session, 15 serializer)
 **Executable**: pj_ros_bridge_node ready to run

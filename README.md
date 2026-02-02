@@ -85,7 +85,7 @@ source install/setup.bash
 ### Running Tests
 
 ```bash
-# Run all unit tests (64 tests)
+# Run all unit tests (69 tests)
 colcon test --packages-select pj_ros_bridge
 
 # View test results
@@ -253,7 +253,7 @@ pj_ros_bridge/
 │   ├── bridge_server.cpp
 │   └── main.cpp
 ├── tests/
-│   ├── unit/                        # 64 unit tests (gtest)
+│   ├── unit/                        # 69 unit tests (gtest)
 │   └── integration/
 │       └── test_client.py
 ├── 3rdparty/                        # Header-only dependencies
