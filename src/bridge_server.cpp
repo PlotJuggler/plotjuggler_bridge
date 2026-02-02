@@ -245,6 +245,20 @@ std::string BridgeServer::handle_subscribe(const std::string& client_id, const n
                         const std::string& topic, const std::shared_ptr<rclcpp::SerializedMessage>& msg,
                         uint64_t receive_time_ns) { message_buffer_->add_message(topic, receive_time_ns, msg); };
 
+    // Get schema BEFORE subscribing to avoid corrupting the reference count
+    // if schema extraction fails after subscribe() increments it.
+    std::string schema;
+    try {
+      schema = schema_extractor_->get_message_definition(topic_type);
+    } catch (const std::exception& e) {
+      RCLCPP_ERROR(node_->get_logger(), "Failed to get schema for topic '%s': %s", topic_name.c_str(), e.what());
+      json failure;
+      failure["topic"] = topic_name;
+      failure["reason"] = std::string("Schema extraction failed: ") + e.what();
+      failures.push_back(failure);
+      continue;
+    }
+
     // Subscribe via subscription manager
     bool success = subscription_manager_->subscribe(topic_name, topic_type, callback);
     if (!success) {
@@ -256,23 +270,12 @@ std::string BridgeServer::handle_subscribe(const std::string& client_id, const n
       continue;
     }
 
-    // Get schema
-    try {
-      std::string schema = schema_extractor_->get_message_definition(topic_type);
-      schemas[topic_name] = schema;
-      successfully_subscribed.insert(topic_name);
+    schemas[topic_name] = schema;
+    successfully_subscribed.insert(topic_name);
 
-      RCLCPP_INFO(
-          node_->get_logger(), "Client '%s' subscribed to topic '%s' (type: %s)", client_id.c_str(), topic_name.c_str(),
-          topic_type.c_str());
-    } catch (const std::exception& e) {
-      RCLCPP_ERROR(node_->get_logger(), "Failed to get schema for topic '%s': %s", topic_name.c_str(), e.what());
-      subscription_manager_->unsubscribe(topic_name);
-      json failure;
-      failure["topic"] = topic_name;
-      failure["reason"] = std::string("Schema extraction failed: ") + e.what();
-      failures.push_back(failure);
-    }
+    RCLCPP_INFO(
+        node_->get_logger(), "Client '%s' subscribed to topic '%s' (type: %s)", client_id.c_str(), topic_name.c_str(),
+        topic_type.c_str());
   }
 
   // Unsubscribe from removed topics
@@ -442,12 +445,17 @@ void BridgeServer::publish_aggregated_messages() {
       AggregatedMessageSerializer::compress_zstd(serializer.get_serialized_data(), compressed_data);
 
       // Send the same buffer to all clients in this group
+      bool any_sent = false;
       for (const auto& client_id : client_ids) {
-        bool success = middleware_->send_binary(client_id, compressed_data);
-        if (success) {
-          total_msg_count += group_msg_count;
-          total_bytes += compressed_data.size();
+        if (middleware_->send_binary(client_id, compressed_data)) {
+          any_sent = true;
         }
+      }
+
+      // Count messages once per group (not per client) to avoid inflation
+      if (any_sent) {
+        total_msg_count += group_msg_count;
+        total_bytes += compressed_data.size();
       }
     }
 
