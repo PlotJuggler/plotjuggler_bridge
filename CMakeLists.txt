@@ -10,6 +10,20 @@ endif()
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# Thread Sanitizer option
+option(ENABLE_TSAN "Enable Thread Sanitizer" OFF)
+if(ENABLE_TSAN)
+  add_compile_options(-fsanitize=thread -g -O1)
+  add_link_options(-fsanitize=thread)
+endif()
+
+# Address Sanitizer option
+option(ENABLE_ASAN "Enable Address Sanitizer" OFF)
+if(ENABLE_ASAN)
+  add_compile_options(-fsanitize=address -fno-omit-frame-pointer -g -O1)
+  add_link_options(-fsanitize=address)
+endif()
+
 # Add cmake module path for custom find modules
 list(APPEND CMAKE_MODULE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
 
@@ -125,6 +139,18 @@ if(BUILD_TESTING)
   ament_target_dependencies(${PROJECT_NAME}_tests
     rclcpp
   )
+
+  # When TSAN is enabled, suppress known third-party warnings during CTest runs
+  if(ENABLE_TSAN)
+    set_tests_properties(${PROJECT_NAME}_tests PROPERTIES
+      ENVIRONMENT "TSAN_OPTIONS=suppressions=${CMAKE_CURRENT_SOURCE_DIR}/tsan_suppressions.txt")
+  endif()
+
+  # When ASAN is enabled, suppress known third-party issues during CTest runs
+  if(ENABLE_ASAN)
+    set_tests_properties(${PROJECT_NAME}_tests PROPERTIES
+      ENVIRONMENT "ASAN_OPTIONS=new_delete_type_mismatch=0;LSAN_OPTIONS=suppressions=${CMAKE_CURRENT_SOURCE_DIR}/asan_suppressions.txt")
+  endif()
 endif()
 
 ament_package()

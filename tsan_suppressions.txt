@@ -1,0 +1,7 @@
+# ThreadSanitizer suppressions for third-party libraries.
+# Usage: TSAN_OPTIONS="suppressions=tsan_suppressions.txt" ./binary
+
+# FastDDS (eProsima) lock-order-inversion and double-lock warnings
+# in ROS2 Humble's libfastrtps.so — upstream issues, not actionable here.
+deadlock:libfastrtps.so
+mutex:libfastrtps.so

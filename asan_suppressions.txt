@@ -1,0 +1,9 @@
+# AddressSanitizer / LeakSanitizer suppressions for third-party libraries.
+# Usage: LSAN_OPTIONS="suppressions=asan_suppressions.txt" ./binary
+#
+# For new-delete-type-mismatch in ROS2 Humble's rclcpp/rcutils allocator,
+# use ASAN_OPTIONS=new_delete_type_mismatch=0 (no file-based suppression exists).
+
+# ROS2 Humble known leaks in type support and rcutils
+leak:librosidl_typesupport_cpp.so
+leak:librcutils.so
