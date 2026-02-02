@@ -6,34 +6,32 @@ This document describes the client-server protocol for `pj_ros_bridge`. It is in
 
 - [Overview](#overview)
 - [Connection Setup](#connection-setup)
-- [API Commands (REQ-REP)](#api-commands-req-rep)
+- [API Commands](#api-commands)
   - [get_topics](#get_topics)
   - [subscribe](#subscribe)
   - [heartbeat](#heartbeat)
-- [Data Streaming (PUB-SUB)](#data-streaming-pub-sub)
+- [Data Streaming](#data-streaming)
 - [Binary Serialization Format](#binary-serialization-format)
 - [Error Handling](#error-handling)
 - [Session Management](#session-management)
-- [Client Implementation Guide](#client-implementation-guide)
 
 ---
 
 ## Overview
 
-The `pj_ros_bridge` server uses two ZeroMQ communication patterns:
+The `pj_ros_bridge` server uses a single **WebSocket** connection per client:
 
-1. **REQ-REP** (Request-Reply): For API commands - client sends JSON requests, server responds with JSON
-2. **PUB-SUB** (Publish-Subscribe): For data streaming - server publishes aggregated messages at 50 Hz
+- **Text frames**: JSON API commands and responses
+- **Binary frames**: ZSTD-compressed aggregated message data at 50 Hz
 
-### Network Ports
+### Network Port
 
-- **REQ-REP Port**: 5555 (default, configurable)
-- **PUB-SUB Port**: 5556 (default, configurable)
+- **WebSocket Port**: 8080 (default, configurable via ROS2 `port` parameter)
 
 ### Data Formats
 
-- **API Messages**: JSON (UTF-8 encoded strings)
-- **Data Stream**: Custom binary format with ZSTD compression
+- **API Messages**: JSON (UTF-8 text frames)
+- **Data Stream**: Custom binary format with ZSTD compression (binary frames)
 
 ---
 
@@ -41,38 +39,24 @@ The `pj_ros_bridge` server uses two ZeroMQ communication patterns:
 
 ### Client Connection Sequence
 
-1. **Connect to REQ socket** (`tcp://server:5555`)
-2. **Discover topics** using `get_topics` command
-3. **Subscribe to topics** using `subscribe` command
-4. **Connect to SUB socket** (`tcp://server:5556`) and subscribe to all topics (`""`)
-5. **Start heartbeat thread** to send heartbeat every 1 second
-6. **Receive and process** aggregated messages from SUB socket
+1. **Connect via WebSocket** (`ws://server:8080`)
+2. **Discover topics** using `get_topics` command (text frame)
+3. **Subscribe to topics** using `subscribe` command (text frame)
+4. **Start heartbeat** sending heartbeat every 1 second (text frame)
+5. **Receive data** as binary frames pushed by the server
 
-### ZeroMQ Socket Configuration
+### WebSocket Configuration
 
-```python
-import zmq
-
-context = zmq.Context()
-
-# REQ socket for API
-req_socket = context.socket(zmq.REQ)
-req_socket.connect("tcp://localhost:5555")
-
-# SUB socket for data
-sub_socket = context.socket(zmq.SUB)
-sub_socket.connect("tcp://localhost:5556")
-sub_socket.setsockopt(zmq.SUBSCRIBE, b"")  # Subscribe to all topics
-```
+- **URL**: `ws://server:8080` (default port)
+- **Protocol**: Standard WebSocket (RFC 6455)
+- **Text frames**: JSON API commands and responses
+- **Binary frames**: ZSTD-compressed aggregated message data
 
 ---
 
-## API Commands (REQ-REP)
+## API Commands
 
-All API commands follow the REQ-REP pattern:
-1. Client sends JSON request
-2. Server responds with JSON response
-3. Requests and responses are always paired (one response per request)
+All API commands are sent as JSON text frames. The server responds with a JSON text frame.
 
 ### get_topics
 
@@ -110,20 +94,6 @@ Discover all available ROS2 topics.
 - `topics` (array): List of available topics
   - `name` (string): Topic name (with leading `/`)
   - `type` (string): ROS2 message type (format: `package_name/msg/MessageType`)
-
-#### Example
-
-```python
-import json
-
-request = {"command": "get_topics"}
-req_socket.send_string(json.dumps(request))
-response = json.loads(req_socket.recv_string())
-
-print(f"Found {len(response['topics'])} topics")
-for topic in response['topics']:
-    print(f"  {topic['name']} ({topic['type']})")
-```
 
 ---
 
@@ -235,28 +205,6 @@ float64 z
 float64 w
 ```
 
-#### Example
-
-```python
-request = {
-    "command": "subscribe",
-    "topics": ["/imu/data", "/camera/image"]
-}
-req_socket.send_string(json.dumps(request))
-response = json.loads(req_socket.recv_string())
-
-if response['status'] == 'success':
-    print(f"Subscribed to {len(response['schemas'])} topics")
-    for topic, schema in response['schemas'].items():
-        print(f"Schema for {topic}:")
-        print(schema[:200] + "...")  # Print first 200 chars
-elif response['status'] == 'partial_success':
-    print(f"Subscribed to {len(response['schemas'])} topics")
-    print(f"Failed subscriptions: {len(response['failures'])}")
-    for failure in response['failures']:
-        print(f"  {failure['topic']}: {failure['reason']}")
-```
-
 ---
 
 ### heartbeat
@@ -288,32 +236,15 @@ Send a heartbeat to keep the session alive. **Required every 1 second.**
   - Removes the client session
   - Stops sending data to that client
 
-#### Example
+#### Implementation Notes
 
-```python
-import threading
-import time
-
-def heartbeat_thread(req_socket):
-    while running:
-        request = {"command": "heartbeat"}
-        req_socket.send_string(json.dumps(request))
-        response = req_socket.recv_string()  # Wait for acknowledgment
-        time.sleep(1.0)  # Send every second
-
-# Start heartbeat in background thread
-heartbeat = threading.Thread(target=heartbeat_thread, args=(req_socket,))
-heartbeat.daemon = True
-heartbeat.start()
-```
-
-**Important**: The REQ socket can only have one outstanding request at a time. If you're sending other commands, you must wait for their responses before sending the next heartbeat.
+With WebSocket, both API commands and data stream share a single connection. The heartbeat can be sent from a background thread (using a send lock) while the main thread receives frames. Heartbeat responses arrive as text frames and can be distinguished from binary data frames.
 
 ---
 
-## Data Streaming (PUB-SUB)
+## Data Streaming
 
-After subscribing to topics, the server publishes aggregated messages at 50 Hz via the PUB socket.
+After subscribing to topics, the server broadcasts aggregated messages at 50 Hz as WebSocket binary frames.
 
 ### Message Flow
 
@@ -321,22 +252,13 @@ After subscribing to topics, the server publishes aggregated messages at 50 Hz v
 2. Every 20ms (50 Hz), server aggregates all new messages
 3. Aggregated message is serialized to binary format
 4. Binary data is compressed using ZSTD
-5. Compressed data is published via PUB socket
+5. Compressed data is sent as a WebSocket binary frame to all connected clients
 
 ### Receiving Data
 
-```python
-# This is a blocking call - will wait for next message
-compressed_data = sub_socket.recv()
-
-# Decompress using ZSTD
-import zstandard as zstd
-dctx = zstd.ZstdDecompressor()
-decompressed_data = dctx.decompress(compressed_data)
-
-# Parse binary format (see next section)
-messages = parse_aggregated_message(decompressed_data)
-```
+1. Receive binary frame from WebSocket connection
+2. Decompress using ZSTD decompression library
+3. Parse the decompressed binary data according to format below
 
 ### Important Notes
 
@@ -344,6 +266,7 @@ messages = parse_aggregated_message(decompressed_data)
 - If no topics are publishing, you may receive messages less frequently than 50 Hz
 - Each aggregated message may contain multiple messages from different topics
 - Messages from the same topic may appear multiple times if they were published between aggregation cycles
+- Text frames received during data streaming are API responses (e.g., heartbeat acknowledgements) and should be handled separately
 
 ---
 
@@ -353,8 +276,9 @@ The aggregated message uses a custom little-endian binary format.
 
 ### Message Structure
 
+Messages are serialized in a streaming format with no header or message count. Parse sequentially until the buffer is consumed.
+
 ```
-[Message Count: uint32_t]
 [Message 1]
 [Message 2]
 ...
@@ -375,8 +299,7 @@ The aggregated message uses a custom little-endian binary format.
 
 | Field | Type | Size | Description |
 |-------|------|------|-------------|
-| Message Count | `uint32_t` | 4 bytes | Number of messages in aggregation |
-| **For each message:** | | | |
+| **For each message (repeat until end of buffer):** | | | |
 | Topic Name Length | `uint16_t` | 2 bytes | Length of topic name string |
 | Topic Name | `char[]` | N bytes | UTF-8 encoded topic name |
 | Timestamp | `uint64_t` | 8 bytes | Nanoseconds since Unix epoch |
@@ -393,106 +316,9 @@ The timestamp is the time when the message was **received** by the bridge server
 
 ### Message Data
 
-The message data is the raw CDR (Common Data Representation) serialized ROS2 message. This is the same serialization format used by ROS2 internally. You can deserialize it using ROS2 CDR libraries or parse it manually if you know the message structure.
+The message data is the raw CDR (Common Data Representation) serialized ROS2 message. This is the same serialization format used by ROS2 internally.
 
-### Python Deserialization Example
-
-```python
-import struct
-
-def parse_aggregated_message(data):
-    messages = []
-    offset = 0
-
-    # Read message count
-    message_count = struct.unpack_from('<I', data, offset)[0]
-    offset += 4
-
-    for _ in range(message_count):
-        # Read topic name length
-        topic_name_len = struct.unpack_from('<H', data, offset)[0]
-        offset += 2
-
-        # Read topic name
-        topic_name = data[offset:offset + topic_name_len].decode('utf-8')
-        offset += topic_name_len
-
-        # Read timestamp
-        timestamp_ns = struct.unpack_from('<Q', data, offset)[0]
-        offset += 8
-
-        # Read message data length
-        msg_data_len = struct.unpack_from('<I', data, offset)[0]
-        offset += 4
-
-        # Read message data
-        msg_data = data[offset:offset + msg_data_len]
-        offset += msg_data_len
-
-        messages.append({
-            'topic': topic_name,
-            'timestamp_ns': timestamp_ns,
-            'data': msg_data
-        })
-
-    return messages
-```
-
-### C++ Deserialization Example
-
-```cpp
-#include <cstdint>
-#include <string>
-#include <vector>
-
-struct Message {
-    std::string topic;
-    uint64_t timestamp_ns;
-    std::vector<uint8_t> data;
-};
-
-std::vector<Message> parse_aggregated_message(const std::vector<uint8_t>& data) {
-    std::vector<Message> messages;
-    size_t offset = 0;
-
-    // Read message count
-    uint32_t message_count;
-    std::memcpy(&message_count, &data[offset], sizeof(uint32_t));
-    offset += sizeof(uint32_t);
-
-    for (uint32_t i = 0; i < message_count; ++i) {
-        Message msg;
-
-        // Read topic name length
-        uint16_t topic_name_len;
-        std::memcpy(&topic_name_len, &data[offset], sizeof(uint16_t));
-        offset += sizeof(uint16_t);
-
-        // Read topic name
-        msg.topic = std::string(reinterpret_cast<const char*>(&data[offset]), topic_name_len);
-        offset += topic_name_len;
-
-        // Read timestamp
-        std::memcpy(&msg.timestamp_ns, &data[offset], sizeof(uint64_t));
-        offset += sizeof(uint64_t);
-
-        // Read message data length
-        uint32_t msg_data_len;
-        std::memcpy(&msg_data_len, &data[offset], sizeof(uint32_t));
-        offset += sizeof(uint32_t);
-
-        // Read message data
-        msg.data = std::vector<uint8_t>(data.begin() + offset, data.begin() + offset + msg_data_len);
-        offset += msg_data_len;
-
-        messages.push_back(msg);
-    }
-
-    return messages;
-}
-```
-
----
+You can deserialize it using ROS2 CDR libraries or parse it manually if you know the message structure.
 
 ## Error Handling
 
@@ -517,17 +343,7 @@ All API errors follow this format:
 | `UNKNOWN_COMMAND` | Invalid command name | Use valid command (get_topics, subscribe, heartbeat) |
 | `TOPIC_NOT_FOUND` | Topic does not exist | Check available topics with get_topics |
 | `ALL_SUBSCRIPTIONS_FAILED` | All requested topics failed | Check failures array for specific reasons |
-| `INVALID_CLIENT` | No client identity | ZMQ connection issue |
 | `INTERNAL_ERROR` | Server internal error | Check server logs |
-
-### Middleware Initialization Errors
-
-If the server fails to start, you may see detailed error messages like:
-
-- `"Failed to bind REP socket to port 5555: Address already in use (errno 98)"`
-- `"Failed to create ZMQ context: ..."`
-
-These errors are logged by the server and prevent startup.
 
 ### Subscription Failures
 
@@ -559,14 +375,15 @@ Common reasons:
 
 ### Client Identity
 
-The server identifies clients using ZeroMQ's built-in connection identity. Each client connection automatically gets a unique session.
+The server identifies clients using the WebSocket connection's unique ID (`connectionState->getId()`). Each WebSocket connection automatically gets a unique session.
 
 ### Session Lifecycle
 
 1. **Creation**: Session created on first API request (get_topics, subscribe, or heartbeat)
 2. **Active**: Session remains active as long as heartbeats are received
 3. **Timeout**: After 10 seconds without heartbeat, session is destroyed
-4. **Cleanup**: On timeout or disconnect, server:
+4. **Disconnect**: When WebSocket connection closes, session is immediately cleaned up
+5. **Cleanup**: On timeout or disconnect, server:
    - Unsubscribes from all client's topics
    - Removes topic subscriptions that no longer have any clients
    - Deletes session data
@@ -588,179 +405,18 @@ This optimization reduces resource usage and improves performance.
 
 ---
 
-## Client Implementation Guide
-
-### Minimal Client (Python)
-
-```python
-import zmq
-import json
-import zstandard as zstd
-import struct
-import threading
-import time
-
-class BridgeClient:
-    def __init__(self, req_addr="tcp://localhost:5555", pub_addr="tcp://localhost:5556"):
-        self.context = zmq.Context()
-
-        # REQ socket for API
-        self.req_socket = self.context.socket(zmq.REQ)
-        self.req_socket.connect(req_addr)
-
-        # SUB socket for data
-        self.sub_socket = self.context.socket(zmq.SUB)
-        self.sub_socket.connect(pub_addr)
-        self.sub_socket.setsockopt(zmq.SUBSCRIBE, b"")
-
-        # Start heartbeat thread
-        self.running = True
-        self.heartbeat_thread = threading.Thread(target=self._heartbeat_loop)
-        self.heartbeat_thread.daemon = True
-        self.heartbeat_thread.start()
-
-    def get_topics(self):
-        """Get list of available topics"""
-        request = {"command": "get_topics"}
-        self.req_socket.send_string(json.dumps(request))
-        response = json.loads(self.req_socket.recv_string())
-        return response['topics']
-
-    def subscribe(self, topics):
-        """Subscribe to list of topics"""
-        request = {"command": "subscribe", "topics": topics}
-        self.req_socket.send_string(json.dumps(request))
-        response = json.loads(self.req_socket.recv_string())
-        return response
-
-    def _heartbeat_loop(self):
-        """Background thread sending heartbeats"""
-        while self.running:
-            try:
-                request = {"command": "heartbeat"}
-                self.req_socket.send_string(json.dumps(request))
-                self.req_socket.recv_string()  # Wait for ack
-            except:
-                break
-            time.sleep(1.0)
-
-    def receive_messages(self):
-        """Receive and decompress aggregated messages"""
-        compressed_data = self.sub_socket.recv()
-
-        # Decompress
-        dctx = zstd.ZstdDecompressor()
-        data = dctx.decompress(compressed_data)
-
-        # Parse
-        return self._parse_aggregated_message(data)
-
-    def _parse_aggregated_message(self, data):
-        """Parse binary aggregated message format"""
-        messages = []
-        offset = 0
-
-        # Read message count
-        message_count = struct.unpack_from('<I', data, offset)[0]
-        offset += 4
-
-        for _ in range(message_count):
-            # Topic name
-            topic_name_len = struct.unpack_from('<H', data, offset)[0]
-            offset += 2
-            topic_name = data[offset:offset + topic_name_len].decode('utf-8')
-            offset += topic_name_len
-
-            # Timestamp
-            timestamp_ns = struct.unpack_from('<Q', data, offset)[0]
-            offset += 8
-
-            # Message data
-            msg_data_len = struct.unpack_from('<I', data, offset)[0]
-            offset += 4
-            msg_data = data[offset:offset + msg_data_len]
-            offset += msg_data_len
-
-            messages.append({
-                'topic': topic_name,
-                'timestamp_ns': timestamp_ns,
-                'data': msg_data
-            })
-
-        return messages
-
-    def close(self):
-        """Shutdown client"""
-        self.running = False
-        self.heartbeat_thread.join(timeout=2.0)
-        self.req_socket.close()
-        self.sub_socket.close()
-        self.context.term()
-
-# Usage example
-client = BridgeClient()
-
-# Get available topics
-topics = client.get_topics()
-print(f"Available topics: {[t['name'] for t in topics]}")
-
-# Subscribe to topics
-response = client.subscribe(["/imu/data", "/camera/image"])
-if response['status'] == 'success':
-    print(f"Subscribed to {len(response['schemas'])} topics")
-
-# Receive messages
-try:
-    while True:
-        messages = client.receive_messages()
-        for msg in messages:
-            print(f"Received {msg['topic']} at {msg['timestamp_ns']}")
-except KeyboardInterrupt:
-    client.close()
-```
-
-### Key Implementation Points
-
-1. **Two Sockets**: Always use separate REQ and SUB sockets
-2. **Heartbeat Thread**: Run heartbeat in background thread to avoid blocking
-3. **Error Handling**: Check `status` field in all responses
-4. **ZSTD Decompression**: Always decompress data from SUB socket before parsing
-5. **Little-Endian**: Use `<` format character in struct.unpack for little-endian
-6. **Session Cleanup**: Ensure heartbeat continues running while client is active
-
-### Testing Your Client
-
-Use the included Python test client as reference:
-```bash
-python3 tests/integration/test_client.py --subscribe /topic1 /topic2
-```
-
-The test client includes:
-- Complete error handling
-- Statistics tracking
-- Latency measurement
-- Command-line interface
-
----
-
 ## Summary
 
 ### Quick Reference
 
-**REQ-REP Commands** (port 5555):
-- `get_topics`: Discover topics
-- `subscribe`: Subscribe to topics (absolute list)
-- `heartbeat`: Keep session alive (every 1 second)
-
-**PUB-SUB Data** (port 5556):
-- 50 Hz aggregated messages
-- ZSTD compressed
-- Custom binary format (little-endian)
+**WebSocket** (port 8080):
+- Text frames: `get_topics`, `subscribe`, `heartbeat` (JSON)
+- Binary frames: 50 Hz aggregated messages (ZSTD compressed)
 
 **Session Management**:
 - Heartbeat every 1 second required
 - 10 second timeout without heartbeat
-- Automatic cleanup on timeout
+- Automatic cleanup on timeout or disconnect
 
 **Error Handling**:
 - Check `status` field in responses

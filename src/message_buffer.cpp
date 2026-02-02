@@ -14,6 +14,8 @@
 
 #include "pj_ros_bridge/message_buffer.hpp"
 
+#include "pj_ros_bridge/time_utils.hpp"
+
 namespace pj_ros_bridge {
 
 MessageBuffer::MessageBuffer() : last_read_timestamp_ns_(get_current_time_ns()) {}
@@ -82,12 +84,6 @@ void MessageBuffer::cleanup_old_messages() {
       ++it;
     }
   }
-}
-
-uint64_t MessageBuffer::get_current_time_ns() {
-  auto now = std::chrono::system_clock::now();
-  auto duration = now.time_since_epoch();
-  return std::chrono::duration_cast<std::chrono::nanoseconds>(duration).count();
 }
 
 }  // namespace pj_ros_bridge

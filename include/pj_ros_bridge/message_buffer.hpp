@@ -108,11 +108,6 @@ class MessageBuffer {
    * Must be called with mutex_ locked.
    */
   void cleanup_old_messages();
-
-  /**
-   * @brief Get current time in nanoseconds since epoch
-   */
-  static uint64_t get_current_time_ns();
 };
 
 }  // namespace pj_ros_bridge

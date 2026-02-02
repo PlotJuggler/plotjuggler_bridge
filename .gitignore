@@ -1,1 +1,3 @@
 /DATA/*.mcap
+/conan_output/
+CMakeUserPresets.json

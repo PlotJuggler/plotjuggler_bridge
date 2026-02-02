@@ -16,22 +16,18 @@ void AggregatedMessageSerializer::serialize_message(
     const std::string &topic_name, uint64_t timestamp_ns, const rclcpp::SerializedMessage &serialized_msg) {
   write_str(serialized_data_, topic_name);
 
-  // Publish timestamp (uint64_t)
-  write_le(serialized_data_, timestamp_ns);
-
-  // Receive timestamp (uint64_t)
+  // Timestamp (uint64_t) - receive time
   write_le(serialized_data_, timestamp_ns);
 
   // Message data length (uint32_t)
-  int32_t msg_size = static_cast<int32_t>(serialized_msg.size());
+  uint32_t msg_size = static_cast<uint32_t>(serialized_msg.size());
   write_le(serialized_data_, msg_size);
 
   // Message data (CDR bytes) using memcpy
   const uint8_t *read_ptr = static_cast<const uint8_t *>(serialized_msg.get_rcl_serialized_message().buffer);
-  uint8_t *dest_ptr = serialized_data_.data() + serialized_data_.size();
-  // allocate and copy
-  serialized_data_.resize(serialized_data_.size() + msg_size);
-  std::memcpy(dest_ptr, read_ptr, msg_size);
+  size_t old_size = serialized_data_.size();
+  serialized_data_.resize(old_size + msg_size);
+  std::memcpy(serialized_data_.data() + old_size, read_ptr, msg_size);
 }
 
 void AggregatedMessageSerializer::clear() {

@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 """
-ROS2 Bridge Test Client
+ROS2 Bridge Test Client (WebSocket)
 
-This script connects to the pj_ros_bridge server and allows testing
-of all API operations including topic discovery, subscription, and
+This script connects to the pj_ros_bridge server over WebSocket and allows
+testing of all API operations including topic discovery, subscription, and
 receiving aggregated messages.
+
+Dependencies:
+    pip install websocket-client zstandard
 """
 
 import argparse
@@ -13,33 +16,32 @@ import struct
 import sys
 import threading
 import time
-from collections import defaultdict
+from collections import defaultdict, deque
 from datetime import datetime
 
-import zmq
+import websocket
 import zstandard as zstd
 
 
 class BridgeClient:
-    """Client for pj_ros_bridge server"""
+    """Client for pj_ros_bridge server over WebSocket"""
 
-    def __init__(self, req_host="localhost", req_port=5555, pub_port=5556):
+    def __init__(self, host="localhost", port=8080):
         """
         Initialize the bridge client
 
         Args:
-            req_host: Server hostname for REQ-REP socket
-            req_port: Server port for REQ-REP socket (API)
-            pub_port: Server port for PUB-SUB socket (data stream)
+            host: Server hostname
+            port: Server WebSocket port
         """
-        self.req_host = req_host
-        self.req_port = req_port
-        self.pub_port = pub_port
+        self.url = f"ws://{host}:{port}"
+        self.ws = None
 
-        # ZeroMQ context and sockets
-        self.context = zmq.Context()
-        self.req_socket = None
-        self.sub_socket = None
+        # Buffer for binary frames received while waiting for a text response
+        self._pending_binary = deque()
+
+        # Lock for send operations (recv is single-threaded from main loop)
+        self._send_lock = threading.Lock()
 
         # Heartbeat thread
         self.heartbeat_thread = None
@@ -54,35 +56,25 @@ class BridgeClient:
 
     def connect(self):
         """Connect to the bridge server"""
-        # Create REQ socket for API
-        self.req_socket = self.context.socket(zmq.REQ)
-        req_addr = f"tcp://{self.req_host}:{self.req_port}"
-        self.req_socket.connect(req_addr)
-        print(f"Connected to API socket: {req_addr}")
-
-        # Create SUB socket for data stream
-        self.sub_socket = self.context.socket(zmq.SUB)
-        pub_addr = f"tcp://{self.req_host}:{self.pub_port}"
-        self.sub_socket.connect(pub_addr)
-        self.sub_socket.setsockopt(zmq.SUBSCRIBE, b"")  # Subscribe to all messages
-        print(f"Connected to data stream socket: {pub_addr}")
-
+        self.ws = websocket.create_connection(self.url)
+        print(f"Connected to WebSocket server: {self.url}")
         self.start_time = time.time()
 
     def disconnect(self):
         """Disconnect from the server"""
         self.stop_heartbeat()
 
-        if self.req_socket:
-            self.req_socket.close()
-        if self.sub_socket:
-            self.sub_socket.close()
+        if self.ws:
+            self.ws.close()
 
         print("Disconnected from server")
 
     def send_request(self, command_data):
         """
-        Send a request to the server
+        Send a JSON request and wait for the JSON response.
+
+        Any binary frames received while waiting are buffered for later
+        retrieval via receive_messages().
 
         Args:
             command_data: Dictionary containing the request
@@ -90,11 +82,17 @@ class BridgeClient:
         Returns:
             Dictionary containing the response
         """
-        request_json = json.dumps(command_data)
-        self.req_socket.send_string(request_json)
+        with self._send_lock:
+            self.ws.send(json.dumps(command_data))
 
-        response_json = self.req_socket.recv_string()
-        return json.loads(response_json)
+        # Read frames until we get a text response
+        while True:
+            opcode, data = self.ws.recv_data()
+            if opcode == websocket.ABNF.OPCODE_TEXT:
+                return json.loads(data.decode("utf-8"))
+            elif opcode == websocket.ABNF.OPCODE_BINARY:
+                # Buffer binary data for later
+                self._pending_binary.append(data)
 
     def get_topics(self):
         """
@@ -125,24 +123,24 @@ class BridgeClient:
         request = {"command": "subscribe", "topics": topics}
         response = self.send_request(request)
 
-        if response.get("status") == "success":
+        if response.get("status") in ("success", "partial_success"):
             return response.get("schemas", {})
         else:
             error_msg = response.get("message", "Unknown error")
             raise Exception(f"Failed to subscribe: {error_msg}")
 
     def send_heartbeat(self):
-        """Send a heartbeat to the server"""
-        request = {"command": "heartbeat"}
-        response = self.send_request(request)
-
-        if response.get("status") != "ok":
-            error_msg = response.get("message", "Unknown error")
-            print(f"Warning: Heartbeat failed: {error_msg}")
+        """Send a heartbeat to the server (thread-safe for send, but not recv)"""
+        with self._send_lock:
+            self.ws.send(json.dumps({"command": "heartbeat"}))
+        # Note: response will be picked up by the main recv loop
 
     def start_heartbeat(self, interval=1.0):
         """
-        Start heartbeat thread
+        Start heartbeat thread.
+
+        The heartbeat thread only sends; responses are consumed by the
+        main receive loop and silently discarded.
 
         Args:
             interval: Heartbeat interval in seconds (default: 1.0)
@@ -169,29 +167,14 @@ class BridgeClient:
                 self.heartbeat_thread.join(timeout=2.0)
             print("Heartbeat thread stopped")
 
-    def decompress_zstd(self, compressed_data):
-        """
-        Decompress ZSTD data
-
-        Args:
-            compressed_data: Compressed bytes
-
-        Returns:
-            Decompressed bytes
-        """
-        return self.decompressor.decompress(compressed_data)
-
     def deserialize_aggregated_messages(self, data):
         """
-        Deserialize aggregated messages from binary format
+        Deserialize aggregated messages from binary format (streaming, no header).
 
-        Format:
-        - Number of messages (uint32_t)
-        - For each message:
+        Format per message:
           - Topic name length (uint16_t)
           - Topic name (N bytes UTF-8)
-          - Publish timestamp (uint64_t nanoseconds)
-          - Receive timestamp (uint64_t nanoseconds)
+          - Timestamp (uint64_t nanoseconds)
           - Message data length (uint32_t)
           - Message data (N bytes)
 
@@ -204,16 +187,8 @@ class BridgeClient:
         messages = []
         offset = 0
 
-        # Read message count
-        if len(data) < 4:
-            return messages
-
-        msg_count = struct.unpack("<I", data[offset : offset + 4])[0]
-        offset += 4
-
-        # Read each message
-        for _ in range(msg_count):
-            if offset >= len(data):
+        while offset < len(data):
+            if offset + 2 > len(data):
                 break
 
             # Topic name length
@@ -224,12 +199,8 @@ class BridgeClient:
             topic_name = data[offset : offset + topic_len].decode("utf-8")
             offset += topic_len
 
-            # Publish timestamp
-            pub_time_ns = struct.unpack("<Q", data[offset : offset + 8])[0]
-            offset += 8
-
-            # Receive timestamp
-            recv_time_ns = struct.unpack("<Q", data[offset : offset + 8])[0]
+            # Timestamp
+            timestamp_ns = struct.unpack("<Q", data[offset : offset + 8])[0]
             offset += 8
 
             # Message data length
@@ -243,47 +214,53 @@ class BridgeClient:
             messages.append(
                 {
                     "topic": topic_name,
-                    "publish_time_ns": pub_time_ns,
-                    "receive_time_ns": recv_time_ns,
+                    "timestamp_ns": timestamp_ns,
                     "data": msg_data,
                 }
             )
 
         return messages
 
-    def receive_messages(self, timeout_ms=100):
+    def _process_binary_frame(self, compressed_data):
+        """Decompress and deserialize a single binary frame"""
+        decompressed = self.decompressor.decompress(compressed_data)
+        messages = self.deserialize_aggregated_messages(decompressed)
+
+        for msg in messages:
+            topic = msg["topic"]
+            self.stats[topic]["count"] += 1
+            self.stats[topic]["bytes"] += len(msg["data"])
+
+        return messages
+
+    def receive_messages(self, timeout=0.1):
         """
-        Receive and deserialize aggregated messages
+        Receive and deserialize aggregated messages.
+
+        Checks buffered binary frames first, then reads from the socket.
+        Text frames (heartbeat responses) are silently discarded.
 
         Args:
-            timeout_ms: Receive timeout in milliseconds
+            timeout: Receive timeout in seconds
 
         Returns:
             List of message dictionaries, or None if timeout
         """
+        # Check buffered binary frames first
+        if self._pending_binary:
+            compressed_data = self._pending_binary.popleft()
+            return self._process_binary_frame(compressed_data)
+
+        # Read from socket with timeout
+        self.ws.settimeout(timeout)
         try:
-            # Set receive timeout
-            self.sub_socket.setsockopt(zmq.RCVTIMEO, timeout_ms)
-
-            # Receive compressed data
-            compressed_data = self.sub_socket.recv()
-
-            # Decompress
-            decompressed_data = self.decompress_zstd(compressed_data)
-
-            # Deserialize
-            messages = self.deserialize_aggregated_messages(decompressed_data)
-
-            # Update statistics
-            for msg in messages:
-                topic = msg["topic"]
-                self.stats[topic]["count"] += 1
-                self.stats[topic]["bytes"] += len(msg["data"])
-
-            return messages
-
-        except zmq.Again:
-            # Timeout
+            opcode, data = self.ws.recv_data()
+            if opcode == websocket.ABNF.OPCODE_BINARY:
+                return self._process_binary_frame(data)
+            elif opcode == websocket.ABNF.OPCODE_TEXT:
+                # Heartbeat response or other text - discard
+                return None
+        except websocket.WebSocketTimeoutException:
             return None
         except Exception as e:
             print(f"Error receiving messages: {e}")
@@ -324,7 +301,7 @@ class BridgeClient:
 
 def main():
     """Main entry point"""
-    parser = argparse.ArgumentParser(description="pj_ros_bridge test client")
+    parser = argparse.ArgumentParser(description="pj_ros_bridge test client (WebSocket)")
 
     parser.add_argument(
         "--server",
@@ -332,16 +309,10 @@ def main():
         help="Server hostname (default: localhost)",
     )
     parser.add_argument(
-        "--req-port",
+        "--port",
         type=int,
-        default=5555,
-        help="REQ-REP port (default: 5555)",
-    )
-    parser.add_argument(
-        "--pub-port",
-        type=int,
-        default=5556,
-        help="PUB-SUB port (default: 5556)",
+        default=8080,
+        help="WebSocket port (default: 8080)",
     )
     parser.add_argument(
         "--command",
@@ -369,7 +340,7 @@ def main():
     args = parser.parse_args()
 
     # Create client
-    client = BridgeClient(args.server, args.req_port, args.pub_port)
+    client = BridgeClient(args.server, args.port)
 
     try:
         # Connect to server
@@ -414,15 +385,15 @@ def main():
 
             try:
                 while time.time() - start_time < args.duration:
-                    messages = client.receive_messages(timeout_ms=100)
+                    messages = client.receive_messages(timeout=0.1)
 
                     if messages:
                         msg_count += len(messages)
 
                         if args.verbose:
                             for msg in messages:
-                                # Calculate latency
-                                latency_ns = msg["receive_time_ns"] - msg["publish_time_ns"]
+                                now_ns = int(time.time() * 1_000_000_000)
+                                latency_ns = now_ns - msg["timestamp_ns"]
                                 latency_ms = latency_ns / 1_000_000
 
                                 print(

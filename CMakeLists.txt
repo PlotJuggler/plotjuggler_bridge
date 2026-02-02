@@ -13,6 +13,9 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # Add cmake module path for custom find modules
 list(APPEND CMAKE_MODULE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
 
+# Add Conan-generated package paths
+list(APPEND CMAKE_PREFIX_PATH ${CMAKE_CURRENT_SOURCE_DIR}/conan_output)
+
 # Find ROS2 dependencies
 find_package(ament_cmake REQUIRED)
 find_package(ament_index_cpp REQUIRED)
@@ -20,6 +23,7 @@ find_package(rclcpp REQUIRED)
 
 # Find external dependencies
 find_package(ZSTD REQUIRED)
+find_package(ixwebsocket REQUIRED)
 
 # Include directories
 include_directories(
@@ -39,7 +43,7 @@ target_include_directories(data_path INTERFACE ${CMAKE_BINARY_DIR}/include)
 
 # Create library
 add_library(${PROJECT_NAME}_lib
-  src/middleware/zmq_middleware.cpp
+  src/middleware/websocket_middleware.cpp
   src/topic_discovery.cpp
   src/schema_extractor.cpp
   src/message_buffer.cpp
@@ -51,7 +55,7 @@ add_library(${PROJECT_NAME}_lib
 
 target_link_libraries(${PROJECT_NAME}_lib
   zstd::libzstd_shared
-  zmq
+  ixwebsocket::ixwebsocket
 )
 
 ament_target_dependencies(${PROJECT_NAME}_lib
@@ -98,7 +102,7 @@ if(BUILD_TESTING)
 
   # Add unit tests
   ament_add_gtest(${PROJECT_NAME}_tests
-    tests/unit/test_middleware.cpp
+    tests/unit/test_websocket_middleware.cpp
     tests/unit/test_topic_discovery.cpp
     tests/unit/test_schema_extractor.cpp
     tests/unit/test_message_buffer.cpp

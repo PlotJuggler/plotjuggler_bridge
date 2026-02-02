@@ -20,7 +20,7 @@ namespace pj_ros_bridge {
 /**
  * @brief Main bridge server that coordinates all components
  *
- * Orchestrates the ROS2 to ZMQ bridge by managing:
+ * Orchestrates the ROS2 bridge by managing:
  * - Client sessions and heartbeats
  * - Topic discovery and subscriptions
  * - Message buffering and aggregation
@@ -34,14 +34,13 @@ class BridgeServer {
    * @brief Constructor
    * @param node ROS2 node for communication
    * @param middleware Middleware interface for network communication
-   * @param req_port REQ-REP socket port (default: 5555)
-   * @param pub_port PUB socket port (default: 5556)
+   * @param port Server port (default: 8080)
    * @param session_timeout Session timeout in seconds (default: 10.0)
    * @param publish_rate Message aggregation publish rate in Hz (default: 50.0)
    */
   explicit BridgeServer(
-      std::shared_ptr<rclcpp::Node> node, std::shared_ptr<MiddlewareInterface> middleware, int req_port = 5555,
-      int pub_port = 5556, double session_timeout = 10.0, double publish_rate = 50.0);
+      std::shared_ptr<rclcpp::Node> node, std::shared_ptr<MiddlewareInterface> middleware, int port = 8080,
+      double session_timeout = 10.0, double publish_rate = 50.0);
 
   /**
    * @brief Initialize the bridge server
@@ -72,50 +71,12 @@ class BridgeServer {
   std::pair<uint64_t, uint64_t> get_publish_stats() const;
 
  private:
-  /**
-   * @brief Handle "get_topics" API command
-   * @param client_id Client identifier
-   * @return JSON response string
-   */
   std::string handle_get_topics(const std::string& client_id);
-
-  /**
-   * @brief Handle "subscribe" API command
-   * @param client_id Client identifier
-   * @param request_json JSON request containing topics to subscribe to
-   * @return JSON response string
-   */
   std::string handle_subscribe(const std::string& client_id, const std::string& request_json);
-
-  /**
-   * @brief Handle "heartbeat" API command
-   * @param client_id Client identifier
-   * @return JSON response string
-   */
   std::string handle_heartbeat(const std::string& client_id);
-
-  /**
-   * @brief Create error response JSON
-   * @param error_code Error code string
-   * @param message Error message
-   * @return JSON error response string
-   */
   std::string create_error_response(const std::string& error_code, const std::string& message) const;
-
-  /**
-   * @brief Timer callback to check for timed-out sessions
-   */
   void check_session_timeouts();
-
-  /**
-   * @brief Cleanup a timed-out session
-   * @param client_id Client identifier
-   */
   void cleanup_session(const std::string& client_id);
-
-  /**
-   * @brief Timer callback to publish aggregated messages at fixed rate
-   */
   void publish_aggregated_messages();
 
   // ROS2 components
@@ -134,8 +95,7 @@ class BridgeServer {
   rclcpp::TimerBase::SharedPtr publish_timer_;
 
   // Configuration
-  int req_port_;
-  int pub_port_;
+  int port_;
   double session_timeout_;
   double publish_rate_;
 

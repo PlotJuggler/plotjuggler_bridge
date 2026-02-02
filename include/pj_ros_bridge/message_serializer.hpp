@@ -24,7 +24,7 @@ namespace pj_ros_bridge {
  *   - Topic name length (uint16_t little-endian)
  *   - Topic name (N bytes UTF-8)
  *   - Timestamp (uint64_t nanoseconds since epoch, little-endian)
- *   - Message data length (int32_t little-endian)
+ *   - Message data length (uint32_t little-endian)
  *   - Message data (N bytes - CDR serialized from ROS2)
  *
  * Thread safety: Not thread-safe, use from single thread only

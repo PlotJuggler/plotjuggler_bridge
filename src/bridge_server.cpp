@@ -12,12 +12,11 @@ using json = nlohmann::json;
 namespace pj_ros_bridge {
 
 BridgeServer::BridgeServer(
-    std::shared_ptr<rclcpp::Node> node, std::shared_ptr<MiddlewareInterface> middleware, int req_port, int pub_port,
+    std::shared_ptr<rclcpp::Node> node, std::shared_ptr<MiddlewareInterface> middleware, int port,
     double session_timeout, double publish_rate)
     : node_(node),
       middleware_(middleware),
-      req_port_(req_port),
-      pub_port_(pub_port),
+      port_(port),
       session_timeout_(session_timeout),
       publish_rate_(publish_rate),
       initialized_(false),
@@ -33,12 +32,12 @@ bool BridgeServer::initialize() {
   RCLCPP_INFO(node_->get_logger(), "Initializing bridge server...");
 
   // Initialize middleware
-  auto result = middleware_->initialize(req_port_, pub_port_);
+  auto result = middleware_->initialize(static_cast<uint16_t>(port_));
   if (!result) {
     RCLCPP_ERROR(node_->get_logger(), "Failed to initialize middleware: %s", result.error().c_str());
     return false;
   }
-  RCLCPP_INFO(node_->get_logger(), "Middleware initialized (REQ port: %d, PUB port: %d)", req_port_, pub_port_);
+  RCLCPP_INFO(node_->get_logger(), "Middleware initialized (port: %d)", port_);
 
   // Create components
   topic_discovery_ = std::make_unique<TopicDiscovery>(node_);
@@ -49,12 +48,22 @@ bool BridgeServer::initialize() {
 
   RCLCPP_INFO(node_->get_logger(), "Core components created");
 
+  // Register disconnect callback for automatic session cleanup
+  middleware_->set_on_disconnect([this](const std::string& client_id) {
+    RCLCPP_INFO(node_->get_logger(), "Client disconnected: '%s'", client_id.c_str());
+    cleanup_session(client_id);
+  });
+
   // Create session timeout timer (check every 1 second)
   session_timeout_timer_ = node_->create_wall_timer(std::chrono::seconds(1), [this]() { check_session_timeouts(); });
 
   RCLCPP_INFO(node_->get_logger(), "Session timeout monitoring started");
 
   // Create message publisher timer (default: 50 Hz)
+  if (publish_rate_ <= 0.0) {
+    RCLCPP_ERROR(node_->get_logger(), "Invalid publish_rate: %.1f (must be > 0)", publish_rate_);
+    return false;
+  }
   auto publish_period_ms = static_cast<int64_t>(1000.0 / publish_rate_);
   publish_timer_ = node_->create_wall_timer(
       std::chrono::milliseconds(publish_period_ms), [this]() { publish_aggregated_messages(); });
@@ -86,9 +95,6 @@ bool BridgeServer::process_requests() {
   std::string request(request_data.begin(), request_data.end());
   if (client_id.empty()) {
     RCLCPP_WARN(node_->get_logger(), "Received request with no client identity");
-    std::string error = create_error_response("INVALID_CLIENT", "No client identity provided");
-    std::vector<uint8_t> error_data(error.begin(), error.end());
-    middleware_->send_reply(error_data);
     return true;
   }
 
@@ -123,9 +129,9 @@ bool BridgeServer::process_requests() {
     response = create_error_response("INTERNAL_ERROR", "Internal server error");
   }
 
-  // Send response
+  // Send response to the specific client
   std::vector<uint8_t> response_data(response.begin(), response.end());
-  middleware_->send_reply(response_data);
+  middleware_->send_reply(client_id, response_data);
   return true;
 }
 
@@ -238,10 +244,7 @@ std::string BridgeServer::handle_subscribe(const std::string& client_id, const s
     // Create callback to add messages to buffer
     auto callback = [this, topic_name](
                         const std::string& topic, const std::shared_ptr<rclcpp::SerializedMessage>& msg,
-                        uint64_t receive_time_ns) {
-      // For now, use receive time as publish time (TODO: extract from message header)
-      message_buffer_->add_message(topic, receive_time_ns, msg);
-    };
+                        uint64_t receive_time_ns) { message_buffer_->add_message(topic, receive_time_ns, msg); };
 
     // Subscribe via subscription manager
     bool success = subscription_manager_->subscribe(topic_name, topic_type, callback);
@@ -400,21 +403,18 @@ void BridgeServer::publish_aggregated_messages() {
     std::vector<uint8_t> compressed_data;
     AggregatedMessageSerializer::compress_zstd(serializer.get_serialized_data(), compressed_data);
 
-    // Publish via middleware
+    // Publish via middleware (broadcast to all connected clients)
     bool success = middleware_->publish_data(compressed_data);
 
     if (success) {
-      // Update statistics
+      // Update statistics - count individual messages, not topics
+      size_t msg_count = 0;
+      for (const auto& [topic, msgs] : messages) {
+        msg_count += msgs.size();
+      }
       std::lock_guard<std::mutex> lock(stats_mutex_);
-      total_messages_published_ += messages.size();
+      total_messages_published_ += msg_count;
       total_bytes_published_ += compressed_data.size();
-
-      // RCLCPP_DEBUG(
-      //     node_->get_logger(), "Published %zu messages (%zu bytes raw, %zu bytes compressed, %.1f%% ratio)",
-      //     messages.size(), serialized_data.size(), compressed_data.size(),
-      //     100.0 * static_cast<double>(compressed_data.size()) / static_cast<double>(serialized_data.size()));
-    } else {
-      RCLCPP_ERROR(node_->get_logger(), "Failed to publish aggregated messages");
     }
   } catch (const std::exception& e) {
     RCLCPP_ERROR(node_->get_logger(), "Error publishing aggregated messages: %s", e.what());

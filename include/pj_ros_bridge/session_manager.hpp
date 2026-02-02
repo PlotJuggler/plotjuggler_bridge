@@ -17,7 +17,7 @@ namespace pj_ros_bridge {
  * @brief Represents a client session
  */
 struct Session {
-  /// Unique client identifier (from ZMQ identity)
+  /// Unique client identifier (from WebSocket connection)
   std::string client_id;
 
   /// Set of topic names the client is subscribed to

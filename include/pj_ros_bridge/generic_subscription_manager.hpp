@@ -99,11 +99,6 @@ class GenericSubscriptionManager {
   rclcpp::Node::SharedPtr node_;
   mutable std::mutex mutex_;
   std::unordered_map<std::string, SubscriptionInfo> subscriptions_;
-
-  /**
-   * @brief Get current time in nanoseconds since epoch
-   */
-  static uint64_t get_current_time_ns();
 };
 
 }  // namespace pj_ros_bridge

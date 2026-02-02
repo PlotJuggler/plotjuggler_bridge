@@ -3,7 +3,7 @@
 <package format="3">
   <name>pj_ros_bridge</name>
   <version>0.0.0</version>
-  <description>ROS2 bridge server that forwards ROS2 topic content over the network using ZeroMQ</description>
+  <description>ROS2 bridge server that forwards ROS2 topic content over WebSocket</description>
   <maintainer email="davide.faconti@gmail.com">davide</maintainer>
   <license>Apache-2.0</license>
 

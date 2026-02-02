@@ -14,7 +14,7 @@
 
 #include "pj_ros_bridge/generic_subscription_manager.hpp"
 
-#include <chrono>
+#include "pj_ros_bridge/time_utils.hpp"
 
 namespace pj_ros_bridge {
 
@@ -95,12 +95,6 @@ size_t GenericSubscriptionManager::get_reference_count(const std::string& topic_
 void GenericSubscriptionManager::unsubscribe_all() {
   std::lock_guard<std::mutex> lock(mutex_);
   subscriptions_.clear();
-}
-
-uint64_t GenericSubscriptionManager::get_current_time_ns() {
-  auto now = std::chrono::system_clock::now();
-  auto duration = now.time_since_epoch();
-  return std::chrono::duration_cast<std::chrono::nanoseconds>(duration).count();
 }
 
 }  // namespace pj_ros_bridge

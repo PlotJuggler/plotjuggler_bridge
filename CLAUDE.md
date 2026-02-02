@@ -4,7 +4,7 @@
 
 **Project Name**: pj_ros_bridge
 **Type**: C++ ROS2 Package (Humble)
-**Purpose**: ROS2 bridge server that forwards ROS2 topic content over the network using ZeroMQ, without DDS
+**Purpose**: ROS2 bridge server that forwards ROS2 topic content over WebSocket, without DDS
 
 **Main Goal**: Enable clients to subscribe to ROS2 topics and receive aggregated messages at 50 Hz without needing a full ROS2/DDS installation.
 
@@ -24,12 +24,20 @@ cd ~/ws_plotjuggler
 # Source ROS2 Humble
 source /opt/ros/humble/setup.bash
 
-# Build the package
-colcon build --packages-select pj_ros_bridge
+# Build the package (CMAKE_BUILD_TYPE required by Conan)
+colcon build --packages-select pj_ros_bridge --cmake-args -DCMAKE_BUILD_TYPE=Release
 
 # Run tests
 colcon test --packages-select pj_ros_bridge
 colcon test-result --verbose
+```
+
+### Conan Dependencies
+
+IXWebSocket is managed via Conan. To install/update:
+```bash
+cd ~/ws_plotjuggler/src/pj_ros_bridge
+conan install . --output-folder=conan_output --build=missing
 ```
 
 ## Test Data
@@ -107,18 +115,17 @@ private:
 
 ### Communication Pattern
 
-**ZeroMQ Sockets**:
-1. **REQ-REP Pattern**: Client API requests (get topics, subscribe, heartbeat)
-   - Default port: 5555
-2. **PUB-SUB Pattern**: Aggregated message stream at 50 Hz
-   - Default port: 5556
+**WebSocket** (single port, default 8080):
+- **Text frames**: JSON API commands and responses (get_topics, subscribe, heartbeat)
+- **Binary frames**: ZSTD-compressed aggregated message stream at 50 Hz
 
 ### Key Components
 
 1. **Middleware Layer** (Abstract)
-   - `MiddlewareInterface` - Abstract base class
-   - `ZmqMiddleware` - ZeroMQ implementation using cppzmq
-   - Allows future middleware replacement
+   - `MiddlewareInterface` - Abstract base class with connection-oriented API
+   - `WebSocketMiddleware` - IXWebSocket implementation (single port, text + binary frames)
+   - Explicit client identity via `connectionState->getId()`
+   - Connection/disconnection callbacks for automatic session cleanup
 
 2. **Topic Discovery**
    - Uses `rclcpp::Node::get_topic_names_and_types()`
@@ -146,23 +153,25 @@ private:
    - Move semantics: `move_messages()` atomically transfers buffer ownership via `std::swap()`
 
 6. **Session Manager**
-   - Tracks client sessions using ZMQ connection identity
+   - Tracks client sessions using WebSocket connection identity
    - Monitors heartbeats (expected every 1 second)
    - Timeout: 10 seconds without heartbeat
    - Manages per-client subscriptions
+   - Automatic cleanup on WebSocket disconnect
 
-7. **Bridge Server** (NEW - Milestone 4)
+7. **Bridge Server**
    - Main orchestrator integrating all components
    - Handles API request/response loop
    - Routes commands (get_topics, subscribe, heartbeat)
    - Manages session timeouts with 1 Hz timer
    - Creates message buffer callbacks for subscriptions
+   - Registers disconnect callback for automatic session cleanup
 
-8. **Message Aggregation** (NEW - Milestone 5)
+8. **Message Aggregation**
    - 50 Hz timer collects new messages from all active topics
    - Custom binary serialization format (little-endian)
    - ZSTD compression applied to serialized data
-   - Published via ZMQ PUB socket
+   - Published via WebSocket binary frames (broadcast to all connected clients)
    - Statistics tracking (total messages/bytes published)
 
 ### Message Serialization Format
@@ -174,9 +183,8 @@ private:
 For each message:
   - Topic name length (uint16_t little-endian)
   - Topic name (N bytes UTF-8)
-  - Publish timestamp (uint64_t nanoseconds since epoch, little-endian)
-  - Receive timestamp (uint64_t nanoseconds since epoch, little-endian)
-  - Message data length (int32_t little-endian)
+  - Timestamp (uint64_t nanoseconds since epoch, little-endian)
+  - Message data length (uint32_t little-endian)
   - Message data (N bytes - CDR serialized from ROS2)
 ```
 
@@ -184,7 +192,7 @@ For each message:
 - **Zero-copy**: Messages pass via `shared_ptr<SerializedMessage>` to avoid data copying
 - **Streaming**: Messages serialized immediately to output buffer (no intermediate storage)
 - **Move semantics**: Buffer ownership transferred atomically via `std::swap()`
-- **ZSTD Compression**: Final buffer compressed (level 1) before publishing via ZMQ PUB socket
+- **ZSTD Compression**: Final buffer compressed (level 1) before broadcasting via WebSocket binary frames
 
 ### API Protocol
 
@@ -254,36 +262,40 @@ pj_ros_bridge/
 ├── include/pj_ros_bridge/
 │   ├── middleware/
 │   │   ├── middleware_interface.hpp
-│   │   └── zmq_middleware.hpp
+│   │   └── websocket_middleware.hpp
 │   ├── topic_discovery.hpp
 │   ├── schema_extractor.hpp
 │   ├── message_buffer.hpp
-│   ├── session_manager.hpp          [✓ Milestone 4]
+│   ├── message_serializer.hpp
+│   ├── session_manager.hpp
 │   ├── generic_subscription_manager.hpp
-│   └── bridge_server.hpp             [✓ Milestone 4]
+│   ├── time_utils.hpp
+│   └── bridge_server.hpp
 ├── src/
 │   ├── middleware/
-│   │   └── zmq_middleware.cpp
+│   │   └── websocket_middleware.cpp
 │   ├── topic_discovery.cpp
 │   ├── schema_extractor.cpp
 │   ├── message_buffer.cpp
-│   ├── session_manager.cpp           [✓ Milestone 4]
+│   ├── message_serializer.cpp
+│   ├── session_manager.cpp
 │   ├── generic_subscription_manager.cpp
-│   ├── bridge_server.cpp             [✓ Milestone 4]
-│   └── main.cpp                      [✓ Milestone 6]
+│   ├── bridge_server.cpp
+│   └── main.cpp
 ├── tests/
 │   ├── unit/
-│   │   ├── test_middleware.cpp
+│   │   ├── test_websocket_middleware.cpp
 │   │   ├── test_topic_discovery.cpp
 │   │   ├── test_schema_extractor.cpp
 │   │   ├── test_message_buffer.cpp
 │   │   ├── test_generic_subscription_manager.cpp
-│   │   └── test_session_manager.cpp  [✓ Milestone 4]
+│   │   ├── test_session_manager.cpp
+│   │   └── test_message_serializer.cpp
 │   └── integration/
-│       └── test_client.py            [✓ Milestone 7]
+│       └── test_client.py
 ├── 3rdparty/
-│   ├── cppzmq/ (ZeroMQ C++ headers)
-│   └── nlohmann/ (JSON library header)
+│   ├── nlohmann/ (JSON library header)
+│   └── tl/ (tl::expected header)
 ├── DATA/
 │   ├── sample.mcap
 │   ├── sensor_msgs-pointcloud2.txt (reference schema)
@@ -291,6 +303,8 @@ pj_ros_bridge/
 │   └── pose_with_covariance_stamped.txt (reference schema)
 ├── cmake/
 │   └── FindZSTD.cmake
+├── conanfile.txt
+├── conan_output/ (generated by Conan - not committed)
 ├── CMakeLists.txt
 ├── package.xml
 ├── .clang-tidy
@@ -314,13 +328,13 @@ pj_ros_bridge/
 - `geometry_msgs` - Standard geometry message types for unit tests
 
 ### External Libraries
-- **ZeroMQ** (libzmq) - Networking middleware (system package)
-- **cppzmq** - C++ bindings for ZeroMQ (header-only, in 3rdparty/)
+- **IXWebSocket** (`ixwebsocket/11.4.6`) - WebSocket server/client (via Conan)
 - **ZSTD** (libzstd) - Compression library (system package, FindZSTD.cmake in cmake/)
 - **nlohmann/json** - JSON library (header-only, in 3rdparty/)
+- **tl::expected** - Error handling (header-only, in 3rdparty/)
 
 ### Python (for test clients)
-- `pyzmq` - ZeroMQ Python bindings
+- `websocket-client` - WebSocket client library (`pip install websocket-client`)
 - `zstandard` - ZSTD decompression library
 - `struct` - Binary serialization (built-in)
 - `json` - JSON parsing (built-in)
@@ -345,76 +359,28 @@ pj_ros_bridge/
 
 ### Completed Components
 
-**Milestone 1** (branch: claude/milestone_1):
-- MiddlewareInterface abstract class
-- ZmqMiddleware implementation (REP/PUB sockets)
-- CMakeLists.txt and package.xml setup
-- Unit tests: 9 tests passing
+See IMPLEMENTATION_PLAN.md for detailed milestone history. Key milestones 1-9 are complete.
 
-**Milestone 2** (branch: claude/milestone_2):
-- TopicDiscovery class (discovers topics, filters system topics)
-- SchemaExtractor class (runtime introspection with dlopen)
-- nlohmann/json integration
-- Unit tests: 18 total tests passing
-
-**Milestone 3** (branch: claude/milestone_3):
-- MessageBuffer class with 1-second auto-cleanup
-- GenericSubscriptionManager with reference counting
-- Thread-safe operations
-- SchemaExtractor uses depth-first traversal for nested message definitions
-- Reference schema files in DATA/ for test validation
-- Unit tests: 34 total tests passing (all green)
-
-**Milestone 4** (milestone_4 branch):
-- SessionManager class with client session tracking
-- Session timeout monitoring (10 second default timeout)
-- Heartbeat management
-- Per-client subscription tracking
-- BridgeServer class integrating all components
-- API request handlers (get_topics, subscribe, heartbeat)
-- Session cleanup on timeout
-- Unit tests: 44 total tests passing (all green)
-
-**Milestone 5** (milestone_5 branch):
-- AggregatedMessageSerializer class with custom binary format
-- Little-endian serialization (uint16_t, uint32_t, uint64_t)
-- ZSTD compression/decompression wrappers
-- 50 Hz publisher timer in BridgeServer
-- Automatic message aggregation and publishing
-- Publish statistics tracking (messages, bytes)
-- Unit tests: 55 total tests passing (11 new serializer tests)
-
-**Milestone 6** (milestone_6 branch):
-- main.cpp entry point with full integration
-- ROS2 parameter configuration (req_port, pub_port, publish_rate, session_timeout)
-- Signal handlers for graceful shutdown (SIGINT, SIGTERM)
-- Main processing loop (100 Hz for API requests + ROS2 spin)
-- Executable creation and installation (pj_ros_bridge_node)
-- Configuration logging and final statistics display
-- Complete server lifecycle management
-
-**Milestone 7** (milestone_7 branch):
-- Python test client (tests/integration/test_client.py)
-- ZeroMQ integration (REQ-REP + PUB-SUB sockets)
-- ZSTD decompression using zstandard library
-- Binary message deserialization matching C++ format
-- Background heartbeat thread (1 second interval)
-- Command-line interface with argparse (get_topics, subscribe commands)
-- Statistics tracking (messages, bytes, rate per topic)
-- Latency calculation and display
-- Tested successfully with multiple topics at different rates
+**Recent changes** (WebSocket migration + bug fixes):
+- Replaced ZeroMQ with IXWebSocket (single port, text + binary frames)
+- Redesigned MiddlewareInterface for connection-oriented WebSocket
+- Fixed serializer dangling pointer UB, wire format alignment, signal handler
+- Extracted duplicated time utility, fixed stats counting
+- Python test client updated for websocket-client library
+- 64 unit tests passing
 
 ## Important Design Decisions
 
 ### 1. Middleware Abstraction
 **Decision**: Use abstract `MiddlewareInterface` class
-**Rationale**: Allow future replacement of ZeroMQ if needed
+**Rationale**: Allow future middleware replacement if needed
 **Impact**: Slight overhead, but provides flexibility
+**Current**: WebSocketMiddleware using IXWebSocket
 
-### 2. Session Identity via ZMQ
-**Decision**: Use ZeroMQ connection identity (ZMQ_IDENTITY) for session tracking
-**Rationale**: Avoids requiring clients to manage UUIDs
-**Fallback**: If unreliable, require client-generated UUID in connection message
+### 2. Session Identity via WebSocket
+**Decision**: Use WebSocket connection identity (`connectionState->getId()`) for session tracking
+**Rationale**: Natural per-connection identity, no client-side UUID management needed
+**Benefit**: Automatic disconnect detection via WebSocket close events
 
 ### 3. Shared Subscriptions with Reference Counting
 **Decision**: Single ROS2 subscription per topic, shared across clients
@@ -447,11 +413,9 @@ pj_ros_bridge/
 - rosbag2 MCAP storage: https://github.com/ros2/rosbag2/blob/rolling/rosbag2_storage_mcap/src/mcap_storage.cpp
 - Message definition access: Use `message.__class__._full_text` in Python
 
-### ZeroMQ
-- cppzmq GitHub: https://github.com/zeromq/cppzmq
-- REQ-REP pattern: https://zeromq.org/socket-api/#request-reply-pattern
-- PUB-SUB pattern: https://zeromq.org/socket-api/#publish-subscribe-pattern
-- Identity routing: ZMQ_IDENTITY socket option
+### IXWebSocket
+- GitHub: https://github.com/machinezone/IXWebSocket
+- Conan package: `ixwebsocket/11.4.6`
 
 ## Testing Strategy
 
@@ -459,7 +423,7 @@ pj_ros_bridge/
 - Component isolation
 - Thread safety verification
 - Edge case handling
-- Mock middleware for testing without ZeroMQ
+- 64 tests across 7 test files
 
 ### Integration Tests (Python)
 - Full workflow testing with real rosbag data
@@ -475,7 +439,7 @@ ros2 bag play DATA/sample.mcap --loop
 
 # Terminal 2: Run server
 source /opt/ros/humble/setup.bash
-ros2 run pj_ros_bridge bridge_server --ros-args --log-level debug
+ros2 run pj_ros_bridge pj_ros_bridge_node --ros-args --log-level debug
 
 # Terminal 3: Run Python test client
 python3 tests/integration/test_client.py --subscribe <topics>
@@ -483,14 +447,11 @@ python3 tests/integration/test_client.py --subscribe <topics>
 
 ## Configuration Parameters
 
-Default values (to be implemented):
+ROS2 parameters (set via `--ros-args -p`):
 ```yaml
-req_port: 5555              # REQ-REP API port
-pub_port: 5556              # PUB data stream port
+port: 8080                  # WebSocket port
 publish_rate: 50.0          # Hz - aggregation publish rate
 session_timeout: 10.0       # seconds - client heartbeat timeout
-message_retention: 1.0      # seconds - max age of buffered messages
-topic_filter: ""            # regex - filter topics (optional)
 ```
 
 ## Known Challenges & Solutions
@@ -549,8 +510,8 @@ Project complete when:
 
 ### Common commands:
 ```bash
-# Build
-cd ~/ws_plotjuggler && source /opt/ros/humble/setup.bash && colcon build --packages-select pj_ros_bridge
+# Build (CMAKE_BUILD_TYPE required by Conan)
+cd ~/ws_plotjuggler && source /opt/ros/humble/setup.bash && colcon build --packages-select pj_ros_bridge --cmake-args -DCMAKE_BUILD_TYPE=Release
 
 # Format code (before committing)
 pre-commit run -a
@@ -558,13 +519,12 @@ pre-commit run -a
 # Test
 colcon test --packages-select pj_ros_bridge && colcon test-result --all
 
-# Run server (default configuration)
+# Run server (default configuration - port 8080)
 ros2 run pj_ros_bridge pj_ros_bridge_node
 
 # Run server with custom parameters
 ros2 run pj_ros_bridge pj_ros_bridge_node --ros-args \
-  -p req_port:=5557 \
-  -p pub_port:=5558 \
+  -p port:=9090 \
   -p publish_rate:=30.0 \
   -p session_timeout:=15.0
 
@@ -573,17 +533,16 @@ ros2 bag info DATA/sample.mcap
 
 # Play rosbag
 ros2 bag play DATA/sample.mcap
+
+# Python test client
+pip install websocket-client zstandard
+python3 tests/integration/test_client.py --port 8080 --subscribe /topic1 /topic2
 ```
 
 ---
 
-**Last Updated**: 2025-11-03
-**Project Phase**: Active Implementation - API Refactor Complete
-**Current Focus**: Zero-copy, move-based API implementation
-**Test Status**: 59 unit tests passing (9 middleware, 4 discovery, 3 schema, 10 buffer, 10 subscription, 10 session, 13 serializer)
-**API Changes**:
-- MessageBuffer: Zero-copy using `shared_ptr<SerializedMessage>`, move semantics via `move_messages()`
-- Serializer: Streaming API, no placeholder header, out-parameter compression
-**Integration Test**: Python test client fully functional and tested
-**Linter Status**: All linters passing (cppcheck, lint_cmake, xmllint; uncrustify removed)
+**Last Updated**: 2026-02-02
+**Project Phase**: WebSocket migration complete, bug fixes applied
+**Middleware**: IXWebSocket (replaced ZeroMQ)
+**Test Status**: 64 unit tests passing (9 websocket middleware, 4 discovery, 3 schema, 10 buffer, 10 subscription, 10 session, 18 serializer)
 **Executable**: pj_ros_bridge_node ready to run

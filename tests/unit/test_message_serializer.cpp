@@ -72,16 +72,12 @@ TEST_F(MessageSerializerTest, SerializeSingleMessage) {
   offset += topic_len;
   EXPECT_EQ(parsed_topic, topic);
 
-  // Publish timestamp
+  // Timestamp
   uint64_t parsed_timestamp = read_le<uint64_t>(serialized, offset);
   EXPECT_EQ(parsed_timestamp, timestamp);
 
-  // Receive timestamp (same as publish in this API)
-  uint64_t parsed_recv_time = read_le<uint64_t>(serialized, offset);
-  EXPECT_EQ(parsed_recv_time, timestamp);
-
-  // Data length
-  int32_t data_len = read_le<int32_t>(serialized, offset);
+  // Data length (uint32_t)
+  uint32_t data_len = read_le<uint32_t>(serialized, offset);
   EXPECT_EQ(data_len, data.size());
 
   // Data
@@ -109,10 +105,9 @@ TEST_F(MessageSerializerTest, SerializeMultipleMessages) {
     EXPECT_GT(topic_len, 0);
 
     offset += topic_len;  // Skip topic name
-    offset += 8;          // Skip publish timestamp
-    offset += 8;          // Skip receive timestamp
+    offset += 8;          // Skip timestamp
 
-    int32_t data_len = read_le<int32_t>(serialized, offset);
+    uint32_t data_len = read_le<uint32_t>(serialized, offset);
     EXPECT_GT(data_len, 0);
 
     offset += data_len;  // Skip data
@@ -241,9 +236,9 @@ TEST_F(MessageSerializerTest, LargeMessage) {
   // Parse and verify
   size_t offset = 0;
   uint16_t topic_len = read_le<uint16_t>(serialized, offset);
-  offset += topic_len + 16;  // Skip topic and timestamps
+  offset += topic_len + 8;  // Skip topic and timestamp
 
-  int32_t data_len = read_le<int32_t>(serialized, offset);
+  uint32_t data_len = read_le<uint32_t>(serialized, offset);
   EXPECT_EQ(data_len, large_data.size());
 }
 
@@ -260,14 +255,93 @@ TEST_F(MessageSerializerTest, MultipleTopicsSameTimestamp) {
 
   // - Topic length: 2 bytes
   // - Topic string: 7 bytes
-  // - Timestamps: 16 bytes
+  // - Timestamp: 8 bytes
   // - Data length: 4 bytes
   // - Data: 2 bytes
-  // - Subtotal: 2 + 7 + 8 + 8 + 4 + 2 = 31 bytes
-  // + 31 (msg1) + 31 (msg2) + 32 (msg3) = 94 bytes
+  // - Subtotal: 2 + 7 + 8 + 4 + 2 = 23 bytes
+  // + 23 (msg1) + 23 (msg2) + 24 (msg3) = 70 bytes
 
   const auto& serialized = serializer_.get_serialized_data();
-  EXPECT_EQ(serialized.size(), 94);
+  EXPECT_EQ(serialized.size(), 70);
+}
+
+TEST_F(MessageSerializerTest, LargeMessageForcesReallocation) {
+  // This test forces vector reallocation by serializing many messages
+  // with large payloads. Before the fix, this would crash with a dangling
+  // pointer because dest_ptr was captured before resize().
+  for (int i = 0; i < 100; ++i) {
+    std::vector<uint8_t> payload(1024, static_cast<uint8_t>(i & 0xFF));
+    auto msg = create_test_message(payload);
+    serializer_.serialize_message("/realloc_topic_" + std::to_string(i), static_cast<uint64_t>(i), msg);
+  }
+
+  const auto& serialized = serializer_.get_serialized_data();
+
+  // Parse all 100 messages to verify data integrity
+  size_t offset = 0;
+  for (int i = 0; i < 100; ++i) {
+    uint16_t topic_len = read_le<uint16_t>(serialized, offset);
+    ASSERT_GT(topic_len, 0);
+
+    std::string parsed_topic(serialized.begin() + offset, serialized.begin() + offset + topic_len);
+    offset += topic_len;
+
+    uint64_t ts = read_le<uint64_t>(serialized, offset);
+    EXPECT_EQ(ts, static_cast<uint64_t>(i));
+
+    uint32_t data_len = read_le<uint32_t>(serialized, offset);
+    ASSERT_EQ(data_len, 1024);
+
+    // Verify payload integrity
+    for (int j = 0; j < 1024; ++j) {
+      ASSERT_EQ(serialized[offset + j], static_cast<uint8_t>(i & 0xFF)) << "Mismatch at message " << i << " byte " << j;
+    }
+    offset += data_len;
+  }
+  EXPECT_EQ(offset, serialized.size());
+}
+
+TEST_F(MessageSerializerTest, WireFormatMatchesProjectSpec) {
+  // PROJECT.md spec:
+  //   - topic name: uint16_t length + N bytes
+  //   - timestamp: uint64_t nanoseconds
+  //   - data: uint32_t length + N bytes
+  // Total for "/t" topic, 2-byte data = 2 + 2 + 8 + 4 + 2 = 18 bytes
+
+  std::string topic = "/t";
+  uint64_t timestamp = 42;
+  std::vector<uint8_t> data = {0xAA, 0xBB};
+
+  auto msg = create_test_message(data);
+  serializer_.serialize_message(topic, timestamp, msg);
+
+  const auto& serialized = serializer_.get_serialized_data();
+
+  // Expected total size: 2(topic_len) + 2(topic) + 8(timestamp) + 4(data_len) + 2(data) = 18
+  EXPECT_EQ(serialized.size(), 18u);
+
+  size_t offset = 0;
+
+  // Topic name length (uint16_t)
+  uint16_t topic_len = read_le<uint16_t>(serialized, offset);
+  EXPECT_EQ(topic_len, 2u);
+
+  // Topic name
+  std::string parsed_topic(serialized.begin() + offset, serialized.begin() + offset + topic_len);
+  offset += topic_len;
+  EXPECT_EQ(parsed_topic, "/t");
+
+  // Single timestamp (uint64_t)
+  uint64_t parsed_ts = read_le<uint64_t>(serialized, offset);
+  EXPECT_EQ(parsed_ts, 42u);
+
+  // Data length (uint32_t)
+  uint32_t data_len = read_le<uint32_t>(serialized, offset);
+  EXPECT_EQ(data_len, 2u);
+
+  // Data
+  EXPECT_EQ(serialized[offset], 0xAA);
+  EXPECT_EQ(serialized[offset + 1], 0xBB);
 }
 
 TEST_F(MessageSerializerTest, ZeroCopySerializedMessage) {
@@ -277,13 +351,11 @@ TEST_F(MessageSerializerTest, ZeroCopySerializedMessage) {
 
   serializer_.serialize_message("/topic", 100, msg);
 
-  // Serializer should have read directly from the SerializedMessage
-  // (This test mainly documents the expected behavior)
   const auto& serialized = serializer_.get_serialized_data();
   EXPECT_GT(serialized.size(), 4);
 
-  // Verify data is correct
-  size_t offset = 2 + 6 + 8 + 8 + 4;  // Skip to data
+  // Verify data is correct: 2(topic_len) + 6(topic) + 8(ts) + 4(data_len) = 20
+  size_t offset = 2 + 6 + 8 + 4;
   EXPECT_EQ(serialized[offset], 0xDE);
   EXPECT_EQ(serialized[offset + 1], 0xAD);
   EXPECT_EQ(serialized[offset + 2], 0xBE);
