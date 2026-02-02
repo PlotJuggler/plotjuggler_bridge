@@ -16,6 +16,7 @@
 
 #include <chrono>
 #include <thread>
+#include <vector>
 
 #include "pj_ros_bridge/session_manager.hpp"
 
@@ -261,4 +262,51 @@ TEST_F(SessionManagerTest, EmptyManager) {
   EXPECT_FALSE(manager_.get_session("any_client", session));
   EXPECT_FALSE(manager_.remove_session("any_client"));
   EXPECT_FALSE(manager_.update_heartbeat("any_client"));
+}
+
+TEST_F(SessionManagerTest, ThreadSafety) {
+  SessionManager thread_manager(10.0);
+  constexpr int kNumThreads = 10;
+  constexpr int kHeartbeatIterations = 100;
+
+  // Phase 1: Spawn threads that each create a session, update heartbeat, and set subscriptions
+  {
+    std::vector<std::thread> threads;
+    threads.reserve(kNumThreads);
+    for (int i = 0; i < kNumThreads; ++i) {
+      threads.emplace_back([&thread_manager, i]() {
+        std::string client_id = "client_" + std::to_string(i);
+        thread_manager.create_session(client_id);
+
+        for (int j = 0; j < kHeartbeatIterations; ++j) {
+          thread_manager.update_heartbeat(client_id);
+        }
+
+        std::unordered_set<std::string> topics = {"/topic_" + std::to_string(i)};
+        thread_manager.update_subscriptions(client_id, topics);
+      });
+    }
+    for (auto& t : threads) {
+      t.join();
+    }
+  }
+
+  EXPECT_EQ(thread_manager.session_count(), kNumThreads);
+
+  // Phase 2: Spawn threads that each remove their session
+  {
+    std::vector<std::thread> threads;
+    threads.reserve(kNumThreads);
+    for (int i = 0; i < kNumThreads; ++i) {
+      threads.emplace_back([&thread_manager, i]() {
+        std::string client_id = "client_" + std::to_string(i);
+        thread_manager.remove_session(client_id);
+      });
+    }
+    for (auto& t : threads) {
+      t.join();
+    }
+  }
+
+  EXPECT_EQ(thread_manager.session_count(), 0);
 }

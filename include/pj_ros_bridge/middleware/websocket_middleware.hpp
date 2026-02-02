@@ -82,7 +82,7 @@ class WebSocketMiddleware : public MiddlewareInterface {
   mutable std::mutex state_mutex_;
   bool initialized_;
 
-  static constexpr int kReceiveTimeoutMs = 100;
+  static constexpr int kReceiveTimeoutMs = 10;
 };
 
 }  // namespace pj_ros_bridge

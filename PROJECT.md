@@ -49,13 +49,15 @@ This aggregated message contains:
 
 We will serialize this ourself, no need to use any external library.
 
-**Compression**: The aggregated message should be compressed using ZSTD before being published to the client via the PUB-SUB socket. This reduces network bandwidth and improves performance when dealing with large messages.
+**Compression**: The aggregated message should be compressed using ZSTD before being published to the client via WebSocket binary frames. This reduces network bandwidth and improves performance when dealing with large messages.
 
 ## Middleware
 
-We will use ZeroMQ, but we will include an **abstract class** to allow us to change this to a different middleware in the future, if we need to.
+We use WebSocket (IXWebSocket library), with an **abstract class** to allow us to change this to a different middleware in the future, if we need to.
 
-We will use a REQ-REP pattenr for the API between trhe client and the server, and a PUB-SUB for the aggregated messages at 50 Hz published by the server.
+A single WebSocket port (default: 8080) handles both API commands and data streaming:
+- **Text frames** are used for JSON API commands and responses (get_topics, subscribe, heartbeat)
+- **Binary frames** are used for ZSTD-compressed aggregated message stream at 50 Hz
 
 ## How to obtain the schemas
 

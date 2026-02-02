@@ -71,6 +71,9 @@ class MiddlewareInterface {
   /**
    * @brief Broadcast binary data to all connected clients
    *
+   * Currently unused — per-client delivery uses send_binary() instead.
+   * Retained in the interface for future broadcast scenarios.
+   *
    * @param data Data to broadcast
    * @return true if data sent to at least one client, false otherwise
    */

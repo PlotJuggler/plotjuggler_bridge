@@ -41,15 +41,23 @@ class TopicDiscoveryTest : public ::testing::Test {
 
 TEST_F(TopicDiscoveryTest, DiscoverTopicsReturnsVector) {
   auto topics = discovery_->discover_topics();
-  // Should return a vector (may be empty if no topics are publishing)
-  EXPECT_TRUE(topics.empty() || !topics.empty());
+  // In a test environment with no publishers, system topics are filtered,
+  // so the result should be empty (only /rosout and /parameter_events exist)
+  for (const auto& topic : topics) {
+    EXPECT_FALSE(topic.name.empty());
+    EXPECT_FALSE(topic.type.empty());
+  }
 }
 
 TEST_F(TopicDiscoveryTest, GetTopicsAfterDiscovery) {
-  discovery_->discover_topics();
-  auto topics = discovery_->get_topics();
-  // Should return the cached topics
-  EXPECT_TRUE(topics.empty() || !topics.empty());
+  auto discovered = discovery_->discover_topics();
+  auto cached = discovery_->get_topics();
+  // Cached result must match the last discovery call
+  ASSERT_EQ(cached.size(), discovered.size());
+  for (size_t i = 0; i < cached.size(); ++i) {
+    EXPECT_EQ(cached[i].name, discovered[i].name);
+    EXPECT_EQ(cached[i].type, discovered[i].type);
+  }
 }
 
 TEST_F(TopicDiscoveryTest, RefreshSucceeds) {

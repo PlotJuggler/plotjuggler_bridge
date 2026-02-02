@@ -290,7 +290,8 @@ pj_ros_bridge/
 │   │   ├── test_message_buffer.cpp
 │   │   ├── test_generic_subscription_manager.cpp
 │   │   ├── test_session_manager.cpp
-│   │   └── test_message_serializer.cpp
+│   │   ├── test_message_serializer.cpp
+│   │   └── test_bridge_server.cpp
 │   └── integration/
 │       └── test_client.py
 ├── 3rdparty/
@@ -367,7 +368,7 @@ See IMPLEMENTATION_PLAN.md for detailed milestone history. Key milestones 1-9 ar
 - Fixed serializer dangling pointer UB, wire format alignment, signal handler
 - Extracted duplicated time utility, fixed stats counting
 - Python test client updated for websocket-client library
-- 69 unit tests passing
+- 91 unit tests passing
 
 ## Important Design Decisions
 
@@ -423,7 +424,7 @@ See IMPLEMENTATION_PLAN.md for detailed milestone history. Key milestones 1-9 ar
 - Component isolation
 - Thread safety verification
 - Edge case handling
-- 69 tests across 7 test files
+- 91 tests across 8 test files
 
 ### Integration Tests (Python)
 - Full workflow testing with real rosbag data
@@ -554,5 +555,5 @@ ASAN_OPTIONS="new_delete_type_mismatch=0" LSAN_OPTIONS="suppressions=asan_suppre
 **Last Updated**: 2026-02-03
 **Project Phase**: WebSocket migration complete, bug fixes applied, sanitizer builds added
 **Middleware**: IXWebSocket (replaced ZeroMQ)
-**Test Status**: 69 unit tests passing (11 websocket middleware, 4 discovery, 5 schema, 11 buffer, 11 subscription, 11 session, 15 serializer)
+**Test Status**: 91 unit tests passing (15 websocket middleware, 4 discovery, 9 schema, 11 buffer, 11 subscription, 12 session, 15 serializer, 14 bridge server)
 **Executable**: pj_ros_bridge_node ready to run

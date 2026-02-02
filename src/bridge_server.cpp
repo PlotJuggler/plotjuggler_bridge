@@ -3,7 +3,9 @@
 
 #include "pj_ros_bridge/bridge_server.hpp"
 
+#include <map>
 #include <nlohmann/json.hpp>
+#include <set>
 
 #include "pj_ros_bridge/message_serializer.hpp"
 
@@ -401,43 +403,51 @@ void BridgeServer::publish_aggregated_messages() {
       return;
     }
 
+    // Group clients by subscription set to avoid redundant serialization.
+    // Clients with identical subscriptions share the same compressed buffer.
+    std::map<std::set<std::string>, std::vector<std::string>> subscription_groups;
+    for (const auto& client_id : active_sessions) {
+      auto subs = session_manager_->get_subscriptions(client_id);
+      if (subs.empty()) {
+        continue;
+      }
+      std::set<std::string> key(subs.begin(), subs.end());
+      subscription_groups[key].push_back(client_id);
+    }
+
     size_t total_msg_count = 0;
     size_t total_bytes = 0;
 
-    for (const auto& client_id : active_sessions) {
-      auto subscribed_topics = session_manager_->get_subscriptions(client_id);
-      if (subscribed_topics.empty()) {
-        continue;
-      }
-
-      // Filter messages for this client's subscriptions
+    for (const auto& [subscribed_set, client_ids] : subscription_groups) {
+      // Serialize once for this subscription group
       AggregatedMessageSerializer serializer;
-      size_t client_msg_count = 0;
+      size_t group_msg_count = 0;
 
       for (const auto& [topic, msgs] : messages) {
-        if (subscribed_topics.count(topic) == 0) {
+        if (subscribed_set.count(topic) == 0) {
           continue;
         }
         for (const auto& msg : msgs) {
           serializer.serialize_message(topic, msg.timestamp_ns, *(msg.msg));
-          client_msg_count++;
+          group_msg_count++;
         }
       }
 
-      if (client_msg_count == 0) {
+      if (group_msg_count == 0) {
         continue;
       }
 
-      // Compress with ZSTD
+      // Compress once for the group
       std::vector<uint8_t> compressed_data;
       AggregatedMessageSerializer::compress_zstd(serializer.get_serialized_data(), compressed_data);
 
-      // Send to this specific client
-      bool success = middleware_->send_binary(client_id, compressed_data);
-
-      if (success) {
-        total_msg_count += client_msg_count;
-        total_bytes += compressed_data.size();
+      // Send the same buffer to all clients in this group
+      for (const auto& client_id : client_ids) {
+        bool success = middleware_->send_binary(client_id, compressed_data);
+        if (success) {
+          total_msg_count += group_msg_count;
+          total_bytes += compressed_data.size();
+        }
       }
     }
 

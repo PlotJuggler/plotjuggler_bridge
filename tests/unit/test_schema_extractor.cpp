@@ -151,3 +151,42 @@ TEST_F(SchemaExtractorTest, CachingWorksForMultipleTypes) {
   EXPECT_EQ(result1a, result1b) << "Cached PointCloud2 differs from original";
   EXPECT_EQ(result2a, result2b) << "Cached Imu differs from original";
 }
+
+TEST_F(SchemaExtractorTest, InvalidMessageTypeFormat) {
+  // The parser requires "package/msg/Type" format; a string without slashes should
+  // return an empty definition.
+  std::string result = extractor_->get_message_definition("no_slashes");
+  EXPECT_TRUE(result.empty()) << "Expected empty string for invalid message type format";
+}
+
+TEST_F(SchemaExtractorTest, NonExistentPackage) {
+  // A completely fabricated package should return an empty definition.
+  std::string result = extractor_->get_message_definition("fake_nonexistent_package/msg/FakeType");
+  EXPECT_TRUE(result.empty()) << "Expected empty string for non-existent package";
+}
+
+TEST_F(SchemaExtractorTest, RemoveCommentsEmpty) {
+  // Removing comments from an empty string should return an empty string.
+  std::string result = remove_comments_from_schema("");
+  EXPECT_TRUE(result.empty()) << "Expected empty string when removing comments from empty input";
+}
+
+TEST_F(SchemaExtractorTest, RemoveCommentsOnlyComments) {
+  // A schema that contains only comment lines should produce no '#' characters
+  // and be effectively empty or whitespace-only after comment removal.
+  std::string input = "# comment line\n# another comment\n";
+  std::string result = remove_comments_from_schema(input);
+
+  // Verify no '#' characters remain
+  EXPECT_EQ(result.find('#'), std::string::npos) << "Result should contain no '#' characters";
+
+  // Verify the result is empty or whitespace-only
+  bool is_empty_or_whitespace = true;
+  for (char c : result) {
+    if (!std::isspace(static_cast<unsigned char>(c))) {
+      is_empty_or_whitespace = false;
+      break;
+    }
+  }
+  EXPECT_TRUE(is_empty_or_whitespace) << "Result should be empty or whitespace-only, got: '" << result << "'";
+}

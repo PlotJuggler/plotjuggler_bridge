@@ -1,7 +1,9 @@
 # ROS2 Bridge Implementation Plan
 
+> **Note**: This implementation plan was originally written for ZeroMQ. The project has since migrated to IXWebSocket (WebSocket). All ZeroMQ references below have been updated to reflect the current WebSocket-based architecture using a single port with text frames for API commands and binary frames for data streaming.
+
 ## Project Overview
-Implement a C++ ROS2 bridge server that forwards ROS2 topic content over the network using ZeroMQ, without DDS. The server aggregates messages from multiple topics and publishes them at 50 Hz to connected clients.
+Implement a C++ ROS2 bridge server that forwards ROS2 topic content over the network using WebSocket (IXWebSocket), without DDS. The server aggregates messages from multiple topics and publishes them at 50 Hz to connected clients.
 
 **Target ROS2 Distribution**: Humble
 **Build Command**: `cd ~/ws_plotjuggler && source /opt/ros/humble/setup.bash && colcon build`
@@ -22,7 +24,7 @@ Implement a C++ ROS2 bridge server that forwards ROS2 topic content over the net
 - Add required dependencies:
   - `rclcpp`
   - `gtest` (for unit tests)
-- Add ZeroMQ (cppzmq) from 3rdparty folder
+- Add IXWebSocket (via Conan)
 - Add ZSTD compression library (using FindZSTD.cmake)
 - Configure C++17 standard
 - Set up include directories for headers
@@ -33,13 +35,13 @@ pj_ros_bridge/
 ├── include/pj_ros_bridge/
 │   ├── middleware/
 │   │   ├── middleware_interface.hpp
-│   │   └── zmq_middleware.hpp
+│   │   └── websocket_middleware.hpp
 │   ├── message_buffer.hpp
 │   ├── session_manager.hpp
 │   └── bridge_server.hpp
 ├── src/
 │   ├── middleware/
-│   │   └── zmq_middleware.cpp
+│   │   └── websocket_middleware.cpp
 │   ├── message_buffer.cpp
 │   ├── session_manager.cpp
 │   ├── bridge_server.cpp
@@ -52,7 +54,7 @@ pj_ros_bridge/
 │   └── integration/
 │       └── test_client.py
 ├── 3rdparty/
-│   └── (cppzmq headers)
+│   └── (nlohmann/json, tl/expected headers)
 └── DATA/
     └── sample.mcap
 ```
@@ -60,19 +62,20 @@ pj_ros_bridge/
 #### 1.3 Create Middleware Abstraction
 - Define `MiddlewareInterface` abstract class with methods:
   - `initialize()`: Setup middleware
-  - `send_reply(data)`: Send REQ-REP response
-  - `publish_data(data)`: Publish aggregated messages
-  - `receive_request()`: Receive client requests
+  - `send_reply(data)`: Send response via WebSocket text frame
+  - `publish_data(data)`: Publish aggregated messages via WebSocket binary frame
+  - `receive_request()`: Receive client requests via WebSocket text frame
   - `get_client_identity()`: Get unique client identifier
-- Implement `ZmqMiddleware` class using cppzmq
-  - Use REP socket for API (bind to configurable port, default: 5555)
-  - Use PUB socket for data streaming (bind to configurable port, default: 5556)
-  - Implement connection identity tracking using ZMQ_IDENTITY
+- Implement `WebSocketMiddleware` class using IXWebSocket
+  - Single WebSocket port (default: 8080) for both API and data
+  - Text frames for JSON API commands and responses
+  - Binary frames for ZSTD-compressed aggregated message stream
+  - Implement connection identity tracking using `connectionState->getId()`
 
 #### 1.4 Testing
 - Write unit test for middleware initialization
 - Build and verify compilation succeeds
-- Test that ZMQ sockets can be created and bound
+- Test that WebSocket server can be created and bound
 
 **Completion Criteria**: Project compiles without errors, basic middleware tests pass
 
@@ -136,7 +139,7 @@ build_message_definition_recursive(package_name, type_name, output, processed_ty
     ]
 }
 ```
-- Send response via middleware REP socket
+- Send response via middleware WebSocket text frame
 
 #### 2.5 Testing
 - Unit test topic discovery with sample.mcap playing
@@ -247,7 +250,7 @@ ros2 run pj_ros_bridge bridge_server --ros-args --log-level debug
 - Create `SessionManager` class with:
   - `std::unordered_map<client_id, Session>` to track sessions
   - Session structure containing:
-    - `client_id`: Unique identifier from ZMQ identity
+    - `client_id`: Unique identifier from WebSocket connection
     - `subscribed_topics`: Set of topic names
     - `last_heartbeat`: Timestamp of last heartbeat
     - `created_at`: Session creation time
@@ -327,7 +330,7 @@ python3 tests/integration/test_client.py --subscribe /topic1
 ### Goals
 - Aggregate buffered messages from all active topics
 - Serialize aggregated message according to specification
-- Publish at 50 Hz via ZeroMQ PUB socket
+- Publish at 50 Hz via WebSocket binary frames
 
 ### Tasks
 
@@ -353,7 +356,7 @@ Create `AggregatedMessageSerializer` class with:
   - `std::vector<uint8_t> compress_zstd(const std::vector<uint8_t>& data)`
   - Use appropriate compression level (e.g., ZSTD_CLEVEL_DEFAULT or 3)
   - Handle compression errors gracefully
-- The compressed buffer is what gets published via PUB socket
+- The compressed buffer is what gets published via WebSocket binary frames
 - Add decompression to Python test client for validation
 
 #### 5.2 50 Hz Publisher Timer
@@ -363,7 +366,7 @@ Create `AggregatedMessageSerializer` class with:
   2. If no new messages, skip (don't publish empty aggregation)
   3. Build aggregated message using AggregatedMessageSerializer
   4. Compress the serialized buffer using ZSTD
-  5. Publish compressed buffer via middleware PUB socket
+  5. Publish compressed buffer via middleware WebSocket binary frames
   6. Track last publish timestamp and compression statistics
 
 #### 5.3 Message Buffer Coordination
@@ -436,8 +439,7 @@ python3 tests/integration/test_client.py --subscribe ims_msgs::RoboticsInputs --
   - Command-line arguments
   - Config file (YAML)
 - Configurable parameters:
-  - `req_port`: REQ-REP socket port (default: 5555)
-  - `pub_port`: PUB socket port (default: 5556)
+  - `port`: WebSocket port (default: 8080)
   - `publish_rate`: Aggregation publish rate (default: 50 Hz)
   - `session_timeout`: Client timeout duration (default: 10 seconds)
   - `buffer_size`: Max messages per topic buffer (default: 1000)
@@ -461,7 +463,7 @@ python3 tests/integration/test_client.py --subscribe ims_msgs::RoboticsInputs --
 - On shutdown:
   1. Stop accepting new connections
   2. Unsubscribe from all ROS2 topics
-  3. Close middleware sockets
+  3. Close WebSocket connections
   4. Clean up resources
   5. Log shutdown complete
 
@@ -484,9 +486,8 @@ python3 tests/integration/test_client.py --subscribe ims_msgs::RoboticsInputs --
 **Test Command**:
 ```bash
 # Run with custom config
-ros2 run pj_ros_bridge bridge_server --ros-args \
-    -p req_port:=5557 \
-    -p pub_port:=5558 \
+ros2 run pj_ros_bridge pj_ros_bridge_node --ros-args \
+    -p port:=9090 \
     -p publish_rate:=30.0
 
 # Full integration test
@@ -509,8 +510,7 @@ python3 tests/integration/test_full_workflow.py
 
 #### 7.1 Basic Client Implementation
 Create `tests/integration/test_client.py` with:
-- ZeroMQ REQ-REP connection for API
-- ZeroMQ SUB connection for data stream
+- WebSocket connection for both API (text frames) and data stream (binary frames)
 - Command-line argument parsing
 - Basic operations:
   - Connect to server
@@ -547,7 +547,7 @@ python3 test_client.py --subscribe /topic1 /topic2 --duration 30
 python3 test_client.py --subscribe /topic1 --output data.bin
 
 # Run with specific server address
-python3 test_client.py --server localhost:5555 --subscribe /topic1
+python3 test_client.py --port 8080 --subscribe /topic1
 ```
 
 #### 7.5 Validation & Statistics
@@ -579,14 +579,14 @@ python3 test_client.py --server localhost:5555 --subscribe /topic1
 - Integration with colcon test
 
 ### Completion Status
-**All 59 unit tests passing**:
+**All 69 unit tests passing**:
 - 9 middleware tests (initialization, shutdown, request/reply, publish)
 - 4 topic discovery tests
 - 3 schema extractor tests (with reference data validation)
 - 10 message buffer tests (zero-copy API with move semantics)
 - 10 generic subscription manager tests (reference counting)
 - 10 session manager tests (creation, heartbeat, timeout)
-- 13 message serializer tests (streaming API, ZSTD compression)
+- 18 message serializer tests (streaming API, ZSTD compression)
 
 ### Key Achievements
 
@@ -631,7 +631,7 @@ All test files created and passing:
 if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
   ament_add_gtest(${PROJECT_NAME}_tests
-    tests/unit/test_middleware.cpp
+    tests/unit/test_websocket_middleware.cpp
     tests/unit/test_topic_discovery.cpp
     tests/unit/test_schema_extractor.cpp
     tests/unit/test_message_buffer.cpp
@@ -657,7 +657,7 @@ colcon test --packages-select pj_ros_bridge
 colcon test-result --verbose
 ```
 
-**Completion Criteria Met**: All 59 unit tests pass, comprehensive coverage of core components
+**Completion Criteria Met**: All 69 unit tests pass, comprehensive coverage of core components
 
 ---
 
@@ -670,7 +670,7 @@ colcon test-result --verbose
 
 ### Completion Status
 **Core error handling implemented**:
-- ✅ ZeroMQ initialization error handling with `tl::expected`
+- ✅ WebSocket initialization error handling with `tl::expected`
 - ✅ Partial subscription success reporting
 - ✅ Detailed error responses with specific failure reasons
 - ✅ Malformed JSON request handling
@@ -685,7 +685,7 @@ colcon test-result --verbose
 Implemented comprehensive error handling for:
 - ✅ Client sends malformed JSON requests → returns `INVALID_JSON` error
 - ✅ Client subscribes to non-existent topic → included in `failures` array with reason
-- ✅ ZeroMQ socket errors (port in use, bind failed) → detailed error with errno
+- ✅ WebSocket server errors (port in use, bind failed) → detailed error with errno
 - ✅ ROS2 subscription failures → tracked in partial success response
 - ✅ Schema extraction fails → returned in `failures` array
 - ⏸️ Buffer overflow conditions (automatic cleanup prevents this)
@@ -723,16 +723,16 @@ Standardized error responses using JSON:
 Replaced output parameters with `tl::expected<T, E>`:
 ```cpp
 // Before
-bool initialize(uint16_t req_port, uint16_t pub_port);
+bool initialize(uint16_t port);
 
 // After
-tl::expected<void, std::string> initialize(uint16_t req_port, uint16_t pub_port);
+tl::expected<void, std::string> initialize(uint16_t port);
 ```
 
 Benefits:
 - Compile-time error handling guarantees
 - Detailed error messages with errno codes
-- Example: "Failed to bind REP socket to port 5555: Address already in use (errno 98)"
+- Example: "Failed to bind WebSocket server to port 8080: Address already in use (errno 98)"
 
 #### 9.4 Partial Success Reporting ✅
 Enhanced subscription handler in `bridge_server.cpp`:
@@ -773,7 +773,7 @@ Not implemented (to be added if needed):
 Current design has implicit limits:
 - Message buffer auto-cleanup (1 second retention)
 - Session timeout (10 seconds)
-- ZeroMQ connection limits
+- WebSocket connection limits
 
 #### 9.7 Testing ✅
 Error handling validated through:
@@ -910,13 +910,13 @@ Before considering the project complete:
 - `geometry_msgs` - Standard geometry message types for unit tests
 
 ### External Libraries
-- **ZeroMQ** (libzmq) - Networking middleware (system package)
-- **cppzmq** - C++ bindings for ZeroMQ (header-only, in 3rdparty/)
-- **ZSTD** (libzstd) - Compression library (system package)
+- **IXWebSocket** (`ixwebsocket/11.4.6`) - WebSocket server/client (via Conan)
+- **ZSTD** (libzstd) - Compression library (system package, FindZSTD.cmake in cmake/)
 - **nlohmann/json** - JSON library (header-only, in 3rdparty/)
+- **tl::expected** - Error handling (header-only, in 3rdparty/)
 
 ### Python (for test client)
-- `pyzmq` - ZeroMQ Python bindings
+- `websocket-client` - WebSocket client library
 - `zstandard` - ZSTD decompression library
 - `argparse` - CLI argument parsing (built-in)
 - `struct` - Binary serialization (built-in)
@@ -941,9 +941,9 @@ Before considering the project complete:
    - *Mitigation*: Start with simple standard messages, test incrementally with sample.mcap types
    - *Fallback*: Use ROS2 message definition text files if introspection insufficient
 
-2. **ZeroMQ Identity Tracking**
+2. **WebSocket Identity Tracking**
    - *Risk*: Client identity may not be reliable for session management
-   - *Mitigation*: Research ZMQ_IDENTITY usage, consider client-generated UUIDs if needed
+   - *Mitigation*: Use WebSocket connection identity via `connectionState->getId()`
    - *Fallback*: Require clients to send UUID in initial connection message
 
 3. **Performance at High Message Rates**
@@ -971,7 +971,7 @@ Before beginning implementation, clarify:
 
 2. **Security**: Are there any authentication/authorization requirements for clients connecting to the server?
 
-3. **Network Protocol**: Should we support encryption (e.g., CurveZMQ) for sensitive data?
+3. **Network Protocol**: Should we support encryption (e.g., WSS/TLS) for sensitive data?
 
 4. **Message Filtering**: Should clients be able to filter messages (e.g., by time range, decimation rate)?
 
