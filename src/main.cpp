@@ -1,22 +1,11 @@
 // Copyright 2025
 // ROS2 Bridge - Main Entry Point
 
-#include <csignal>
 #include <memory>
 #include <rclcpp/rclcpp.hpp>
 
 #include "pj_ros_bridge/bridge_server.hpp"
 #include "pj_ros_bridge/middleware/websocket_middleware.hpp"
-
-// Global flag for shutdown handling
-std::atomic<bool> g_shutdown_requested{false};
-
-void signal_handler(int signal) {
-  if (signal == SIGINT || signal == SIGTERM) {
-    // Only async-signal-safe operations here. No RCLCPP_INFO.
-    g_shutdown_requested = true;
-  }
-}
 
 int main(int argc, char** argv) {
   // Initialize ROS2
@@ -58,10 +47,6 @@ int main(int argc, char** argv) {
     RCLCPP_INFO(node->get_logger(), "Bridge server initialized successfully");
     RCLCPP_INFO(node->get_logger(), "Ready to accept WebSocket connections on port %d", port);
 
-    // Install signal handlers
-    std::signal(SIGINT, signal_handler);
-    std::signal(SIGTERM, signal_handler);
-
     // Create ROS timer to process API requests at 100 Hz
     auto request_timer = node->create_wall_timer(
         std::chrono::milliseconds(10),  // 100 Hz
@@ -72,7 +57,7 @@ int main(int argc, char** argv) {
     executor.add_node(node);
 
     // Spin until shutdown is requested
-    while (rclcpp::ok() && !g_shutdown_requested) {
+    while (rclcpp::ok()) {
       executor.spin_some(std::chrono::milliseconds(100));
     }
 

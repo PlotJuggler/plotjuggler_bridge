@@ -5,6 +5,8 @@
 #define PJ_ROS_BRIDGE__BRIDGE_SERVER_HPP_
 
 #include <memory>
+#include <mutex>
+#include <nlohmann/json.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <string>
 
@@ -72,7 +74,7 @@ class BridgeServer {
 
  private:
   std::string handle_get_topics(const std::string& client_id);
-  std::string handle_subscribe(const std::string& client_id, const std::string& request_json);
+  std::string handle_subscribe(const std::string& client_id, const nlohmann::json& request_json);
   std::string handle_heartbeat(const std::string& client_id);
   std::string create_error_response(const std::string& error_code, const std::string& message) const;
   void check_session_timeouts();
@@ -106,6 +108,9 @@ class BridgeServer {
   uint64_t total_messages_published_;
   uint64_t total_bytes_published_;
   mutable std::mutex stats_mutex_;
+
+  // Protects cleanup_session from concurrent calls (disconnect + timeout)
+  std::mutex cleanup_mutex_;
 };
 
 }  // namespace pj_ros_bridge

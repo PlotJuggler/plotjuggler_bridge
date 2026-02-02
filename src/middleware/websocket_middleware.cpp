@@ -135,6 +135,13 @@ void WebSocketMiddleware::shutdown() {
 }
 
 bool WebSocketMiddleware::receive_request(std::vector<uint8_t>& data, std::string& client_identity) {
+  {
+    std::lock_guard<std::mutex> state_lock(state_mutex_);
+    if (!initialized_) {
+      return false;
+    }
+  }
+
   std::unique_lock<std::mutex> lock(queue_mutex_);
 
   if (!queue_cv_.wait_for(
@@ -160,6 +167,19 @@ bool WebSocketMiddleware::send_reply(const std::string& client_identity, const s
 
   std::string text_data(data.begin(), data.end());
   auto send_info = it->second->send(text_data);
+  return send_info.success;
+}
+
+bool WebSocketMiddleware::send_binary(const std::string& client_identity, const std::vector<uint8_t>& data) {
+  std::lock_guard<std::mutex> lock(clients_mutex_);
+
+  auto it = clients_.find(client_identity);
+  if (it == clients_.end() || !it->second) {
+    return false;
+  }
+
+  std::string binary_data(reinterpret_cast<const char*>(data.data()), data.size());
+  auto send_info = it->second->sendBinary(binary_data);
   return send_info.success;
 }
 

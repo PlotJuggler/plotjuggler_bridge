@@ -18,23 +18,7 @@ A high-performance ROS2 bridge server that forwards ROS2 topic content over WebS
 
 ## Architecture
 
-### Communication Pattern
-
-The server uses a single WebSocket port (default 8080):
-
-- **Text frames**: JSON API requests and responses (get_topics, subscribe, heartbeat)
-- **Binary frames**: ZSTD-compressed aggregated message stream at 50 Hz
-
-### Core Components
-
-- **MiddlewareInterface / WebSocketMiddleware**: Abstraction layer over IXWebSocket for future middleware replacement
-- **TopicDiscovery**: Discovers available ROS2 topics using `rclcpp::Node::get_topic_names_and_types()`
-- **SchemaExtractor**: Extracts message schemas by reading .msg files from ROS2 package share directories
-- **GenericSubscriptionManager**: Manages ROS2 subscriptions using `rclcpp::GenericSubscription` with reference counting
-- **MessageBuffer**: Thread-safe buffer with automatic cleanup (1 second retention)
-- **SessionManager**: Tracks client sessions with heartbeat monitoring (10 second timeout)
-- **AggregatedMessageSerializer**: Custom binary serialization with ZSTD compression
-- **BridgeServer**: Main orchestrator integrating all components
+For detailed architecture documentation, see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## Requirements
 
@@ -206,76 +190,7 @@ python3 tests/integration/test_client.py --subscribe /topic1 --duration 60 --ver
 
 ## API Protocol
 
-### Get Topics
-
-**Request:**
-```json
-{"command": "get_topics"}
-```
-
-**Response:**
-```json
-{
-  "status": "success",
-  "topics": [
-    {"name": "/topic_name", "type": "package_name/msg/MessageType"}
-  ]
-}
-```
-
-### Subscribe
-
-**Request:**
-```json
-{
-  "command": "subscribe",
-  "topics": ["/topic1", "/topic2"]
-}
-```
-
-**Response:**
-```json
-{
-  "status": "success",
-  "schemas": {
-    "/topic1": "message definition text",
-    "/topic2": "message definition text"
-  }
-}
-```
-
-### Heartbeat
-
-**Request:**
-```json
-{"command": "heartbeat"}
-```
-
-**Response:**
-```json
-{"status": "ok"}
-```
-
-### Binary Message Format
-
-Aggregated messages are sent as ZSTD-compressed binary WebSocket frames at 50 Hz. The decompressed format is a sequence of messages:
-
-```
-For each message:
-  - Topic name length (uint16_t little-endian)
-  - Topic name (N bytes UTF-8)
-  - Timestamp (uint64_t nanoseconds since epoch, little-endian)
-  - Message data length (uint32_t little-endian)
-  - Message data (N bytes - CDR serialized from ROS2)
-```
-
-## Performance
-
-- **Throughput**: >1000 messages/second
-- **Latency**: <100ms (publish time to receive time)
-- **Concurrent Clients**: 10+ clients supported
-- **Compression**: ZSTD level 1 (typically 50-70% size reduction)
-- **Memory**: Automatic cleanup prevents unbounded growth (1 second message retention)
+For the full API protocol documentation (commands, responses, binary wire format), see [docs/API.md](docs/API.md).
 
 ## Troubleshooting
 

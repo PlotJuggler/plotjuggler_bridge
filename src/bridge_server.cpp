@@ -31,15 +31,7 @@ bool BridgeServer::initialize() {
 
   RCLCPP_INFO(node_->get_logger(), "Initializing bridge server...");
 
-  // Initialize middleware
-  auto result = middleware_->initialize(static_cast<uint16_t>(port_));
-  if (!result) {
-    RCLCPP_ERROR(node_->get_logger(), "Failed to initialize middleware: %s", result.error().c_str());
-    return false;
-  }
-  RCLCPP_INFO(node_->get_logger(), "Middleware initialized (port: %d)", port_);
-
-  // Create components
+  // Create components before middleware init so callbacks can use them
   topic_discovery_ = std::make_unique<TopicDiscovery>(node_);
   schema_extractor_ = std::make_unique<SchemaExtractor>();
   message_buffer_ = std::make_shared<MessageBuffer>();
@@ -48,11 +40,19 @@ bool BridgeServer::initialize() {
 
   RCLCPP_INFO(node_->get_logger(), "Core components created");
 
-  // Register disconnect callback for automatic session cleanup
+  // Register disconnect callback before middleware init to avoid missing events
   middleware_->set_on_disconnect([this](const std::string& client_id) {
     RCLCPP_INFO(node_->get_logger(), "Client disconnected: '%s'", client_id.c_str());
     cleanup_session(client_id);
   });
+
+  // Initialize middleware (may start accepting connections immediately)
+  auto result = middleware_->initialize(static_cast<uint16_t>(port_));
+  if (!result) {
+    RCLCPP_ERROR(node_->get_logger(), "Failed to initialize middleware: %s", result.error().c_str());
+    return false;
+  }
+  RCLCPP_INFO(node_->get_logger(), "Middleware initialized (port: %d)", port_);
 
   // Create session timeout timer (check every 1 second)
   session_timeout_timer_ = node_->create_wall_timer(std::chrono::seconds(1), [this]() { check_session_timeouts(); });
@@ -114,7 +114,7 @@ bool BridgeServer::process_requests() {
       if (command == "get_topics") {
         response = handle_get_topics(client_id);
       } else if (command == "subscribe") {
-        response = handle_subscribe(client_id, request);
+        response = handle_subscribe(client_id, request_json);
       } else if (command == "heartbeat") {
         response = handle_heartbeat(client_id);
       } else {
@@ -165,7 +165,7 @@ std::string BridgeServer::handle_get_topics(const std::string& client_id) {
   return response.dump();
 }
 
-std::string BridgeServer::handle_subscribe(const std::string& client_id, const std::string& request_json) {
+std::string BridgeServer::handle_subscribe(const std::string& client_id, const nlohmann::json& request) {
   // Create session if it doesn't exist
   if (!session_manager_->session_exists(client_id)) {
     session_manager_->create_session(client_id);
@@ -174,9 +174,6 @@ std::string BridgeServer::handle_subscribe(const std::string& client_id, const s
 
   // Update heartbeat
   session_manager_->update_heartbeat(client_id);
-
-  // Parse request
-  json request = json::parse(request_json);
 
   if (!request.contains("topics")) {
     return create_error_response("INVALID_REQUEST", "Missing 'topics' field");
@@ -242,7 +239,7 @@ std::string BridgeServer::handle_subscribe(const std::string& client_id, const s
     std::string topic_type = topic_types[topic_name];
 
     // Create callback to add messages to buffer
-    auto callback = [this, topic_name](
+    auto callback = [this](
                         const std::string& topic, const std::shared_ptr<rclcpp::SerializedMessage>& msg,
                         uint64_t receive_time_ns) { message_buffer_->add_message(topic, receive_time_ns, msg); };
 
@@ -354,6 +351,13 @@ void BridgeServer::check_session_timeouts() {
 }
 
 void BridgeServer::cleanup_session(const std::string& client_id) {
+  std::lock_guard<std::mutex> lock(cleanup_mutex_);
+
+  // Check if session still exists (idempotency guard)
+  if (!session_manager_->session_exists(client_id)) {
+    return;
+  }
+
   // Get client's subscriptions
   auto subscriptions = session_manager_->get_subscriptions(client_id);
 
@@ -391,30 +395,56 @@ void BridgeServer::publish_aggregated_messages() {
   }
 
   try {
-    // Create serializer and add all messages
-    AggregatedMessageSerializer serializer;
-    for (const auto& [topic, msgs] : messages) {
-      for (const auto& msg : msgs) {
-        serializer.serialize_message(topic, msg.timestamp_ns, *(msg.msg));
+    // Get active sessions for per-client filtering
+    auto active_sessions = session_manager_->get_active_sessions();
+    if (active_sessions.empty()) {
+      return;
+    }
+
+    size_t total_msg_count = 0;
+    size_t total_bytes = 0;
+
+    for (const auto& client_id : active_sessions) {
+      auto subscribed_topics = session_manager_->get_subscriptions(client_id);
+      if (subscribed_topics.empty()) {
+        continue;
+      }
+
+      // Filter messages for this client's subscriptions
+      AggregatedMessageSerializer serializer;
+      size_t client_msg_count = 0;
+
+      for (const auto& [topic, msgs] : messages) {
+        if (subscribed_topics.count(topic) == 0) {
+          continue;
+        }
+        for (const auto& msg : msgs) {
+          serializer.serialize_message(topic, msg.timestamp_ns, *(msg.msg));
+          client_msg_count++;
+        }
+      }
+
+      if (client_msg_count == 0) {
+        continue;
+      }
+
+      // Compress with ZSTD
+      std::vector<uint8_t> compressed_data;
+      AggregatedMessageSerializer::compress_zstd(serializer.get_serialized_data(), compressed_data);
+
+      // Send to this specific client
+      bool success = middleware_->send_binary(client_id, compressed_data);
+
+      if (success) {
+        total_msg_count += client_msg_count;
+        total_bytes += compressed_data.size();
       }
     }
 
-    // Compress with ZSTD
-    std::vector<uint8_t> compressed_data;
-    AggregatedMessageSerializer::compress_zstd(serializer.get_serialized_data(), compressed_data);
-
-    // Publish via middleware (broadcast to all connected clients)
-    bool success = middleware_->publish_data(compressed_data);
-
-    if (success) {
-      // Update statistics - count individual messages, not topics
-      size_t msg_count = 0;
-      for (const auto& [topic, msgs] : messages) {
-        msg_count += msgs.size();
-      }
+    if (total_msg_count > 0) {
       std::lock_guard<std::mutex> lock(stats_mutex_);
-      total_messages_published_ += msg_count;
-      total_bytes_published_ += compressed_data.size();
+      total_messages_published_ += total_msg_count;
+      total_bytes_published_ += total_bytes;
     }
   } catch (const std::exception& e) {
     RCLCPP_ERROR(node_->get_logger(), "Error publishing aggregated messages: %s", e.what());

@@ -234,6 +234,19 @@ TEST_F(SessionManagerTest, SessionTimestamps) {
   EXPECT_EQ(updated_session.created_at, session.created_at);  // created_at should not change
 }
 
+TEST_F(SessionManagerTest, CleanupIdempotency) {
+  // Create a session, remove it, remove again — second remove returns false
+  EXPECT_TRUE(manager_.create_session("client1"));
+  EXPECT_TRUE(manager_.session_exists("client1"));
+
+  EXPECT_TRUE(manager_.remove_session("client1"));
+  EXPECT_FALSE(manager_.session_exists("client1"));
+
+  // Second remove is idempotent (returns false, no crash)
+  EXPECT_FALSE(manager_.remove_session("client1"));
+  EXPECT_EQ(manager_.session_count(), 0);
+}
+
 TEST_F(SessionManagerTest, EmptyManager) {
   EXPECT_EQ(manager_.session_count(), 0);
   EXPECT_FALSE(manager_.session_exists("any_client"));

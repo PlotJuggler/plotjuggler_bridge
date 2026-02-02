@@ -37,7 +37,7 @@ void MessageBuffer::add_message(
 
 void MessageBuffer::move_messages(std::unordered_map<std::string, std::deque<BufferedMessage>>& out_messages) {
   std::lock_guard<std::mutex> lock(mutex_);
-  std::swap(out_messages, topic_buffers_);
+  out_messages = std::move(topic_buffers_);
   topic_buffers_.clear();
   last_read_timestamp_ns_ = get_current_time_ns();
 }

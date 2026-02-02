@@ -100,6 +100,28 @@ TEST_F(WebSocketMiddlewareTest, SendReplyToUnknownClient) {
   EXPECT_FALSE(middleware_->send_reply("nonexistent_client", data));
 }
 
+TEST_F(WebSocketMiddlewareTest, SendBinaryToUnknownClient) {
+  auto result = middleware_->initialize(18086);
+  ASSERT_TRUE(result.has_value());
+
+  std::vector<uint8_t> data = {1, 2, 3};
+  EXPECT_FALSE(middleware_->send_binary("nonexistent_client", data));
+}
+
+TEST_F(WebSocketMiddlewareTest, ReceiveRequestNotInitializedReturnsFast) {
+  // Without initializing, receive_request should return false quickly
+  std::vector<uint8_t> data;
+  std::string client_id;
+
+  auto start = std::chrono::steady_clock::now();
+  bool result = middleware_->receive_request(data, client_id);
+  auto elapsed = std::chrono::steady_clock::now() - start;
+
+  EXPECT_FALSE(result);
+  // Should return much faster than the 100ms timeout
+  EXPECT_LT(std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count(), 50);
+}
+
 int main(int argc, char** argv) {
   testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();

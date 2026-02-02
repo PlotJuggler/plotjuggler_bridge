@@ -29,8 +29,6 @@ bool GenericSubscriptionManager::subscribe(
   if (it != subscriptions_.end()) {
     // Already subscribed - increment reference count
     it->second.reference_count++;
-    // Update callback to the new one
-    it->second.callback = callback;
     return true;
   }
 
@@ -63,6 +61,11 @@ bool GenericSubscriptionManager::unsubscribe(const std::string& topic_name) {
   auto it = subscriptions_.find(topic_name);
   if (it == subscriptions_.end()) {
     return false;  // Not subscribed
+  }
+
+  // Guard against underflow
+  if (it->second.reference_count == 0) {
+    return false;
   }
 
   // Decrement reference count

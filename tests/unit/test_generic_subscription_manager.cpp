@@ -140,6 +140,23 @@ TEST_F(GenericSubscriptionManagerTest, SubscribeWithInvalidType) {
   EXPECT_FALSE(manager_->is_subscribed("/test_topic"));
 }
 
+TEST_F(GenericSubscriptionManagerTest, DoubleUnsubscribeDoesNotUnderflow) {
+  auto callback = [](const std::string&, const std::shared_ptr<rclcpp::SerializedMessage>&, uint64_t) {};
+
+  // Subscribe once
+  manager_->subscribe("/test_topic", "std_msgs/msg/String", callback);
+  EXPECT_EQ(manager_->get_reference_count("/test_topic"), 1);
+
+  // First unsubscribe succeeds and removes the subscription
+  EXPECT_TRUE(manager_->unsubscribe("/test_topic"));
+  EXPECT_EQ(manager_->get_reference_count("/test_topic"), 0);
+  EXPECT_FALSE(manager_->is_subscribed("/test_topic"));
+
+  // Second unsubscribe returns false (topic gone), no crash or underflow
+  EXPECT_FALSE(manager_->unsubscribe("/test_topic"));
+  EXPECT_EQ(manager_->get_reference_count("/test_topic"), 0);
+}
+
 TEST_F(GenericSubscriptionManagerTest, MultipleTopicsIndependent) {
   auto callback = [](const std::string&, const std::shared_ptr<rclcpp::SerializedMessage>&, uint64_t) {};
 

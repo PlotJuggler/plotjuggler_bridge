@@ -295,17 +295,35 @@ TEST_F(MessageBufferTest, ThreadSafety) {
   EXPECT_EQ(total_moved.load(), num_threads * messages_per_thread);
 }
 
-TEST_F(MessageBufferTest, MoveMessagesSwap) {
+TEST_F(MessageBufferTest, MoveMessagesReplace) {
+  // Verify move_messages replaces the output map contents (not swap)
   std::vector<uint8_t> data = {1, 2, 3};
   uint64_t current_time_ns = get_current_time_ns();
 
   buffer_.add_message("topic1", current_time_ns, create_test_message(data));
 
-  // Prepare a non-empty map
+  std::unordered_map<std::string, std::deque<BufferedMessage>> messages;
+  buffer_.move_messages(messages);
+
+  // messages should have topic1
+  EXPECT_EQ(messages.size(), 1);
+  EXPECT_TRUE(messages.find("topic1") != messages.end());
+
+  // Buffer should be empty after move
+  EXPECT_EQ(buffer_.size(), 0);
+}
+
+TEST_F(MessageBufferTest, MoveMessagesOverwritesExistingOutput) {
+  std::vector<uint8_t> data = {1, 2, 3};
+  uint64_t current_time_ns = get_current_time_ns();
+
+  buffer_.add_message("topic1", current_time_ns, create_test_message(data));
+
+  // Prepare a non-empty map with pre-existing data
   std::unordered_map<std::string, std::deque<BufferedMessage>> messages;
   messages["old_topic"].push_back(BufferedMessage{current_time_ns, create_test_message({9, 9, 9})});
 
-  // move_messages should swap, so old data should be moved into buffer
+  // move_messages should overwrite the output map
   buffer_.move_messages(messages);
 
   // messages should now have topic1, not old_topic
@@ -313,6 +331,6 @@ TEST_F(MessageBufferTest, MoveMessagesSwap) {
   EXPECT_TRUE(messages.find("topic1") != messages.end());
   EXPECT_TRUE(messages.find("old_topic") == messages.end());
 
-  // Buffer should be empty after swap
+  // Buffer should be empty after move
   EXPECT_EQ(buffer_.size(), 0);
 }

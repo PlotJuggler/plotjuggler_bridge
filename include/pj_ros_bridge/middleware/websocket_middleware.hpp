@@ -53,6 +53,7 @@ class WebSocketMiddleware : public MiddlewareInterface {
   bool receive_request(std::vector<uint8_t>& data, std::string& client_identity) override;
   bool send_reply(const std::string& client_identity, const std::vector<uint8_t>& data) override;
   bool publish_data(const std::vector<uint8_t>& data) override;
+  bool send_binary(const std::string& client_identity, const std::vector<uint8_t>& data) override;
   bool is_ready() const override;
   void set_on_connect(ConnectionCallback callback) override;
   void set_on_disconnect(ConnectionCallback callback) override;

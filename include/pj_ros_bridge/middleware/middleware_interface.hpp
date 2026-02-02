@@ -77,6 +77,15 @@ class MiddlewareInterface {
   virtual bool publish_data(const std::vector<uint8_t>& data) = 0;
 
   /**
+   * @brief Send binary data to a specific client
+   *
+   * @param client_identity Client to send to
+   * @param data Binary data to send
+   * @return true if data sent successfully, false otherwise
+   */
+  virtual bool send_binary(const std::string& client_identity, const std::vector<uint8_t>& data) = 0;
+
+  /**
    * @brief Check if middleware is initialized and ready
    *
    * @return true if ready, false otherwise
