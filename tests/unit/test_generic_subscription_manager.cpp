@@ -157,6 +157,41 @@ TEST_F(GenericSubscriptionManagerTest, DoubleUnsubscribeDoesNotUnderflow) {
   EXPECT_EQ(manager_->get_reference_count("/test_topic"), 0);
 }
 
+// Regression test for ref count corruption bug:
+// The old code in handle_subscribe() called subscribe() BEFORE extracting the
+// schema. If schema extraction failed, it would call unsubscribe() to undo the
+// subscription. But if another client had already subscribed to the same topic,
+// unsubscribe() would decrement the shared reference count, potentially causing
+// message loss for the existing client.
+//
+// The fix moved schema extraction BEFORE subscribe(). This test verifies that
+// the underlying mechanism is safe: subscribing twice (2 clients) then
+// unsubscribing once (simulating the old error path) leaves the first client's
+// subscription intact.
+TEST_F(GenericSubscriptionManagerTest, SpuriousUnsubscribeDoesNotCorruptSharedRef) {
+  auto callback = [](const std::string&, const std::shared_ptr<rclcpp::SerializedMessage>&, uint64_t) {};
+
+  // Client A subscribes
+  ASSERT_TRUE(manager_->subscribe("/shared_topic", "std_msgs/msg/String", callback));
+  EXPECT_EQ(manager_->get_reference_count("/shared_topic"), 1);
+
+  // Client B subscribes to the same topic (ref_count = 2)
+  ASSERT_TRUE(manager_->subscribe("/shared_topic", "std_msgs/msg/String", callback));
+  EXPECT_EQ(manager_->get_reference_count("/shared_topic"), 2);
+
+  // Simulate the old bug: client B's schema extraction fails, triggering unsubscribe
+  EXPECT_TRUE(manager_->unsubscribe("/shared_topic"));
+
+  // Client A's subscription must still be alive
+  EXPECT_TRUE(manager_->is_subscribed("/shared_topic"));
+  EXPECT_EQ(manager_->get_reference_count("/shared_topic"), 1);
+
+  // Client A cleanly unsubscribes — subscription fully removed
+  EXPECT_TRUE(manager_->unsubscribe("/shared_topic"));
+  EXPECT_FALSE(manager_->is_subscribed("/shared_topic"));
+  EXPECT_EQ(manager_->get_reference_count("/shared_topic"), 0);
+}
+
 TEST_F(GenericSubscriptionManagerTest, MultipleTopicsIndependent) {
   auto callback = [](const std::string&, const std::shared_ptr<rclcpp::SerializedMessage>&, uint64_t) {};
 

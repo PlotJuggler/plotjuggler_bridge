@@ -461,6 +461,50 @@ TEST_F(BridgeServerTest, SubscribeMissingTopicsField) {
 }
 
 // ---------------------------------------------------------------------------
+// Regression: StatsNotInflatedByMultipleSessions
+//
+// The old code counted stats inside the per-client send loop:
+//   for (client : clients_in_group) {
+//     if (send_binary(client, data)) {
+//       total_msg_count += group_msg_count;  // BUG: counted per client
+//     }
+//   }
+// With N clients sharing a subscription group, stats were inflated by N.
+// The fix counts once per group regardless of client count.
+//
+// This test creates 3 active sessions and spins the publish timer.
+// With no messages in the buffer, stats must remain (0, 0) — verifying
+// the counting path does not produce phantom stats with multiple sessions.
+// ---------------------------------------------------------------------------
+TEST_F(BridgeServerTest, StatsNotInflatedByMultipleSessions) {
+  ASSERT_TRUE(server_->initialize());
+
+  // Create 3 sessions via heartbeats
+  json hb;
+  hb["command"] = "heartbeat";
+  for (const auto& id : {"stats_client_1", "stats_client_2", "stats_client_3"}) {
+    mock_->push_request(id, hb.dump());
+    server_->process_requests();
+  }
+  ASSERT_EQ(server_->get_active_session_count(), 3u);
+
+  // Spin the node so the publish timer fires multiple times
+  auto start = std::chrono::steady_clock::now();
+  while (std::chrono::steady_clock::now() - start < std::chrono::milliseconds(80)) {
+    rclcpp::spin_some(node_);
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
+
+  // No messages were buffered, so stats must be zero
+  auto [msgs, bytes] = server_->get_publish_stats();
+  EXPECT_EQ(msgs, 0u);
+  EXPECT_EQ(bytes, 0u);
+
+  // No binary sends should have occurred
+  EXPECT_TRUE(mock_->get_binary_sends().empty());
+}
+
+// ---------------------------------------------------------------------------
 // Additional: SubscribeTopicsNotArray
 // ---------------------------------------------------------------------------
 TEST_F(BridgeServerTest, SubscribeTopicsNotArray) {
