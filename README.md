@@ -1,6 +1,6 @@
 # pj_ros_bridge
 
-A high-performance ROS2 bridge server that forwards ROS2 topic content over the network using ZeroMQ, without requiring DDS on the client side.
+A high-performance ROS2 bridge server that forwards ROS2 topic content over WebSocket, without requiring DDS on the client side.
 
 ## Overview
 
@@ -8,33 +8,26 @@ A high-performance ROS2 bridge server that forwards ROS2 topic content over the 
 
 ### Key Features
 
-- **No DDS Required**: Clients connect via ZeroMQ (TCP) without needing ROS2/DDS installed
+- **No DDS Required**: Clients connect via WebSocket (single port) without needing ROS2/DDS installed
 - **High Performance**: 50 Hz message aggregation with ZSTD compression
 - **Multi-Client Support**: Multiple clients can connect simultaneously with shared subscriptions
-- **Session Management**: Automatic cleanup of disconnected clients via heartbeat monitoring
+- **Session Management**: Automatic cleanup of disconnected clients via heartbeat monitoring and WebSocket close events
 - **Runtime Schema Discovery**: Automatic extraction of message schemas from installed ROS2 packages
 - **Zero-Copy Design**: Efficient message handling using shared pointers and move semantics
 - **Type-Safe Error Handling**: Comprehensive error reporting using `tl::expected`
 
 ## Architecture
 
-### Communication Patterns
+### Communication Pattern
 
-The server uses two ZeroMQ socket patterns:
+The server uses a single WebSocket port (default 8080):
 
-1. **REQ-REP Pattern** (port 5555): Client API requests
-   - Discover available topics
-   - Subscribe/unsubscribe to topics
-   - Send heartbeats
-
-2. **PUB-SUB Pattern** (port 5556): Data streaming
-   - Aggregated messages published at 50 Hz
-   - ZSTD compressed binary format
-   - All subscribed topics in single message
+- **Text frames**: JSON API requests and responses (get_topics, subscribe, heartbeat)
+- **Binary frames**: ZSTD-compressed aggregated message stream at 50 Hz
 
 ### Core Components
 
-- **MiddlewareInterface / ZmqMiddleware**: Abstraction layer over ZeroMQ for future middleware replacement
+- **MiddlewareInterface / WebSocketMiddleware**: Abstraction layer over IXWebSocket for future middleware replacement
 - **TopicDiscovery**: Discovers available ROS2 topics using `rclcpp::Node::get_topic_names_and_types()`
 - **SchemaExtractor**: Extracts message schemas by reading .msg files from ROS2 package share directories
 - **GenericSubscriptionManager**: Manages ROS2 subscriptions using `rclcpp::GenericSubscription` with reference counting
@@ -51,6 +44,7 @@ The server uses two ZeroMQ socket patterns:
 - **ROS2**: Humble or later
 - **C++ Standard**: C++17
 - **Build System**: colcon
+- **Conan**: Package manager for IXWebSocket dependency
 
 ### Dependencies
 
@@ -59,11 +53,12 @@ The server uses two ZeroMQ socket patterns:
 - `ament_index_cpp` - Locate ROS2 package share directories
 
 #### System Libraries
-- **ZeroMQ** (libzmq): `sudo apt install libzmq3-dev`
 - **ZSTD** (libzstd): `sudo apt install libzstd-dev`
 
+#### Conan-Managed Libraries
+- **IXWebSocket** (`ixwebsocket/11.4.6`): WebSocket server/client
+
 #### Header-Only Libraries (Included in 3rdparty/)
-- **cppzmq** - C++ bindings for ZeroMQ
 - **nlohmann/json** - JSON library
 - **tl/expected** - Type-safe error handling
 
@@ -86,35 +81,36 @@ cd ~/ws_plotjuggler/src
 git clone <repository_url> pj_ros_bridge
 
 # 3. Install system dependencies
-sudo apt install libzmq3-dev libzstd-dev
+sudo apt install libzstd-dev
 
-# 4. Source ROS2
+# 4. Install Conan dependencies
+cd ~/ws_plotjuggler/src/pj_ros_bridge
+conan install . --output-folder=conan_output --build=missing
+
+# 5. Source ROS2
 source /opt/ros/humble/setup.bash
 
-# 5. Build the package
+# 6. Build the package
 cd ~/ws_plotjuggler
-colcon build --packages-select pj_ros_bridge
+colcon build --packages-select pj_ros_bridge --cmake-args -DCMAKE_BUILD_TYPE=Release
 
-# 6. Source the workspace
+# 7. Source the workspace
 source install/setup.bash
 ```
 
 ### Running Tests
 
 ```bash
-# Run all unit tests (59 tests)
+# Run all unit tests (64 tests)
 colcon test --packages-select pj_ros_bridge
 
 # View test results
 colcon test-result --verbose
-
-# Run specific test
-./build/pj_ros_bridge/pj_ros_bridge_tests --gtest_filter="MiddlewareTest.*"
 ```
 
 ### Code Formatting
 
-The project uses pre-commit hooks for code formatting and linting:
+The project uses pre-commit hooks for code formatting:
 
 ```bash
 # Install pre-commit (if needed)
@@ -141,8 +137,7 @@ ros2 run pj_ros_bridge pj_ros_bridge_node
 ```
 
 Default configuration:
-- REQ-REP port: 5555
-- PUB-SUB port: 5556
+- WebSocket port: 8080
 - Publish rate: 50 Hz
 - Session timeout: 10 seconds
 
@@ -150,8 +145,7 @@ Default configuration:
 
 ```bash
 ros2 run pj_ros_bridge pj_ros_bridge_node --ros-args \
-  -p req_port:=5557 \
-  -p pub_port:=5558 \
+  -p port:=9090 \
   -p publish_rate:=30.0 \
   -p session_timeout:=15.0
 ```
@@ -160,8 +154,7 @@ ros2 run pj_ros_bridge pj_ros_bridge_node --ros-args \
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `req_port` | int | 5555 | Port for REQ-REP socket (client API requests) |
-| `pub_port` | int | 5556 | Port for PUB-SUB socket (data streaming) |
+| `port` | int | 8080 | WebSocket server port |
 | `publish_rate` | double | 50.0 | Aggregation publish rate in Hz |
 | `session_timeout` | double | 10.0 | Client timeout duration in seconds |
 
@@ -182,9 +175,17 @@ cd ~/ws_plotjuggler/src/pj_ros_bridge
 python3 tests/integration/test_client.py --subscribe /topic1 /topic2
 ```
 
-### Python Test Client Example
+### Python Test Client
 
-The package includes a comprehensive Python test client for testing and demonstration:
+The package includes a Python test client for testing and demonstration.
+
+**Install dependencies:**
+
+```bash
+pip install websocket-client zstandard
+```
+
+**Usage:**
 
 ```bash
 # Discover available topics
@@ -195,139 +196,170 @@ python3 tests/integration/test_client.py --subscribe /imu /points
 
 # Subscribe with custom server address
 python3 tests/integration/test_client.py \
-  --req-address tcp://localhost:5555 \
-  --pub-address tcp://localhost:5556 \
+  --server 192.168.1.100 \
+  --port 9090 \
   --subscribe /topic1
 
-# Run for specific duration
-python3 tests/integration/test_client.py --subscribe /topic1 --duration 60
+# Run for specific duration with verbose output
+python3 tests/integration/test_client.py --subscribe /topic1 --duration 60 --verbose
 ```
 
-## Performance Characteristics
+## API Protocol
 
-### Tested Performance
+### Get Topics
+
+**Request:**
+```json
+{"command": "get_topics"}
+```
+
+**Response:**
+```json
+{
+  "status": "success",
+  "topics": [
+    {"name": "/topic_name", "type": "package_name/msg/MessageType"}
+  ]
+}
+```
+
+### Subscribe
+
+**Request:**
+```json
+{
+  "command": "subscribe",
+  "topics": ["/topic1", "/topic2"]
+}
+```
+
+**Response:**
+```json
+{
+  "status": "success",
+  "schemas": {
+    "/topic1": "message definition text",
+    "/topic2": "message definition text"
+  }
+}
+```
+
+### Heartbeat
+
+**Request:**
+```json
+{"command": "heartbeat"}
+```
+
+**Response:**
+```json
+{"status": "ok"}
+```
+
+### Binary Message Format
+
+Aggregated messages are sent as ZSTD-compressed binary WebSocket frames at 50 Hz. The decompressed format is a sequence of messages:
+
+```
+For each message:
+  - Topic name length (uint16_t little-endian)
+  - Topic name (N bytes UTF-8)
+  - Timestamp (uint64_t nanoseconds since epoch, little-endian)
+  - Message data length (uint32_t little-endian)
+  - Message data (N bytes - CDR serialized from ROS2)
+```
+
+## Performance
 
 - **Throughput**: >1000 messages/second
 - **Latency**: <100ms (publish time to receive time)
 - **Concurrent Clients**: 10+ clients supported
-- **Compression Ratio**: Varies by message type (typically 50-70% reduction)
+- **Compression**: ZSTD level 1 (typically 50-70% size reduction)
 - **Memory**: Automatic cleanup prevents unbounded growth (1 second message retention)
-
-### Design Optimizations
-
-- **Zero-Copy Message Handling**: Uses `shared_ptr<SerializedMessage>` to avoid data copying
-- **Move Semantics**: Message buffer ownership transferred via `std::swap()`
-- **Streaming Serialization**: Messages serialized directly without intermediate storage
-- **Reference Counting**: Shared ROS2 subscriptions across multiple clients
-- **Automatic Cleanup**: Messages older than 1 second automatically deleted
-
-## API Protocol
-
-See [API.md](API.md) for detailed protocol specification including:
-- Connection sequence
-- Request/response message formats
-- Binary serialization format
-- Error handling
-- Client implementation guide
 
 ## Troubleshooting
 
-### Server fails to start with "Address already in use"
+### Server fails to start with "Failed to listen on port"
 
-**Cause**: Another process is using port 5555 or 5556
+Another process is using the port. Either kill the conflicting process or use a custom port:
 
-**Solution**:
-- Kill the conflicting process, or
-- Use custom ports:
-  ```bash
-  ros2 run pj_ros_bridge pj_ros_bridge_node --ros-args -p req_port:=5557 -p pub_port:=5558
-  ```
+```bash
+ros2 run pj_ros_bridge pj_ros_bridge_node --ros-args -p port:=9090
+```
 
 ### Client receives no data
 
-**Checks**:
 1. Verify server is running: `ps aux | grep pj_ros_bridge`
 2. Check topics are being published: `ros2 topic list`
 3. Verify heartbeat is being sent (required every 1 second)
-4. Check server logs for errors: `ros2 run pj_ros_bridge pj_ros_bridge_node --ros-args --log-level debug`
+4. Check server logs: `ros2 run pj_ros_bridge pj_ros_bridge_node --ros-args --log-level debug`
 
 ### "Failed to get schema for topic" error
 
-**Cause**: Message type's .msg file not found in package share directory
+The message type's .msg file was not found. Ensure the ROS2 package containing the message type is installed and sourced:
 
-**Solution**:
-- Ensure the ROS2 package containing the message type is installed
-- Verify with: `ros2 interface show <package_name>/msg/<MessageType>`
-- Source the workspace containing the message package
+```bash
+ros2 interface show <package_name>/msg/<MessageType>
+```
 
 ### Session timeout / Automatic unsubscription
 
-**Cause**: Client stopped sending heartbeats
+The client stopped sending heartbeats. Ensure the client sends a heartbeat every 1 second. The default timeout is 10 seconds. Increase if needed:
 
-**Solution**:
-- Ensure client sends heartbeat every 1 second
-- Default timeout is 10 seconds without heartbeat
-- Increase timeout if needed: `-p session_timeout:=20.0`
+```bash
+ros2 run pj_ros_bridge pj_ros_bridge_node --ros-args -p session_timeout:=20.0
+```
 
-## Development
-
-### Project Structure
+## Project Structure
 
 ```
 pj_ros_bridge/
-   include/pj_ros_bridge/
-      middleware/
-         middleware_interface.hpp    # Abstract middleware
-         zmq_middleware.hpp          # ZeroMQ implementation
-      topic_discovery.hpp             # ROS2 topic discovery
-      schema_extractor.hpp            # Message schema extraction
-      message_buffer.hpp              # Thread-safe message buffer
-      generic_subscription_manager.hpp # Subscription management
-      session_manager.hpp             # Client session tracking
-      message_serializer.hpp          # Binary serialization + ZSTD
-      bridge_server.hpp               # Main server orchestrator
-   src/
-      middleware/zmq_middleware.cpp
-      topic_discovery.cpp
-      schema_extractor.cpp
-      message_buffer.cpp
-      generic_subscription_manager.cpp
-      session_manager.cpp
-      message_serializer.cpp
-      bridge_server.cpp
-      main.cpp                        # Entry point
-   tests/
-      unit/                           # 59 unit tests (gtest)
-      integration/
-          test_client.py              # Python test client
-   3rdparty/                           # Header-only dependencies
-   DATA/                               # Test data (rosbag, reference schemas)
-   cmake/                              # CMake modules
+├── include/pj_ros_bridge/
+│   ├── middleware/
+│   │   ├── middleware_interface.hpp
+│   │   └── websocket_middleware.hpp
+│   ├── topic_discovery.hpp
+│   ├── schema_extractor.hpp
+│   ├── message_buffer.hpp
+│   ├── message_serializer.hpp
+│   ├── session_manager.hpp
+│   ├── generic_subscription_manager.hpp
+│   ├── time_utils.hpp
+│   └── bridge_server.hpp
+├── src/
+│   ├── middleware/
+│   │   └── websocket_middleware.cpp
+│   ├── topic_discovery.cpp
+│   ├── schema_extractor.cpp
+│   ├── message_buffer.cpp
+│   ├── message_serializer.cpp
+│   ├── session_manager.cpp
+│   ├── generic_subscription_manager.cpp
+│   ├── bridge_server.cpp
+│   └── main.cpp
+├── tests/
+│   ├── unit/                        # 64 unit tests (gtest)
+│   └── integration/
+│       └── test_client.py
+├── 3rdparty/                        # Header-only dependencies
+├── DATA/                            # Test data (rosbag, reference schemas)
+├── cmake/                           # CMake modules
+├── conanfile.txt
+├── CMakeLists.txt
+├── package.xml
+├── .clang-tidy
+└── .pre-commit-config.yaml
 ```
 
-### Coding Standards
+## Coding Standards
 
 The project follows strict coding standards enforced by `.clang-tidy`:
 
-**Naming Conventions**:
 - Classes/Types: `CamelCase` (e.g., `BridgeServer`, `SessionManager`)
 - Functions/Methods: `lower_case` (e.g., `get_topics()`, `update_heartbeat()`)
 - Variables: `lower_case`
 - Private members: suffix with `_` (e.g., `sessions_`, `mutex_`)
 - Constants: `CamelCase` with `k` prefix (e.g., `kDefaultTimeout`)
-
-**Code Quality**:
-- C++17 standard
-- Thread-safe by design (explicit mutex usage)
-- Comprehensive documentation comments
-- All warnings treated as errors
-
-### Testing
-
-- **Unit Tests**: 59 tests covering all core components
-- **Integration Tests**: Python test client for end-to-end testing
-- **Linters**: cppcheck, clang-tidy, cmake-lint, xmllint
-- **Code Coverage**: >80% target for core components
 
 ## License
 
@@ -345,18 +377,9 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 
-## Contributing
-
-Contributions are welcome! Please ensure:
-- Code follows the project's coding standards
-- All tests pass: `colcon test --packages-select pj_ros_bridge`
-- Code is formatted: `pre-commit run -a`
-- New features include unit tests
-- Documentation is updated
-
 ## References
 
 - [ROS2 Generic Subscription](https://api.nav2.org/rolling/html/generic__subscription_8hpp_source.html)
 - [rosbag2 MCAP Storage](https://github.com/ros2/rosbag2/blob/rolling/rosbag2_storage_mcap/src/mcap_storage.cpp)
-- [ZeroMQ Guide](https://zeromq.org/socket-api/)
+- [IXWebSocket](https://github.com/machinezone/IXWebSocket)
 - [tl::expected](https://github.com/TartanLlama/expected)
