@@ -27,6 +27,9 @@ struct Session {
 
   /// Session creation timestamp
   std::chrono::steady_clock::time_point created_at;
+
+  /// Whether message publishing is paused for this client
+  bool paused{false};
 };
 
 /**
@@ -112,6 +115,21 @@ class SessionManager {
    * @return true if session exists, false otherwise
    */
   bool session_exists(const std::string& client_id) const;
+
+  /**
+   * @brief Set the paused state for a client
+   * @param client_id Client identifier
+   * @param paused Whether to pause message publishing for this client
+   * @return true if session exists and was updated, false if session not found
+   */
+  bool set_paused(const std::string& client_id, bool paused);
+
+  /**
+   * @brief Check if a client is paused
+   * @param client_id Client identifier
+   * @return true if paused, false if not paused or session not found
+   */
+  bool is_paused(const std::string& client_id) const;
 
  private:
   /// Map of client ID to session data
