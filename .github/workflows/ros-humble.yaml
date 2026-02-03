@@ -10,17 +10,50 @@ on:
 jobs:
   build:
     runs-on: ubuntu-22.04
+    container:
+      image: rostooling/setup-ros-docker:ubuntu-jammy-ros-humble-ros-base-latest
     steps:
-      # Step 1: Set up ROS
-      - uses: ros-tooling/setup-ros@v0.7
-        with:
-          required-ros-distributions: humble
+      # Checkout repository
+      - uses: actions/checkout@v4
 
-      # Step 2: Run ROS CI
-      - uses: ros-tooling/action-ros-ci@v0.4
-        env:
-          HOME: /home/runner
-          ROS_HOME: /home/runner/.ros
+      # Setup ccache for faster rebuilds
+      - name: Setup ccache
+        uses: hendrikmuhs/ccache-action@v1.2
         with:
-          package-name: pj_ros_bridge
-          target-ros2-distro: humble
+          key: ${{ github.job }}-humble
+          max-size: 500M
+
+      # Configure ccache for colcon
+      - name: Configure ccache
+        run: |
+          echo "/usr/lib/ccache" >> $GITHUB_PATH
+
+      # Install dependencies via rosdep
+      - name: Install dependencies
+        run: |
+          apt-get update
+          rosdep update
+          rosdep install --from-paths . --ignore-src -y
+
+      # Build
+      - name: Build
+        env:
+          HOME: /root
+          ROS_HOME: /root/.ros
+        run: |
+          source /opt/ros/humble/setup.bash
+          colcon build --packages-select pj_ros_bridge \
+            --cmake-args -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+
+      # Test
+      - name: Test
+        env:
+          HOME: /root
+          ROS_HOME: /root/.ros
+        run: |
+          source /opt/ros/humble/setup.bash
+          source install/setup.bash
+          colcon test --packages-select pj_ros_bridge
+          colcon test-result --verbose
