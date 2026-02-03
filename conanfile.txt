@@ -1,6 +1,0 @@
-[requires]
-ixwebsocket/11.4.6
-
-[generators]
-CMakeDeps
-CMakeToolchain

@@ -16,19 +16,7 @@ jobs:
         with:
           required-ros-distributions: jazzy
 
-      # SteCache ROS dependencies
-      - name: Cache ROS dependencies
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.ros
-            /tmp/rosdep
-            /opt/ros/jazzy
-          key: ${{ runner.os }}-ros2-jazzy-${{ hashFiles('**/package.xml') }}-rosdep
-          restore-keys: |
-            ${{ runner.os }}-ros2-jazzy-${{ hashFiles('**/package.xml') }}-
-            ${{ runner.os }}-ros2-jazzy-
-      # Step 3: Run ROS CI
+      # Step 2: Run ROS CI
       - uses: ros-tooling/action-ros-ci@v0.4
         with:
           package-name: pj_ros_bridge

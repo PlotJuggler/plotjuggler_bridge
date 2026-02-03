@@ -16,19 +16,7 @@ jobs:
         with:
           required-ros-distributions: rolling
 
-      # SteCache ROS dependencies
-      - name: Cache ROS dependencies
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.ros
-            /tmp/rosdep
-            /opt/ros/rolling
-          key: ${{ runner.os }}-ros2-rolling-${{ hashFiles('**/package.xml') }}-rosdep
-          restore-keys: |
-            ${{ runner.os }}-ros2-rolling-${{ hashFiles('**/package.xml') }}-
-            ${{ runner.os }}-ros2-rolling-
-      # Step 3: Run ROS CI
+      # Step 2: Run ROS CI
       - uses: ros-tooling/action-ros-ci@v0.4
         with:
           package-name: pj_ros_bridge

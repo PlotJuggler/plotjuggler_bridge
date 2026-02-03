@@ -28,7 +28,6 @@ For detailed architecture documentation, see [docs/ARCHITECTURE.md](docs/ARCHITE
 - **ROS2**: Humble or later
 - **C++ Standard**: C++17
 - **Build System**: colcon
-- **Conan**: Package manager for IXWebSocket dependency
 
 ### Dependencies
 
@@ -39,8 +38,8 @@ For detailed architecture documentation, see [docs/ARCHITECTURE.md](docs/ARCHITE
 #### System Libraries
 - **ZSTD** (libzstd): `sudo apt install libzstd-dev`
 
-#### Conan-Managed Libraries
-- **IXWebSocket** (`ixwebsocket/11.4.6`): WebSocket server/client
+#### Automatically Fetched Libraries (via CMake FetchContent)
+- **IXWebSocket** (`v11.4.6`): WebSocket server/client
 
 #### Header-Only Libraries (Included in 3rdparty/)
 - **nlohmann/json** - JSON library
@@ -67,25 +66,23 @@ git clone <repository_url> pj_ros_bridge
 # 3. Install system dependencies
 sudo apt install libzstd-dev
 
-# 4. Install Conan dependencies
-cd ~/ws_plotjuggler/src/pj_ros_bridge
-conan install . --output-folder=conan_output --build=missing
-
-# 5. Source ROS2
+# 4. Source ROS2
 source /opt/ros/humble/setup.bash
 
-# 6. Build the package
+# 5. Build the package
 cd ~/ws_plotjuggler
 colcon build --packages-select pj_ros_bridge --cmake-args -DCMAKE_BUILD_TYPE=Release
 
-# 7. Source the workspace
+# 6. Source the workspace
 source install/setup.bash
 ```
+
+Note: IXWebSocket is automatically downloaded and built via CMake FetchContent during the first build.
 
 ### Running Tests
 
 ```bash
-# Run all unit tests (91 tests)
+# Run all unit tests (139 tests)
 colcon test --packages-select pj_ros_bridge
 
 # View test results
@@ -253,13 +250,12 @@ pj_ros_bridge/
 │   ├── bridge_server.cpp
 │   └── main.cpp
 ├── tests/
-│   ├── unit/                        # 91 unit tests (gtest)
+│   ├── unit/                        # 139 unit tests (gtest)
 │   └── integration/
 │       └── test_client.py
 ├── 3rdparty/                        # Header-only dependencies
 ├── DATA/                            # Test data (rosbag, reference schemas)
 ├── cmake/                           # CMake modules
-├── conanfile.txt
 ├── CMakeLists.txt
 ├── package.xml
 ├── .clang-tidy

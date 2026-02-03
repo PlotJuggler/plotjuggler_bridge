@@ -27,9 +27,6 @@ endif()
 # Add cmake module path for custom find modules
 list(APPEND CMAKE_MODULE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
 
-# Add Conan-generated package paths
-list(APPEND CMAKE_PREFIX_PATH ${CMAKE_CURRENT_SOURCE_DIR}/conan_output)
-
 # Find ROS2 dependencies
 find_package(ament_cmake REQUIRED)
 find_package(ament_index_cpp REQUIRED)
@@ -37,7 +34,23 @@ find_package(rclcpp REQUIRED)
 
 # Find external dependencies
 find_package(ZSTD REQUIRED)
-find_package(ixwebsocket REQUIRED)
+
+# Try to find ixwebsocket (Conan or system install), fall back to FetchContent
+find_package(ixwebsocket QUIET)
+if(NOT ixwebsocket_FOUND)
+  message(STATUS "ixwebsocket not found, fetching from GitHub...")
+  include(FetchContent)
+  FetchContent_Declare(
+    ixwebsocket
+    GIT_REPOSITORY https://github.com/machinezone/IXWebSocket.git
+    GIT_TAG v11.4.6
+  )
+  # Configure ixwebsocket options
+  set(USE_TLS OFF CACHE BOOL "" FORCE)
+  set(USE_ZLIB ON CACHE BOOL "" FORCE)
+  set(IXWEBSOCKET_INSTALL OFF CACHE BOOL "" FORCE)
+  FetchContent_MakeAvailable(ixwebsocket)
+endif()
 
 # Include directories
 include_directories(
