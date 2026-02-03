@@ -554,13 +554,16 @@ void BridgeServer::cleanup_session(const std::string& client_id) {
     return;
   }
 
-  // Get client's subscriptions
+  // Get client's subscriptions and paused state
   auto subscriptions = session_manager_->get_subscriptions(client_id);
+  bool was_paused = session_manager_->is_paused(client_id);
 
-  // Unsubscribe from all topics
-  for (const auto& [topic, rate] : subscriptions) {
-    subscription_manager_->unsubscribe(topic);
-    RCLCPP_DEBUG(node_->get_logger(), "Unsubscribed client '%s' from topic '%s'", client_id.c_str(), topic.c_str());
+  // Unsubscribe from all topics (only if not paused - paused clients already decremented ref counts)
+  if (!was_paused) {
+    for (const auto& [topic, rate] : subscriptions) {
+      subscription_manager_->unsubscribe(topic);
+      RCLCPP_DEBUG(node_->get_logger(), "Unsubscribed client '%s' from topic '%s'", client_id.c_str(), topic.c_str());
+    }
   }
 
   // Remove session
@@ -675,9 +678,8 @@ void BridgeServer::publish_aggregated_messages() {
         continue;
       }
 
-      // Compress once for the group
-      std::vector<uint8_t> compressed_data;
-      AggregatedMessageSerializer::compress_zstd(serializer.get_serialized_data(), compressed_data);
+      // Finalize with 16-byte header and compress
+      std::vector<uint8_t> compressed_data = serializer.finalize();
 
       // Send the same buffer to all clients in this group
       bool any_sent = false;
