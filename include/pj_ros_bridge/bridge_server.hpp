@@ -75,6 +75,7 @@ class BridgeServer {
  private:
   std::string handle_get_topics(const std::string& client_id, const nlohmann::json& request);
   std::string handle_subscribe(const std::string& client_id, const nlohmann::json& request);
+  std::string handle_unsubscribe(const std::string& client_id, const nlohmann::json& request);
   std::string handle_heartbeat(const std::string& client_id, const nlohmann::json& request);
   std::string create_error_response(
       const std::string& error_code, const std::string& message, const nlohmann::json& request) const;

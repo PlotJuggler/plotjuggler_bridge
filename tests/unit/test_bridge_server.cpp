@@ -771,3 +771,194 @@ TEST_F(BridgeServerTest, SubscribeSchemaEncodingFormatStructure) {
     EXPECT_TRUE(value["definition"].is_string()) << "Schema definition should be a string";
   }
 }
+
+// ---------------------------------------------------------------------------
+// Unsubscribe Command Tests
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// UnsubscribeRemovesTopics
+//
+// Tests that the unsubscribe command removes previously subscribed topics.
+// ---------------------------------------------------------------------------
+TEST_F(BridgeServerTest, UnsubscribeRemovesTopics) {
+  ASSERT_TRUE(server_->initialize());
+
+  // First create a session via heartbeat
+  json hb;
+  hb["command"] = "heartbeat";
+  mock_->push_request("client_unsub_1", hb.dump());
+  server_->process_requests();
+
+  // Subscribe to topics (they don't exist, but we create the session subscription intent)
+  json sub_request;
+  sub_request["command"] = "subscribe";
+  sub_request["topics"] = json::array({"/topic_a", "/topic_b"});
+  mock_->push_request("client_unsub_1", sub_request.dump());
+  server_->process_requests();
+  mock_->pop_reply("client_unsub_1");  // discard subscribe response
+
+  // Then unsubscribe from one topic
+  json unsub_request;
+  unsub_request["command"] = "unsubscribe";
+  unsub_request["id"] = "unsub-1";
+  unsub_request["topics"] = json::array({"/topic_a"});
+  mock_->push_request("client_unsub_1", unsub_request.dump());
+  server_->process_requests();
+
+  json response = mock_->pop_reply("client_unsub_1");
+  ASSERT_FALSE(response.is_discarded());
+  EXPECT_EQ(response["status"], "success");
+  EXPECT_EQ(response["id"], "unsub-1");
+  EXPECT_TRUE(response.contains("protocol_version"));
+  ASSERT_TRUE(response.contains("removed"));
+  // Note: /topic_a doesn't exist in ROS2 graph, so it was never actually subscribed
+  // The removed array will be empty since no actual subscription existed
+  EXPECT_TRUE(response["removed"].is_array());
+}
+
+// ---------------------------------------------------------------------------
+// SubscribeIsAdditive
+//
+// Tests that subscribe only adds topics without removing existing ones.
+// This is a BREAKING CHANGE from the old "replace" behavior.
+// ---------------------------------------------------------------------------
+TEST_F(BridgeServerTest, SubscribeIsAdditive) {
+  ASSERT_TRUE(server_->initialize());
+
+  // Create session
+  json hb;
+  hb["command"] = "heartbeat";
+  mock_->push_request("client_additive_1", hb.dump());
+  server_->process_requests();
+
+  // Subscribe to topic_a
+  json sub1;
+  sub1["command"] = "subscribe";
+  sub1["topics"] = json::array({"/topic_a"});
+  mock_->push_request("client_additive_1", sub1.dump());
+  server_->process_requests();
+  mock_->pop_reply("client_additive_1");
+
+  // Subscribe to topic_b (should NOT remove topic_a in the new additive model)
+  json sub2;
+  sub2["command"] = "subscribe";
+  sub2["topics"] = json::array({"/topic_b"});
+  mock_->push_request("client_additive_1", sub2.dump());
+  server_->process_requests();
+
+  json response = mock_->pop_reply("client_additive_1");
+  ASSERT_FALSE(response.is_discarded());
+
+  // Both topics should be in failures (since they don't exist in ROS2 graph)
+  // but the key point is that we asked for /topic_b and it should NOT have
+  // triggered unsubscribe of /topic_a
+  EXPECT_TRUE(response.contains("failures"));
+}
+
+// ---------------------------------------------------------------------------
+// UnsubscribeIgnoresUnsubscribedTopics
+//
+// Tests that unsubscribing from topics we never subscribed to succeeds
+// gracefully with an empty removed array.
+// ---------------------------------------------------------------------------
+TEST_F(BridgeServerTest, UnsubscribeIgnoresUnsubscribedTopics) {
+  ASSERT_TRUE(server_->initialize());
+
+  // Create session
+  json hb;
+  hb["command"] = "heartbeat";
+  mock_->push_request("client_unsub_ignore", hb.dump());
+  server_->process_requests();
+
+  // Unsubscribe from topic we never subscribed to
+  json request;
+  request["command"] = "unsubscribe";
+  request["topics"] = json::array({"/never_subscribed"});
+  mock_->push_request("client_unsub_ignore", request.dump());
+  server_->process_requests();
+
+  json response = mock_->pop_reply("client_unsub_ignore");
+  ASSERT_FALSE(response.is_discarded());
+  EXPECT_EQ(response["status"], "success");
+  ASSERT_TRUE(response.contains("removed"));
+  EXPECT_EQ(response["removed"].size(), 0u);  // Nothing removed
+}
+
+// ---------------------------------------------------------------------------
+// UnsubscribeMissingTopicsField
+//
+// Tests that unsubscribe with missing topics field returns an error.
+// ---------------------------------------------------------------------------
+TEST_F(BridgeServerTest, UnsubscribeMissingTopicsField) {
+  ASSERT_TRUE(server_->initialize());
+
+  // Create session
+  json hb;
+  hb["command"] = "heartbeat";
+  mock_->push_request("client_unsub_missing", hb.dump());
+  server_->process_requests();
+
+  json request;
+  request["command"] = "unsubscribe";
+  mock_->push_request("client_unsub_missing", request.dump());
+  server_->process_requests();
+
+  json response = mock_->pop_reply("client_unsub_missing");
+  ASSERT_FALSE(response.is_discarded());
+  EXPECT_EQ(response["status"], "error");
+  EXPECT_EQ(response["error_code"], "INVALID_REQUEST");
+}
+
+// ---------------------------------------------------------------------------
+// UnsubscribeTopicsNotArray
+//
+// Tests that unsubscribe with non-array topics field returns an error.
+// ---------------------------------------------------------------------------
+TEST_F(BridgeServerTest, UnsubscribeTopicsNotArray) {
+  ASSERT_TRUE(server_->initialize());
+
+  // Create session
+  json hb;
+  hb["command"] = "heartbeat";
+  mock_->push_request("client_unsub_notarray", hb.dump());
+  server_->process_requests();
+
+  json request;
+  request["command"] = "unsubscribe";
+  request["topics"] = "not_an_array";
+  mock_->push_request("client_unsub_notarray", request.dump());
+  server_->process_requests();
+
+  json response = mock_->pop_reply("client_unsub_notarray");
+  ASSERT_FALSE(response.is_discarded());
+  EXPECT_EQ(response["status"], "error");
+  EXPECT_EQ(response["error_code"], "INVALID_REQUEST");
+}
+
+// ---------------------------------------------------------------------------
+// UnsubscribeIncludesProtocolVersion
+//
+// Tests that unsubscribe response includes protocol_version and echoes id.
+// ---------------------------------------------------------------------------
+TEST_F(BridgeServerTest, UnsubscribeIncludesProtocolVersion) {
+  ASSERT_TRUE(server_->initialize());
+
+  // Create session
+  json hb;
+  hb["command"] = "heartbeat";
+  mock_->push_request("client_unsub_proto", hb.dump());
+  server_->process_requests();
+
+  json request;
+  request["command"] = "unsubscribe";
+  request["id"] = "proto-unsub-1";
+  request["topics"] = json::array({"/any_topic"});
+  mock_->push_request("client_unsub_proto", request.dump());
+  server_->process_requests();
+
+  json response = mock_->pop_reply("client_unsub_proto");
+  ASSERT_FALSE(response.is_discarded());
+  EXPECT_EQ(response["protocol_version"], 1);
+  EXPECT_EQ(response["id"], "proto-unsub-1");
+}

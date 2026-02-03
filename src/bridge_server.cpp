@@ -119,6 +119,8 @@ bool BridgeServer::process_requests() {
         response = handle_get_topics(client_id, request_json);
       } else if (command == "subscribe") {
         response = handle_subscribe(client_id, request_json);
+      } else if (command == "unsubscribe") {
+        response = handle_unsubscribe(client_id, request_json);
       } else if (command == "heartbeat") {
         response = handle_heartbeat(client_id, request_json);
       } else {
@@ -210,21 +212,13 @@ std::string BridgeServer::handle_subscribe(const std::string& client_id, const n
     }
   }
 
-  // Determine which topics to add and remove
+  // Determine which topics to add (additive model - subscribe only adds, never removes)
   std::vector<std::string> topics_to_add;
-  std::vector<std::string> topics_to_remove;
 
   // Find topics to add (in requested but not in current)
   for (const auto& [topic, rate] : requested_topics) {
     if (current_subs.find(topic) == current_subs.end()) {
       topics_to_add.push_back(topic);
-    }
-  }
-
-  // Find topics to remove (in current but not in requested)
-  for (const auto& [topic, rate] : current_subs) {
-    if (requested_topics.find(topic) == requested_topics.end()) {
-      topics_to_remove.push_back(topic);
     }
   }
 
@@ -295,13 +289,7 @@ std::string BridgeServer::handle_subscribe(const std::string& client_id, const n
         topic_type.c_str());
   }
 
-  // Unsubscribe from removed topics
-  for (const auto& topic_name : topics_to_remove) {
-    subscription_manager_->unsubscribe(topic_name);
-    RCLCPP_INFO(node_->get_logger(), "Client '%s' unsubscribed from topic '%s'", client_id.c_str(), topic_name.c_str());
-  }
-
-  // Update session subscriptions with only successfully subscribed topics
+  // Update session subscriptions with successfully subscribed topics (additive model)
   std::unordered_map<std::string, double> final_subscriptions = current_subs;
   for (const auto& topic : successfully_subscribed) {
     final_subscriptions[topic] = requested_topics[topic];
@@ -311,9 +299,6 @@ std::string BridgeServer::handle_subscribe(const std::string& client_id, const n
     if (final_subscriptions.find(topic) != final_subscriptions.end()) {
       final_subscriptions[topic] = rate;
     }
-  }
-  for (const auto& topic : topics_to_remove) {
-    final_subscriptions.erase(topic);
   }
   session_manager_->update_subscriptions(client_id, final_subscriptions);
 
@@ -348,6 +333,61 @@ std::string BridgeServer::handle_subscribe(const std::string& client_id, const n
     response["rate_limits"] = rate_limits;
   }
 
+  inject_response_fields(response, request);
+
+  return response.dump();
+}
+
+std::string BridgeServer::handle_unsubscribe(const std::string& client_id, const nlohmann::json& request) {
+  // Create session if it doesn't exist
+  if (!session_manager_->session_exists(client_id)) {
+    session_manager_->create_session(client_id);
+    RCLCPP_INFO(node_->get_logger(), "Created new session for client '%s'", client_id.c_str());
+  }
+
+  // Update heartbeat
+  session_manager_->update_heartbeat(client_id);
+
+  // Validate topics field
+  if (!request.contains("topics") || !request["topics"].is_array()) {
+    return create_error_response("INVALID_REQUEST", "Missing or invalid 'topics' array", request);
+  }
+
+  // Get current subscriptions
+  auto current_subs = session_manager_->get_subscriptions(client_id);
+
+  std::vector<std::string> removed;
+
+  for (const auto& topic_item : request["topics"]) {
+    std::string topic_name;
+    if (topic_item.is_string()) {
+      topic_name = topic_item.get<std::string>();
+    } else {
+      continue;  // Skip invalid entries
+    }
+
+    // Check if subscribed
+    if (current_subs.find(topic_name) != current_subs.end()) {
+      // Decrement subscription ref count
+      subscription_manager_->unsubscribe(topic_name);
+
+      // Remove from client subscriptions
+      current_subs.erase(topic_name);
+
+      removed.push_back(topic_name);
+
+      RCLCPP_INFO(
+          node_->get_logger(), "Client '%s' unsubscribed from topic '%s'", client_id.c_str(), topic_name.c_str());
+    }
+  }
+
+  // Update session subscriptions
+  session_manager_->update_subscriptions(client_id, current_subs);
+
+  // Build response
+  json response;
+  response["status"] = "success";
+  response["removed"] = removed;
   inject_response_fields(response, request);
 
   return response.dump();
