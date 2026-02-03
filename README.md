@@ -24,15 +24,6 @@ A high-performance ROS2 bridge server that forwards ROS2 topic content over WebS
 
 For detailed architecture documentation, see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
-## Requirements
-
-### System Requirements
-
-- **OS**: Linux (tested on Ubuntu 22.04)
-- **ROS2**: Humble or later
-- **C++ Standard**: C++17
-- **Build System**: colcon
-
 ### Dependencies
 
 #### ROS2 Packages (Runtime)
@@ -48,12 +39,6 @@ For detailed architecture documentation, see [docs/ARCHITECTURE.md](docs/ARCHITE
 #### Header-Only Libraries (Included in 3rdparty/)
 - **nlohmann/json** - JSON library
 - **tl/expected** - Type-safe error handling
-
-#### ROS2 Packages (Build/Test Only)
-- `ament_cmake` - Build system
-- `ament_cmake_gtest` - Testing framework
-- `sensor_msgs` - Standard sensor message types for unit tests
-- `geometry_msgs` - Standard geometry message types for unit tests
 
 ## Installation
 
@@ -265,16 +250,6 @@ pj_ros_bridge/
 ├── .clang-tidy
 └── .pre-commit-config.yaml
 ```
-
-## Coding Standards
-
-The project follows strict coding standards enforced by `.clang-tidy`:
-
-- Classes/Types: `CamelCase` (e.g., `BridgeServer`, `SessionManager`)
-- Functions/Methods: `lower_case` (e.g., `get_topics()`, `update_heartbeat()`)
-- Variables: `lower_case`
-- Private members: suffix with `_` (e.g., `sessions_`, `mutex_`)
-- Constants: `CamelCase` with `k` prefix (e.g., `kDefaultTimeout`)
 
 ## License
 
