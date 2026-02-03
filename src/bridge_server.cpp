@@ -284,7 +284,10 @@ std::string BridgeServer::handle_subscribe(const std::string& client_id, const n
       continue;
     }
 
-    schemas[topic_name] = schema;
+    nlohmann::json schema_obj;
+    schema_obj["encoding"] = kSchemaEncodingRos2Msg;
+    schema_obj["definition"] = schema;
+    schemas[topic_name] = schema_obj;
     successfully_subscribed.insert(topic_name);
 
     RCLCPP_INFO(
