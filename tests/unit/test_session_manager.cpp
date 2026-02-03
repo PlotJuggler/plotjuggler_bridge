@@ -286,6 +286,39 @@ TEST_F(SessionManagerTest, EmptyManager) {
   EXPECT_FALSE(manager_.update_heartbeat("any_client"));
 }
 
+TEST_F(SessionManagerTest, SessionStartsUnpaused) {
+  EXPECT_TRUE(manager_.create_session("client1"));
+
+  EXPECT_FALSE(manager_.is_paused("client1"));
+}
+
+TEST_F(SessionManagerTest, SetPausedChangesState) {
+  EXPECT_TRUE(manager_.create_session("client1"));
+
+  EXPECT_TRUE(manager_.set_paused("client1", true));
+  EXPECT_TRUE(manager_.is_paused("client1"));
+
+  EXPECT_TRUE(manager_.set_paused("client1", false));
+  EXPECT_FALSE(manager_.is_paused("client1"));
+}
+
+TEST_F(SessionManagerTest, SetPausedReturnsFalseForNonexistentSession) {
+  EXPECT_FALSE(manager_.set_paused("nonexistent", true));
+}
+
+TEST_F(SessionManagerTest, IsPausedReturnsFalseForNonexistentSession) {
+  EXPECT_FALSE(manager_.is_paused("nonexistent"));
+}
+
+TEST_F(SessionManagerTest, PausedStatePreservedAcrossHeartbeats) {
+  EXPECT_TRUE(manager_.create_session("client1"));
+
+  manager_.set_paused("client1", true);
+  manager_.update_heartbeat("client1");
+
+  EXPECT_TRUE(manager_.is_paused("client1"));
+}
+
 TEST_F(SessionManagerTest, ThreadSafety) {
   SessionManager thread_manager(10.0);
   constexpr int kNumThreads = 10;

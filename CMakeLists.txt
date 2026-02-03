@@ -130,6 +130,7 @@ if(BUILD_TESTING)
     tests/unit/test_session_manager.cpp
     tests/unit/test_message_serializer.cpp
     tests/unit/test_bridge_server.cpp
+    tests/unit/test_protocol_constants.cpp
   )
 
   target_link_libraries(${PROJECT_NAME}_tests

@@ -8,12 +8,15 @@
 #include <cstring>
 #include <stdexcept>
 
+#include "pj_ros_bridge/protocol_constants.hpp"
+
 namespace pj_ros_bridge {
 
 AggregatedMessageSerializer::AggregatedMessageSerializer() {}
 
 void AggregatedMessageSerializer::serialize_message(
     const std::string &topic_name, uint64_t timestamp_ns, const rclcpp::SerializedMessage &serialized_msg) {
+  message_count_++;
   write_str(serialized_data_, topic_name);
 
   // Timestamp (uint64_t) - receive time
@@ -32,6 +35,58 @@ void AggregatedMessageSerializer::serialize_message(
 
 void AggregatedMessageSerializer::clear() {
   serialized_data_.clear();
+  message_count_ = 0;
+}
+
+size_t AggregatedMessageSerializer::get_message_count() const {
+  return message_count_;
+}
+
+std::vector<uint8_t> AggregatedMessageSerializer::finalize() {
+  // Build 16-byte header (uncompressed)
+  std::vector<uint8_t> header(kBinaryHeaderSize);
+
+  // Magic (offset 0, 4 bytes, little-endian)
+  uint32_t magic = kBinaryFrameMagic;
+  std::memcpy(header.data(), &magic, sizeof(magic));
+
+  // Message count (offset 4, 4 bytes, little-endian)
+  uint32_t count = static_cast<uint32_t>(message_count_);
+  std::memcpy(header.data() + 4, &count, sizeof(count));
+
+  // Uncompressed size (offset 8, 4 bytes, little-endian)
+  uint32_t uncompressed = static_cast<uint32_t>(serialized_data_.size());
+  std::memcpy(header.data() + 8, &uncompressed, sizeof(uncompressed));
+
+  // Flags (offset 12, 4 bytes, reserved = 0)
+  uint32_t flags = 0;
+  std::memcpy(header.data() + 12, &flags, sizeof(flags));
+
+  // Handle empty payload case
+  if (serialized_data_.empty()) {
+    return header;
+  }
+
+  // Compress the payload
+  size_t max_compressed = ZSTD_compressBound(serialized_data_.size());
+  std::vector<uint8_t> result(kBinaryHeaderSize + max_compressed);
+
+  // Copy header to output
+  std::memcpy(result.data(), header.data(), kBinaryHeaderSize);
+
+  // Compress payload after header
+  size_t compressed_size = ZSTD_compress(
+      result.data() + kBinaryHeaderSize, max_compressed, serialized_data_.data(), serialized_data_.size(),
+      1  // compression level
+  );
+
+  if (ZSTD_isError(compressed_size)) {
+    throw std::runtime_error(std::string("ZSTD compression failed: ") + ZSTD_getErrorName(compressed_size));
+  }
+
+  // Resize to actual size: header + compressed payload
+  result.resize(kBinaryHeaderSize + compressed_size);
+  return result;
 }
 
 void AggregatedMessageSerializer::compress_zstd(

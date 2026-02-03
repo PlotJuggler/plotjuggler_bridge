@@ -126,4 +126,27 @@ bool SessionManager::session_exists(const std::string& client_id) const {
   return sessions_.find(client_id) != sessions_.end();
 }
 
+bool SessionManager::set_paused(const std::string& client_id, bool paused) {
+  std::lock_guard<std::mutex> lock(mutex_);
+
+  auto it = sessions_.find(client_id);
+  if (it == sessions_.end()) {
+    return false;
+  }
+
+  it->second.paused = paused;
+  return true;
+}
+
+bool SessionManager::is_paused(const std::string& client_id) const {
+  std::lock_guard<std::mutex> lock(mutex_);
+
+  auto it = sessions_.find(client_id);
+  if (it == sessions_.end()) {
+    return false;  // Non-existent sessions are not paused
+  }
+
+  return it->second.paused;
+}
+
 }  // namespace pj_ros_bridge

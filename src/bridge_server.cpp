@@ -8,6 +8,7 @@
 #include <unordered_set>
 
 #include "pj_ros_bridge/message_serializer.hpp"
+#include "pj_ros_bridge/protocol_constants.hpp"
 
 using json = nlohmann::json;
 
@@ -102,11 +103,12 @@ bool BridgeServer::process_requests() {
 
   // Parse request JSON
   std::string response;
+  json request_json;
   try {
-    json request_json = json::parse(request);
+    request_json = json::parse(request);
 
     if (!request_json.contains("command")) {
-      response = create_error_response("INVALID_REQUEST", "Missing 'command' field");
+      response = create_error_response("INVALID_REQUEST", "Missing 'command' field", request_json);
     } else {
       std::string command = request_json["command"];
 
@@ -114,21 +116,27 @@ bool BridgeServer::process_requests() {
 
       // Route to appropriate handler
       if (command == "get_topics") {
-        response = handle_get_topics(client_id);
+        response = handle_get_topics(client_id, request_json);
       } else if (command == "subscribe") {
         response = handle_subscribe(client_id, request_json);
+      } else if (command == "unsubscribe") {
+        response = handle_unsubscribe(client_id, request_json);
       } else if (command == "heartbeat") {
-        response = handle_heartbeat(client_id);
+        response = handle_heartbeat(client_id, request_json);
+      } else if (command == "pause") {
+        response = handle_pause(client_id, request_json);
+      } else if (command == "resume") {
+        response = handle_resume(client_id, request_json);
       } else {
-        response = create_error_response("UNKNOWN_COMMAND", "Unknown command: " + command);
+        response = create_error_response("UNKNOWN_COMMAND", "Unknown command: " + command, request_json);
       }
     }
   } catch (const json::exception& e) {
     RCLCPP_ERROR(node_->get_logger(), "JSON parse error: %s", e.what());
-    response = create_error_response("INVALID_JSON", "Failed to parse JSON request");
+    response = create_error_response("INVALID_JSON", "Failed to parse JSON request", json::object());
   } catch (const std::exception& e) {
     RCLCPP_ERROR(node_->get_logger(), "Error processing request: %s", e.what());
-    response = create_error_response("INTERNAL_ERROR", "Internal server error");
+    response = create_error_response("INTERNAL_ERROR", "Internal server error", request_json);
   }
 
   // Send response to the specific client
@@ -137,7 +145,7 @@ bool BridgeServer::process_requests() {
   return true;
 }
 
-std::string BridgeServer::handle_get_topics(const std::string& client_id) {
+std::string BridgeServer::handle_get_topics(const std::string& client_id, const nlohmann::json& request) {
   // Create session if it doesn't exist
   if (!session_manager_->session_exists(client_id)) {
     session_manager_->create_session(client_id);
@@ -162,6 +170,8 @@ std::string BridgeServer::handle_get_topics(const std::string& client_id) {
     response["topics"].push_back(topic_entry);
   }
 
+  inject_response_fields(response, request);
+
   RCLCPP_INFO(node_->get_logger(), "Returning %zu topics to client '%s'", topics.size(), client_id.c_str());
 
   return response.dump();
@@ -178,11 +188,11 @@ std::string BridgeServer::handle_subscribe(const std::string& client_id, const n
   session_manager_->update_heartbeat(client_id);
 
   if (!request.contains("topics")) {
-    return create_error_response("INVALID_REQUEST", "Missing 'topics' field");
+    return create_error_response("INVALID_REQUEST", "Missing 'topics' field", request);
   }
 
   if (!request["topics"].is_array()) {
-    return create_error_response("INVALID_REQUEST", "'topics' must be an array");
+    return create_error_response("INVALID_REQUEST", "'topics' must be an array", request);
   }
 
   // Get current subscriptions
@@ -206,21 +216,13 @@ std::string BridgeServer::handle_subscribe(const std::string& client_id, const n
     }
   }
 
-  // Determine which topics to add and remove
+  // Determine which topics to add (additive model - subscribe only adds, never removes)
   std::vector<std::string> topics_to_add;
-  std::vector<std::string> topics_to_remove;
 
   // Find topics to add (in requested but not in current)
   for (const auto& [topic, rate] : requested_topics) {
     if (current_subs.find(topic) == current_subs.end()) {
       topics_to_add.push_back(topic);
-    }
-  }
-
-  // Find topics to remove (in current but not in requested)
-  for (const auto& [topic, rate] : current_subs) {
-    if (requested_topics.find(topic) == requested_topics.end()) {
-      topics_to_remove.push_back(topic);
     }
   }
 
@@ -280,7 +282,10 @@ std::string BridgeServer::handle_subscribe(const std::string& client_id, const n
       continue;
     }
 
-    schemas[topic_name] = schema;
+    nlohmann::json schema_obj;
+    schema_obj["encoding"] = kSchemaEncodingRos2Msg;
+    schema_obj["definition"] = schema;
+    schemas[topic_name] = schema_obj;
     successfully_subscribed.insert(topic_name);
 
     RCLCPP_INFO(
@@ -288,13 +293,7 @@ std::string BridgeServer::handle_subscribe(const std::string& client_id, const n
         topic_type.c_str());
   }
 
-  // Unsubscribe from removed topics
-  for (const auto& topic_name : topics_to_remove) {
-    subscription_manager_->unsubscribe(topic_name);
-    RCLCPP_INFO(node_->get_logger(), "Client '%s' unsubscribed from topic '%s'", client_id.c_str(), topic_name.c_str());
-  }
-
-  // Update session subscriptions with only successfully subscribed topics
+  // Update session subscriptions with successfully subscribed topics (additive model)
   std::unordered_map<std::string, double> final_subscriptions = current_subs;
   for (const auto& topic : successfully_subscribed) {
     final_subscriptions[topic] = requested_topics[topic];
@@ -304,9 +303,6 @@ std::string BridgeServer::handle_subscribe(const std::string& client_id, const n
     if (final_subscriptions.find(topic) != final_subscriptions.end()) {
       final_subscriptions[topic] = rate;
     }
-  }
-  for (const auto& topic : topics_to_remove) {
-    final_subscriptions.erase(topic);
   }
   session_manager_->update_subscriptions(client_id, final_subscriptions);
 
@@ -341,10 +337,67 @@ std::string BridgeServer::handle_subscribe(const std::string& client_id, const n
     response["rate_limits"] = rate_limits;
   }
 
+  inject_response_fields(response, request);
+
   return response.dump();
 }
 
-std::string BridgeServer::handle_heartbeat(const std::string& client_id) {
+std::string BridgeServer::handle_unsubscribe(const std::string& client_id, const nlohmann::json& request) {
+  // Create session if it doesn't exist
+  if (!session_manager_->session_exists(client_id)) {
+    session_manager_->create_session(client_id);
+    RCLCPP_INFO(node_->get_logger(), "Created new session for client '%s'", client_id.c_str());
+  }
+
+  // Update heartbeat
+  session_manager_->update_heartbeat(client_id);
+
+  // Validate topics field
+  if (!request.contains("topics") || !request["topics"].is_array()) {
+    return create_error_response("INVALID_REQUEST", "Missing or invalid 'topics' array", request);
+  }
+
+  // Get current subscriptions
+  auto current_subs = session_manager_->get_subscriptions(client_id);
+
+  std::vector<std::string> removed;
+
+  for (const auto& topic_item : request["topics"]) {
+    std::string topic_name;
+    if (topic_item.is_string()) {
+      topic_name = topic_item.get<std::string>();
+    } else {
+      continue;  // Skip invalid entries
+    }
+
+    // Check if subscribed
+    if (current_subs.find(topic_name) != current_subs.end()) {
+      // Decrement subscription ref count
+      subscription_manager_->unsubscribe(topic_name);
+
+      // Remove from client subscriptions
+      current_subs.erase(topic_name);
+
+      removed.push_back(topic_name);
+
+      RCLCPP_INFO(
+          node_->get_logger(), "Client '%s' unsubscribed from topic '%s'", client_id.c_str(), topic_name.c_str());
+    }
+  }
+
+  // Update session subscriptions
+  session_manager_->update_subscriptions(client_id, current_subs);
+
+  // Build response
+  json response;
+  response["status"] = "success";
+  response["removed"] = removed;
+  inject_response_fields(response, request);
+
+  return response.dump();
+}
+
+std::string BridgeServer::handle_heartbeat(const std::string& client_id, const nlohmann::json& request) {
   // Create session if it doesn't exist
   if (!session_manager_->session_exists(client_id)) {
     session_manager_->create_session(client_id);
@@ -359,15 +412,126 @@ std::string BridgeServer::handle_heartbeat(const std::string& client_id) {
   // Build response
   json response;
   response["status"] = "ok";
+  inject_response_fields(response, request);
 
   return response.dump();
 }
 
-std::string BridgeServer::create_error_response(const std::string& error_code, const std::string& message) const {
+std::string BridgeServer::handle_pause(const std::string& client_id, const nlohmann::json& request) {
+  // Create session if it doesn't exist
+  if (!session_manager_->session_exists(client_id)) {
+    session_manager_->create_session(client_id);
+    RCLCPP_INFO(node_->get_logger(), "Created new session for client '%s'", client_id.c_str());
+  }
+
+  // Update heartbeat
+  session_manager_->update_heartbeat(client_id);
+
+  // Check if already paused (idempotent)
+  if (session_manager_->is_paused(client_id)) {
+    RCLCPP_DEBUG(node_->get_logger(), "Client '%s' already paused", client_id.c_str());
+    json response;
+    response["status"] = "ok";
+    response["paused"] = true;
+    inject_response_fields(response, request);
+    return response.dump();
+  }
+
+  // Set paused state
+  session_manager_->set_paused(client_id, true);
+
+  // Smart ROS2 management: decrement ref counts for all subscribed topics
+  auto subs = session_manager_->get_subscriptions(client_id);
+  for (const auto& [topic, rate] : subs) {
+    subscription_manager_->unsubscribe(topic);
+    RCLCPP_DEBUG(
+        node_->get_logger(), "Decremented ref count for topic '%s' (client '%s' paused)", topic.c_str(),
+        client_id.c_str());
+  }
+
+  RCLCPP_INFO(node_->get_logger(), "Client '%s' paused (%zu topics refs decremented)", client_id.c_str(), subs.size());
+
+  json response;
+  response["status"] = "ok";
+  response["paused"] = true;
+  inject_response_fields(response, request);
+  return response.dump();
+}
+
+std::string BridgeServer::handle_resume(const std::string& client_id, const nlohmann::json& request) {
+  // Create session if it doesn't exist
+  if (!session_manager_->session_exists(client_id)) {
+    session_manager_->create_session(client_id);
+    RCLCPP_INFO(node_->get_logger(), "Created new session for client '%s'", client_id.c_str());
+  }
+
+  // Update heartbeat
+  session_manager_->update_heartbeat(client_id);
+
+  // Check if not paused (idempotent)
+  if (!session_manager_->is_paused(client_id)) {
+    RCLCPP_DEBUG(node_->get_logger(), "Client '%s' not paused", client_id.c_str());
+    json response;
+    response["status"] = "ok";
+    response["paused"] = false;
+    inject_response_fields(response, request);
+    return response.dump();
+  }
+
+  // Set unpaused state
+  session_manager_->set_paused(client_id, false);
+
+  // Smart ROS2 management: increment ref counts for all subscribed topics
+  // Get all available topics for type lookup
+  auto available_topics = topic_discovery_->discover_topics();
+  std::unordered_map<std::string, std::string> topic_types;
+  for (const auto& topic : available_topics) {
+    topic_types[topic.name] = topic.type;
+  }
+
+  // Create callback for message buffer (same as in handle_subscribe)
+  auto callback = [this](
+                      const std::string& topic, const std::shared_ptr<rclcpp::SerializedMessage>& msg,
+                      uint64_t receive_time_ns) { message_buffer_->add_message(topic, receive_time_ns, msg); };
+
+  auto subs = session_manager_->get_subscriptions(client_id);
+  for (const auto& [topic, rate] : subs) {
+    auto type_it = topic_types.find(topic);
+    if (type_it != topic_types.end()) {
+      subscription_manager_->subscribe(topic, type_it->second, callback);
+      RCLCPP_DEBUG(
+          node_->get_logger(), "Incremented ref count for topic '%s' (client '%s' resumed)", topic.c_str(),
+          client_id.c_str());
+    } else {
+      RCLCPP_WARN(
+          node_->get_logger(), "Topic '%s' no longer exists, cannot re-subscribe for client '%s'", topic.c_str(),
+          client_id.c_str());
+    }
+  }
+
+  RCLCPP_INFO(node_->get_logger(), "Client '%s' resumed (%zu topics refs incremented)", client_id.c_str(), subs.size());
+
+  json response;
+  response["status"] = "ok";
+  response["paused"] = false;
+  inject_response_fields(response, request);
+  return response.dump();
+}
+
+void BridgeServer::inject_response_fields(nlohmann::json& response, const nlohmann::json& request) const {
+  response["protocol_version"] = kProtocolVersion;
+  if (request.contains("id") && request["id"].is_string()) {
+    response["id"] = request["id"];
+  }
+}
+
+std::string BridgeServer::create_error_response(
+    const std::string& error_code, const std::string& message, const nlohmann::json& request) const {
   json response;
   response["status"] = "error";
   response["error_code"] = error_code;
   response["message"] = message;
+  inject_response_fields(response, request);
 
   return response.dump();
 }
@@ -390,13 +554,16 @@ void BridgeServer::cleanup_session(const std::string& client_id) {
     return;
   }
 
-  // Get client's subscriptions
+  // Get client's subscriptions and paused state
   auto subscriptions = session_manager_->get_subscriptions(client_id);
+  bool was_paused = session_manager_->is_paused(client_id);
 
-  // Unsubscribe from all topics
-  for (const auto& [topic, rate] : subscriptions) {
-    subscription_manager_->unsubscribe(topic);
-    RCLCPP_DEBUG(node_->get_logger(), "Unsubscribed client '%s' from topic '%s'", client_id.c_str(), topic.c_str());
+  // Unsubscribe from all topics (only if not paused - paused clients already decremented ref counts)
+  if (!was_paused) {
+    for (const auto& [topic, rate] : subscriptions) {
+      subscription_manager_->unsubscribe(topic);
+      RCLCPP_DEBUG(node_->get_logger(), "Unsubscribed client '%s' from topic '%s'", client_id.c_str(), topic.c_str());
+    }
   }
 
   // Remove session
@@ -511,13 +678,16 @@ void BridgeServer::publish_aggregated_messages() {
         continue;
       }
 
-      // Compress once for the group
-      std::vector<uint8_t> compressed_data;
-      AggregatedMessageSerializer::compress_zstd(serializer.get_serialized_data(), compressed_data);
+      // Finalize with 16-byte header and compress
+      std::vector<uint8_t> compressed_data = serializer.finalize();
 
       // Send the same buffer to all clients in this group
       bool any_sent = false;
       for (const auto& client_id : client_ids) {
+        // Skip paused clients - they should not receive binary frames
+        if (session_manager_->is_paused(client_id)) {
+          continue;
+        }
         if (middleware_->send_binary(client_id, compressed_data)) {
           any_sent = true;
         }
