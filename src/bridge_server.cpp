@@ -5,7 +5,7 @@
 
 #include <map>
 #include <nlohmann/json.hpp>
-#include <set>
+#include <unordered_set>
 
 #include "pj_ros_bridge/message_serializer.hpp"
 
@@ -188,11 +188,21 @@ std::string BridgeServer::handle_subscribe(const std::string& client_id, const n
   // Get current subscriptions
   auto current_subs = session_manager_->get_subscriptions(client_id);
 
-  // Parse requested topics
-  std::unordered_set<std::string> requested_topics;
+  // Parse requested topics — supports mixed array of strings and objects:
+  //   ["topic1", {"name": "topic2", "max_rate_hz": 10.0}]
+  std::unordered_map<std::string, double> requested_topics;
   for (const auto& topic : request["topics"]) {
     if (topic.is_string()) {
-      requested_topics.insert(topic);
+      requested_topics[topic.get<std::string>()] = 0.0;
+    } else if (topic.is_object() && topic.contains("name") && topic["name"].is_string()) {
+      double rate_hz = 0.0;
+      if (topic.contains("max_rate_hz") && topic["max_rate_hz"].is_number()) {
+        rate_hz = topic["max_rate_hz"].get<double>();
+        if (rate_hz < 0.0) {
+          rate_hz = 0.0;
+        }
+      }
+      requested_topics[topic["name"].get<std::string>()] = rate_hz;
     }
   }
 
@@ -201,14 +211,14 @@ std::string BridgeServer::handle_subscribe(const std::string& client_id, const n
   std::vector<std::string> topics_to_remove;
 
   // Find topics to add (in requested but not in current)
-  for (const auto& topic : requested_topics) {
+  for (const auto& [topic, rate] : requested_topics) {
     if (current_subs.find(topic) == current_subs.end()) {
       topics_to_add.push_back(topic);
     }
   }
 
   // Find topics to remove (in current but not in requested)
-  for (const auto& topic : current_subs) {
+  for (const auto& [topic, rate] : current_subs) {
     if (requested_topics.find(topic) == requested_topics.end()) {
       topics_to_remove.push_back(topic);
     }
@@ -285,9 +295,15 @@ std::string BridgeServer::handle_subscribe(const std::string& client_id, const n
   }
 
   // Update session subscriptions with only successfully subscribed topics
-  std::unordered_set<std::string> final_subscriptions = current_subs;
+  std::unordered_map<std::string, double> final_subscriptions = current_subs;
   for (const auto& topic : successfully_subscribed) {
-    final_subscriptions.insert(topic);
+    final_subscriptions[topic] = requested_topics[topic];
+  }
+  // Update rates for topics that were already subscribed but may have a new rate
+  for (const auto& [topic, rate] : requested_topics) {
+    if (final_subscriptions.find(topic) != final_subscriptions.end()) {
+      final_subscriptions[topic] = rate;
+    }
   }
   for (const auto& topic : topics_to_remove) {
     final_subscriptions.erase(topic);
@@ -312,6 +328,17 @@ std::string BridgeServer::handle_subscribe(const std::string& client_id, const n
   response["schemas"] = schemas;
   if (!failures.empty()) {
     response["failures"] = failures;
+  }
+
+  // Include rate limits in response for topics with non-zero rates
+  json rate_limits = json::object();
+  for (const auto& [topic, rate] : final_subscriptions) {
+    if (rate > 0.0) {
+      rate_limits[topic] = rate;
+    }
+  }
+  if (!rate_limits.empty()) {
+    response["rate_limits"] = rate_limits;
   }
 
   return response.dump();
@@ -367,13 +394,19 @@ void BridgeServer::cleanup_session(const std::string& client_id) {
   auto subscriptions = session_manager_->get_subscriptions(client_id);
 
   // Unsubscribe from all topics
-  for (const auto& topic : subscriptions) {
+  for (const auto& [topic, rate] : subscriptions) {
     subscription_manager_->unsubscribe(topic);
     RCLCPP_DEBUG(node_->get_logger(), "Unsubscribed client '%s' from topic '%s'", client_id.c_str(), topic.c_str());
   }
 
   // Remove session
   session_manager_->remove_session(client_id);
+
+  // Clean up rate-limit tracking for this client
+  {
+    std::lock_guard<std::mutex> lock(last_sent_mutex_);
+    last_sent_times_.erase(client_id);
+  }
 
   RCLCPP_INFO(
       node_->get_logger(), "Cleaned up session for client '%s' (%zu topics unsubscribed)", client_id.c_str(),
@@ -406,33 +439,71 @@ void BridgeServer::publish_aggregated_messages() {
       return;
     }
 
-    // Group clients by subscription set to avoid redundant serialization.
-    // Clients with identical subscriptions share the same compressed buffer.
-    std::map<std::set<std::string>, std::vector<std::string>> subscription_groups;
+    // Group clients by subscription config (topic + rate) to avoid redundant serialization.
+    // Key: map of topic -> rate_mhz (milli-Hz as int, avoids float equality issues).
+    // Clients with identical topic+rate configs share the same compressed buffer.
+    using GroupKey = std::map<std::string, int>;
+    std::map<GroupKey, std::vector<std::string>> subscription_groups;
+    // Also store the per-client subscription map for rate filtering
+    std::unordered_map<std::string, std::unordered_map<std::string, double>> client_subs;
+
     for (const auto& client_id : active_sessions) {
       auto subs = session_manager_->get_subscriptions(client_id);
       if (subs.empty()) {
         continue;
       }
-      std::set<std::string> key(subs.begin(), subs.end());
+      GroupKey key;
+      for (const auto& [topic, rate_hz] : subs) {
+        key[topic] = static_cast<int>(rate_hz * 1000);
+      }
       subscription_groups[key].push_back(client_id);
+      client_subs[client_id] = std::move(subs);
     }
 
     size_t total_msg_count = 0;
     size_t total_bytes = 0;
 
-    for (const auto& [subscribed_set, client_ids] : subscription_groups) {
+    std::lock_guard<std::mutex> sent_lock(last_sent_mutex_);
+
+    for (const auto& [group_key, client_ids] : subscription_groups) {
       // Serialize once for this subscription group
       AggregatedMessageSerializer serializer;
       size_t group_msg_count = 0;
 
+      // Use the first client's subs to get rate info (all clients in group have same config)
+      const auto& representative_subs = client_subs[client_ids.front()];
+      // Get this representative client's last-sent times for rate filtering
+      auto& rep_last_sent = last_sent_times_[client_ids.front()];
+
       for (const auto& [topic, msgs] : messages) {
-        if (subscribed_set.count(topic) == 0) {
+        auto sub_it = representative_subs.find(topic);
+        if (sub_it == representative_subs.end()) {
           continue;
         }
-        for (const auto& msg : msgs) {
-          serializer.serialize_message(topic, msg.timestamp_ns, *(msg.msg));
-          group_msg_count++;
+
+        double rate_hz = sub_it->second;
+        int rate_mhz = static_cast<int>(rate_hz * 1000);
+
+        if (rate_mhz == 0) {
+          // Unlimited: serialize all messages
+          for (const auto& msg : msgs) {
+            serializer.serialize_message(topic, msg.timestamp_ns, *(msg.msg));
+            group_msg_count++;
+          }
+        } else {
+          // Rate limited: compute minimum interval in nanoseconds
+          // rate_mhz is in milli-Hz, so interval = 1e12 / rate_mhz nanoseconds
+          uint64_t min_interval_ns = 1'000'000'000'000ULL / static_cast<uint64_t>(rate_mhz);
+          uint64_t last_sent = rep_last_sent[topic];  // 0 if not yet sent
+
+          for (const auto& msg : msgs) {
+            if (msg.timestamp_ns >= last_sent + min_interval_ns) {
+              serializer.serialize_message(topic, msg.timestamp_ns, *(msg.msg));
+              last_sent = msg.timestamp_ns;
+              group_msg_count++;
+            }
+          }
+          rep_last_sent[topic] = last_sent;
         }
       }
 
@@ -449,6 +520,10 @@ void BridgeServer::publish_aggregated_messages() {
       for (const auto& client_id : client_ids) {
         if (middleware_->send_binary(client_id, compressed_data)) {
           any_sent = true;
+        }
+        // Sync last-sent times from representative to all clients in group
+        if (client_id != client_ids.front()) {
+          last_sent_times_[client_id] = rep_last_sent;
         }
       }
 

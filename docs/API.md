@@ -25,11 +25,26 @@ Discover available ROS2 topics.
 
 Subscribe to one or more topics. The server performs a diff against the client's current subscriptions: new topics are added, omitted topics are removed.
 
-**Request:**
+Each topic in the array can be either a plain string (unlimited rate) or an object with a `max_rate_hz` field for per-topic rate limiting. Both formats can be mixed in the same request.
+
+When `max_rate_hz` is set, the server decimates messages for that topic, sending at most one message per rate interval (the latest available). A value of `0` or omitting the field means unlimited (all messages forwarded).
+
+**Request (string-only, backward compatible):**
 ```json
 {
   "command": "subscribe",
   "topics": ["/topic1", "/topic2"]
+}
+```
+
+**Request (mixed format with rate limiting):**
+```json
+{
+  "command": "subscribe",
+  "topics": [
+    "/topic_unlimited",
+    {"name": "/topic_limited", "max_rate_hz": 10.0}
+  ]
 }
 ```
 
@@ -38,11 +53,16 @@ Subscribe to one or more topics. The server performs a diff against the client's
 {
   "status": "success",
   "schemas": {
-    "/topic1": "message definition text",
-    "/topic2": "message definition text"
+    "/topic_unlimited": "message definition text",
+    "/topic_limited": "message definition text"
+  },
+  "rate_limits": {
+    "/topic_limited": 10.0
   }
 }
 ```
+
+The `rate_limits` field is only present when at least one topic has a non-zero rate limit. It maps topic names to their configured `max_rate_hz`.
 
 **Response (partial success):**
 ```json

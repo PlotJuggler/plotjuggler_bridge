@@ -111,6 +111,10 @@ class BridgeServer {
 
   // Protects cleanup_session from concurrent calls (disconnect + timeout)
   std::mutex cleanup_mutex_;
+
+  // Per-client per-topic last-sent timestamp (nanoseconds) for rate limiting
+  std::unordered_map<std::string, std::unordered_map<std::string, uint64_t>> last_sent_times_;
+  std::mutex last_sent_mutex_;
 };
 
 }  // namespace pj_ros_bridge

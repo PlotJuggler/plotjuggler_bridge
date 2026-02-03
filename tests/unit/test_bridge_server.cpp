@@ -521,3 +521,49 @@ TEST_F(BridgeServerTest, SubscribeTopicsNotArray) {
   EXPECT_EQ(reply["status"], "error");
   EXPECT_EQ(reply["error_code"], "INVALID_REQUEST");
 }
+
+// ---------------------------------------------------------------------------
+// SubscribeWithRateLimit — mixed string/object topics format
+// ---------------------------------------------------------------------------
+TEST_F(BridgeServerTest, SubscribeWithRateLimit) {
+  ASSERT_TRUE(server_->initialize());
+
+  // Subscribe with mixed format: one string (unlimited) and one object (rate-limited)
+  // Both topics don't exist in the ROS2 graph, so they'll fail — but
+  // we're testing that the parsing accepts the mixed format and responds
+  // with rate_limits when appropriate.
+  json req;
+  req["command"] = "subscribe";
+  req["topics"] = json::array({
+      "/nonexistent_unlimited",
+      json::object({{"name", "/nonexistent_limited"}, {"max_rate_hz", 10.0}}),
+  });
+  mock_->push_request("client_rate_1", req.dump());
+  server_->process_requests();
+
+  json reply = mock_->pop_reply("client_rate_1");
+  ASSERT_FALSE(reply.is_discarded());
+  // Both topics don't exist, so all subscriptions fail
+  EXPECT_TRUE(reply.contains("failures"));
+  EXPECT_EQ(reply["failures"].size(), 2u);
+}
+
+// ---------------------------------------------------------------------------
+// SubscribeBackwardCompatible — old string-only format still works
+// ---------------------------------------------------------------------------
+TEST_F(BridgeServerTest, SubscribeBackwardCompatible) {
+  ASSERT_TRUE(server_->initialize());
+
+  json req;
+  req["command"] = "subscribe";
+  req["topics"] = json::array({"/topic_a", "/topic_b"});
+  mock_->push_request("client_compat_1", req.dump());
+  server_->process_requests();
+
+  json reply = mock_->pop_reply("client_compat_1");
+  ASSERT_FALSE(reply.is_discarded());
+  // Topics don't exist so we get failures, but no crash from the old format
+  EXPECT_TRUE(reply.contains("failures"));
+  // No rate_limits in response since all rates are 0.0 (unlimited)
+  EXPECT_FALSE(reply.contains("rate_limits"));
+}

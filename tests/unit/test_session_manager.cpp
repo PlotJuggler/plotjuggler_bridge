@@ -76,10 +76,32 @@ TEST_F(SessionManagerTest, GetSession) {
   EXPECT_FALSE(manager_.get_session("client_nonexistent", session2));
 }
 
+TEST_F(SessionManagerTest, SubscriptionsWithRateLimit) {
+  EXPECT_TRUE(manager_.create_session("client1"));
+
+  std::unordered_map<std::string, double> topics = {
+      {"/fast_topic", 0.0}, {"/slow_topic", 10.0}, {"/medium_topic", 25.5}};
+  EXPECT_TRUE(manager_.update_subscriptions("client1", topics));
+
+  auto subs = manager_.get_subscriptions("client1");
+  EXPECT_EQ(subs.size(), 3);
+  EXPECT_DOUBLE_EQ(subs.at("/fast_topic"), 0.0);
+  EXPECT_DOUBLE_EQ(subs.at("/slow_topic"), 10.0);
+  EXPECT_DOUBLE_EQ(subs.at("/medium_topic"), 25.5);
+
+  // Update with different rates
+  std::unordered_map<std::string, double> new_topics = {{"/fast_topic", 5.0}};
+  EXPECT_TRUE(manager_.update_subscriptions("client1", new_topics));
+
+  subs = manager_.get_subscriptions("client1");
+  EXPECT_EQ(subs.size(), 1);
+  EXPECT_DOUBLE_EQ(subs.at("/fast_topic"), 5.0);
+}
+
 TEST_F(SessionManagerTest, UpdateSubscriptions) {
   EXPECT_TRUE(manager_.create_session("client1"));
 
-  std::unordered_set<std::string> topics = {"/topic1", "/topic2", "/topic3"};
+  std::unordered_map<std::string, double> topics = {{"/topic1", 0.0}, {"/topic2", 0.0}, {"/topic3", 0.0}};
   EXPECT_TRUE(manager_.update_subscriptions("client1", topics));
 
   Session session;
@@ -90,7 +112,7 @@ TEST_F(SessionManagerTest, UpdateSubscriptions) {
   EXPECT_TRUE(session.subscribed_topics.count("/topic3") > 0);
 
   // Update with different topics
-  std::unordered_set<std::string> new_topics = {"/topic4"};
+  std::unordered_map<std::string, double> new_topics = {{"/topic4", 0.0}};
   EXPECT_TRUE(manager_.update_subscriptions("client1", new_topics));
 
   EXPECT_TRUE(manager_.get_session("client1", session));
@@ -109,7 +131,7 @@ TEST_F(SessionManagerTest, GetSubscriptions) {
   EXPECT_TRUE(subs.empty());
 
   // Add subscriptions
-  std::unordered_set<std::string> topics = {"/topic1", "/topic2"};
+  std::unordered_map<std::string, double> topics = {{"/topic1", 0.0}, {"/topic2", 0.0}};
   EXPECT_TRUE(manager_.update_subscriptions("client1", topics));
 
   subs = manager_.get_subscriptions("client1");
@@ -117,7 +139,7 @@ TEST_F(SessionManagerTest, GetSubscriptions) {
   EXPECT_TRUE(subs.count("/topic1") > 0);
   EXPECT_TRUE(subs.count("/topic2") > 0);
 
-  // Getting subscriptions for non-existent session should return empty set
+  // Getting subscriptions for non-existent session should return empty map
   auto empty_subs = manager_.get_subscriptions("client_nonexistent");
   EXPECT_TRUE(empty_subs.empty());
 }
@@ -282,7 +304,7 @@ TEST_F(SessionManagerTest, ThreadSafety) {
           thread_manager.update_heartbeat(client_id);
         }
 
-        std::unordered_set<std::string> topics = {"/topic_" + std::to_string(i)};
+        std::unordered_map<std::string, double> topics = {{"/topic_" + std::to_string(i), 0.0}};
         thread_manager.update_subscriptions(client_id, topics);
       });
     }

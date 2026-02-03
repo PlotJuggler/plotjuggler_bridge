@@ -51,7 +51,8 @@ bool SessionManager::get_session(const std::string& client_id, Session& session)
   return true;
 }
 
-bool SessionManager::update_subscriptions(const std::string& client_id, const std::unordered_set<std::string>& topics) {
+bool SessionManager::update_subscriptions(
+    const std::string& client_id, const std::unordered_map<std::string, double>& topics) {
   std::lock_guard<std::mutex> lock(mutex_);
 
   auto it = sessions_.find(client_id);
@@ -63,7 +64,7 @@ bool SessionManager::update_subscriptions(const std::string& client_id, const st
   return true;
 }
 
-std::unordered_set<std::string> SessionManager::get_subscriptions(const std::string& client_id) const {
+std::unordered_map<std::string, double> SessionManager::get_subscriptions(const std::string& client_id) const {
   std::lock_guard<std::mutex> lock(mutex_);
 
   auto it = sessions_.find(client_id);

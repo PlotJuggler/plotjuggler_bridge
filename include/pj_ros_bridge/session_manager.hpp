@@ -8,7 +8,6 @@
 #include <mutex>
 #include <string>
 #include <unordered_map>
-#include <unordered_set>
 #include <vector>
 
 namespace pj_ros_bridge {
@@ -20,8 +19,8 @@ struct Session {
   /// Unique client identifier (from WebSocket connection)
   std::string client_id;
 
-  /// Set of topic names the client is subscribed to
-  std::unordered_set<std::string> subscribed_topics;
+  /// Map of topic names to max rate in Hz (0.0 = unlimited)
+  std::unordered_map<std::string, double> subscribed_topics;
 
   /// Timestamp of last heartbeat received
   std::chrono::steady_clock::time_point last_heartbeat;
@@ -73,14 +72,14 @@ class SessionManager {
    * @param topics Set of topic names
    * @return true if session exists and was updated, false otherwise
    */
-  bool update_subscriptions(const std::string& client_id, const std::unordered_set<std::string>& topics);
+  bool update_subscriptions(const std::string& client_id, const std::unordered_map<std::string, double>& topics);
 
   /**
    * @brief Get the subscribed topics for a client
    * @param client_id Client identifier
    * @return Set of subscribed topic names (empty if session doesn't exist)
    */
-  std::unordered_set<std::string> get_subscriptions(const std::string& client_id) const;
+  std::unordered_map<std::string, double> get_subscriptions(const std::string& client_id) const;
 
   /**
    * @brief Remove a session
