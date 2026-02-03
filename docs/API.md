@@ -2,6 +2,56 @@
 
 `pj_ros_bridge` uses a single WebSocket port (default 8080). Text frames carry JSON API requests/responses; binary frames carry ZSTD-compressed aggregated message data.
 
+## Communication Overview
+
+The diagram below shows the typical client-server interaction:
+
+1. **Connection**: Client connects via WebSocket
+2. **Discovery**: Client queries available topics
+3. **Subscription**: Client subscribes to topics of interest, receives schemas
+4. **Data streaming**: Server pushes aggregated binary data at 50 Hz
+5. **Heartbeat**: Client sends periodic heartbeats to maintain the session
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant S as Server
+    participant R as ROS2
+
+    C->>S: WebSocket Connect
+    activate S
+    S-->>C: Connection Established
+
+    Note over C,S: Discovery Phase (Text Frames)
+    C->>S: {"command": "get_topics"}
+    S->>R: Query topic graph
+    R-->>S: Topic list
+    S-->>C: {"status": "success", "topics": [...]}
+
+    Note over C,S: Subscription Phase (Text Frames)
+    C->>S: {"command": "subscribe", "topics": [...]}
+    S->>R: Create GenericSubscription
+    S-->>C: {"status": "success", "schemas": {...}}
+
+    Note over C,S: Data Streaming (Binary Frames)
+    loop Every 20ms (50 Hz)
+        R-->>S: New messages arrive
+        S->>S: Buffer & aggregate
+        S-->>C: ZSTD-compressed binary frame
+    end
+
+    Note over C,S: Session Maintenance
+    loop Every ~1 second
+        C->>S: {"command": "heartbeat"}
+        S-->>C: {"status": "ok"}
+    end
+
+    Note over C,S: Timeout after 10s without heartbeat
+    C--xS: Disconnect / Timeout
+    S->>R: Cleanup subscriptions
+    deactivate S
+```
+
 ## Get Topics
 
 Discover available ROS2 topics.
