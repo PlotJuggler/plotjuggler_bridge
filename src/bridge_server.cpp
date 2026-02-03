@@ -682,6 +682,10 @@ void BridgeServer::publish_aggregated_messages() {
       // Send the same buffer to all clients in this group
       bool any_sent = false;
       for (const auto& client_id : client_ids) {
+        // Skip paused clients - they should not receive binary frames
+        if (session_manager_->is_paused(client_id)) {
+          continue;
+        }
         if (middleware_->send_binary(client_id, compressed_data)) {
           any_sent = true;
         }

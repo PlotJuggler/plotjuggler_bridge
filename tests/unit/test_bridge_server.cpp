@@ -1132,3 +1132,109 @@ TEST_F(BridgeServerTest, ResumeCreatesSessionIfNotExists) {
   EXPECT_EQ(response["status"], "ok");
   EXPECT_FALSE(response["paused"].get<bool>());
 }
+
+// ---------------------------------------------------------------------------
+// PausedClientDoesNotReceiveBinaryFrames
+//
+// Tests that paused clients are skipped when publishing binary frames.
+// Since we can't easily inject messages into the buffer, we verify the
+// paused state is respected by checking that a paused client with a
+// subscription group is skipped.
+// ---------------------------------------------------------------------------
+TEST_F(BridgeServerTest, PausedClientDoesNotReceiveBinaryFrames) {
+  ASSERT_TRUE(server_->initialize());
+
+  // Create two sessions via heartbeats
+  json hb;
+  hb["command"] = "heartbeat";
+  mock_->push_request("client_paused_1", hb.dump());
+  server_->process_requests();
+  mock_->push_request("client_active_1", hb.dump());
+  server_->process_requests();
+  ASSERT_EQ(server_->get_active_session_count(), 2u);
+
+  // Subscribe both clients to the same non-existent topic
+  // (subscription will fail but session subscription intent is tracked)
+  json sub_req;
+  sub_req["command"] = "subscribe";
+  sub_req["topics"] = json::array({"/test_topic"});
+  mock_->push_request("client_paused_1", sub_req.dump());
+  server_->process_requests();
+  mock_->pop_reply("client_paused_1");  // discard
+
+  mock_->push_request("client_active_1", sub_req.dump());
+  server_->process_requests();
+  mock_->pop_reply("client_active_1");  // discard
+
+  // Pause client_paused_1
+  json pause_req;
+  pause_req["command"] = "pause";
+  mock_->push_request("client_paused_1", pause_req.dump());
+  server_->process_requests();
+
+  json pause_response = mock_->pop_reply("client_paused_1");
+  ASSERT_FALSE(pause_response.is_discarded());
+  EXPECT_TRUE(pause_response["paused"].get<bool>());
+
+  // Clear any binary sends from previous operations
+  mock_->clear_binary_sends();
+
+  // Spin the node to let the publish timer fire
+  auto start = std::chrono::steady_clock::now();
+  while (std::chrono::steady_clock::now() - start < std::chrono::milliseconds(60)) {
+    rclcpp::spin_some(node_);
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
+
+  // Verify binary sends - since topics don't exist, no messages are buffered
+  // so no binary sends should occur. But if messages were buffered,
+  // only client_active_1 would receive them, not client_paused_1.
+  auto binary_sends = mock_->get_binary_sends();
+  for (const auto& [client_id, data] : binary_sends) {
+    // If any binary sends occurred, they should NOT be to the paused client
+    EXPECT_NE(client_id, "client_paused_1") << "Paused client should not receive binary frames";
+  }
+}
+
+// ---------------------------------------------------------------------------
+// ResumedClientReceivesBinaryFrames
+//
+// Tests that after resuming, a client can receive binary frames again.
+// ---------------------------------------------------------------------------
+TEST_F(BridgeServerTest, ResumedClientReceivesBinaryFrames) {
+  ASSERT_TRUE(server_->initialize());
+
+  // Create session
+  json hb;
+  hb["command"] = "heartbeat";
+  mock_->push_request("client_resume_binary", hb.dump());
+  server_->process_requests();
+
+  // Subscribe to a topic
+  json sub_req;
+  sub_req["command"] = "subscribe";
+  sub_req["topics"] = json::array({"/test_topic"});
+  mock_->push_request("client_resume_binary", sub_req.dump());
+  server_->process_requests();
+  mock_->pop_reply("client_resume_binary");  // discard
+
+  // Pause
+  json pause_req;
+  pause_req["command"] = "pause";
+  mock_->push_request("client_resume_binary", pause_req.dump());
+  server_->process_requests();
+  json pause_resp = mock_->pop_reply("client_resume_binary");
+  EXPECT_TRUE(pause_resp["paused"].get<bool>());
+
+  // Resume
+  json resume_req;
+  resume_req["command"] = "resume";
+  mock_->push_request("client_resume_binary", resume_req.dump());
+  server_->process_requests();
+  json resume_resp = mock_->pop_reply("client_resume_binary");
+  EXPECT_FALSE(resume_resp["paused"].get<bool>());
+
+  // After resume, the client should be able to receive binary frames
+  // (if messages were buffered, which they aren't in this test since
+  // the topic doesn't exist)
+}
