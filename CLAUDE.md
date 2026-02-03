@@ -10,10 +10,9 @@
 
 ## Key Documentation Files
 
-- `PROJECT.md` - Original project specification and requirements
-- `IMPLEMENTATION_PLAN.md` - Detailed 10-milestone implementation roadmap
+- `README.md` - User-facing documentation
+- `docs/API.md` - API protocol documentation
 - `.clang-tidy` - Coding standards and style guide
-- `README.md` - User-facing documentation (to be updated)
 
 ## Build Instructions
 
@@ -304,8 +303,6 @@ pj_ros_bridge/
 ├── package.xml
 ├── .clang-tidy
 ├── .pre-commit-config.yaml
-├── PROJECT.md
-├── IMPLEMENTATION_PLAN.md
 ├── CLAUDE.md (this file)
 └── README.md
 ```
@@ -354,7 +351,7 @@ pj_ros_bridge/
 
 ### Completed Components
 
-See IMPLEMENTATION_PLAN.md for detailed milestone history. Key milestones 1-9 are complete.
+All core implementation milestones are complete.
 
 **Recent changes** (WebSocket migration + bug fixes):
 - Replaced ZeroMQ with IXWebSocket (single port, text + binary frames)
@@ -490,11 +487,10 @@ Project complete when:
 ## Notes for Future Sessions
 
 ### When resuming work:
-1. Check current milestone progress in IMPLEMENTATION_PLAN.md
-2. Review any recent code changes
-3. Ensure build environment is properly sourced
-4. Run existing tests to verify baseline
-5. Follow coding standards in .clang-tidy
+1. Review any recent code changes (git log)
+2. Ensure build environment is properly sourced
+3. Run existing tests to verify baseline
+4. Follow coding standards in .clang-tidy
 
 ### Before committing code:
 1. Run `pre-commit run -a` to format all code

@@ -1,5 +1,9 @@
 # pj_ros_bridge
 
+[![ROS2 Humble](https://github.com/PlotJuggler/plotjuggler_ros_bridge/actions/workflows/ros-humble.yaml/badge.svg?branch=main)](https://github.com/PlotJuggler/plotjuggler_ros_bridge/actions/workflows/ros-humble.yaml)
+[![ROS2 Jazzy](https://github.com/PlotJuggler/plotjuggler_ros_bridge/actions/workflows/ros-jazzy.yaml/badge.svg?branch=main)](https://github.com/PlotJuggler/plotjuggler_ros_bridge/actions/workflows/ros-jazzy.yaml)
+[![ROS2 Rolling](https://github.com/PlotJuggler/plotjuggler_ros_bridge/actions/workflows/ros-rolling.yaml/badge.svg?branch=main)](https://github.com/PlotJuggler/plotjuggler_ros_bridge/actions/workflows/ros-rolling.yaml)
+
 A high-performance ROS2 bridge server that forwards ROS2 topic content over WebSocket, without requiring DDS on the client side.
 
 ## Overview
