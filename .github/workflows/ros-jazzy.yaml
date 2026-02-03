@@ -18,6 +18,9 @@ jobs:
 
       # Step 2: Run ROS CI
       - uses: ros-tooling/action-ros-ci@v0.4
+        env:
+          HOME: /home/runner
+          ROS_HOME: /home/runner/.ros
         with:
           package-name: pj_ros_bridge
           target-ros2-distro: jazzy
