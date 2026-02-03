@@ -59,6 +59,25 @@ class AggregatedMessageSerializer {
   void clear();
 
   /**
+   * @brief Get number of messages added so far
+   */
+  size_t get_message_count() const;
+
+  /**
+   * @brief Finalize the aggregated messages with header and compression
+   *
+   * Produces output with 16-byte header (uncompressed) followed by ZSTD-compressed payload:
+   *   - Offset 0: magic (uint32_t "PJRB" = 0x42524A50, little-endian)
+   *   - Offset 4: message_count (uint32_t, little-endian)
+   *   - Offset 8: uncompressed_size (uint32_t, little-endian)
+   *   - Offset 12: flags (uint32_t, reserved = 0)
+   *   - Offset 16+: ZSTD-compressed payload
+   *
+   * @return Vector containing header + compressed payload
+   */
+  std::vector<uint8_t> finalize();
+
+  /**
    * @brief Compress data using ZSTD (compression level 1)
    *
    * @param data Data to compress
@@ -79,6 +98,9 @@ class AggregatedMessageSerializer {
  private:
   // Buffer for serialized data
   std::vector<uint8_t> serialized_data_;
+
+  // Count of messages added since last clear
+  size_t message_count_{0};
 
   /**
    * @brief Write a value to buffer in little-endian format

@@ -361,3 +361,134 @@ TEST_F(MessageSerializerTest, ZeroCopySerializedMessage) {
   EXPECT_EQ(serialized[offset + 2], 0xBE);
   EXPECT_EQ(serialized[offset + 3], 0xEF);
 }
+
+// ============================================================================
+// Binary Frame Header Tests (16-byte header prepended to compressed payload)
+// ============================================================================
+
+TEST_F(MessageSerializerTest, FinalizeIncludesBinaryHeader) {
+  auto msg = create_test_message({1, 2, 3, 4});
+  serializer_.serialize_message("/topic", 1000, msg);
+
+  auto result = serializer_.finalize();
+
+  // Must have at least 16-byte header
+  ASSERT_GE(result.size(), 16u);
+
+  // Check magic (little-endian "PJRB" = 0x42524A50)
+  uint32_t magic;
+  std::memcpy(&magic, result.data(), sizeof(magic));
+  EXPECT_EQ(magic, 0x42524A50u);
+
+  // Check message count
+  uint32_t count;
+  std::memcpy(&count, result.data() + 4, sizeof(count));
+  EXPECT_EQ(count, 1u);
+
+  // Check uncompressed size is non-zero
+  uint32_t uncompressed;
+  std::memcpy(&uncompressed, result.data() + 8, sizeof(uncompressed));
+  EXPECT_GT(uncompressed, 0u);
+
+  // Check flags are 0
+  uint32_t flags;
+  std::memcpy(&flags, result.data() + 12, sizeof(flags));
+  EXPECT_EQ(flags, 0u);
+}
+
+TEST_F(MessageSerializerTest, HeaderMagicIsPJRB) {
+  auto msg = create_test_message({0});
+  serializer_.serialize_message("/t", 0, msg);
+  auto result = serializer_.finalize();
+
+  // Verify magic bytes spell "PJRB"
+  EXPECT_EQ(result[0], 'P');
+  EXPECT_EQ(result[1], 'J');
+  EXPECT_EQ(result[2], 'R');
+  EXPECT_EQ(result[3], 'B');
+}
+
+TEST_F(MessageSerializerTest, MessageCountMatchesAddedMessages) {
+  auto msg1 = create_test_message({1});
+  auto msg2 = create_test_message({2});
+  auto msg3 = create_test_message({3});
+
+  serializer_.serialize_message("/a", 100, msg1);
+  serializer_.serialize_message("/b", 200, msg2);
+  serializer_.serialize_message("/c", 300, msg3);
+
+  EXPECT_EQ(serializer_.get_message_count(), 3u);
+
+  auto result = serializer_.finalize();
+  uint32_t count;
+  std::memcpy(&count, result.data() + 4, sizeof(count));
+  EXPECT_EQ(count, 3u);
+}
+
+TEST_F(MessageSerializerTest, ClearResetsMessageCount) {
+  auto msg = create_test_message({0});
+  serializer_.serialize_message("/t", 0, msg);
+  EXPECT_EQ(serializer_.get_message_count(), 1u);
+
+  serializer_.clear();
+  EXPECT_EQ(serializer_.get_message_count(), 0u);
+}
+
+TEST_F(MessageSerializerTest, DecompressedPayloadMatchesOriginal) {
+  std::vector<uint8_t> data = {10, 20, 30, 40, 50};
+  auto msg = create_test_message(data);
+  serializer_.serialize_message("/test", 12345, msg);
+
+  auto result = serializer_.finalize();
+
+  // Extract header info
+  uint32_t uncompressed_size;
+  std::memcpy(&uncompressed_size, result.data() + 8, sizeof(uncompressed_size));
+
+  // Decompress payload (skip 16-byte header)
+  std::vector<uint8_t> compressed(result.begin() + 16, result.end());
+  std::vector<uint8_t> decompressed;
+  AggregatedMessageSerializer::decompress_zstd(compressed, decompressed);
+
+  EXPECT_EQ(decompressed.size(), uncompressed_size);
+
+  // Payload should match the original serialized data
+  EXPECT_EQ(decompressed, serializer_.get_serialized_data());
+}
+
+TEST_F(MessageSerializerTest, FinalizeEmptyBuffer) {
+  // Finalize with no messages should still produce valid header
+  auto result = serializer_.finalize();
+
+  ASSERT_GE(result.size(), 16u);
+
+  uint32_t magic;
+  std::memcpy(&magic, result.data(), sizeof(magic));
+  EXPECT_EQ(magic, 0x42524A50u);
+
+  uint32_t count;
+  std::memcpy(&count, result.data() + 4, sizeof(count));
+  EXPECT_EQ(count, 0u);
+
+  uint32_t uncompressed;
+  std::memcpy(&uncompressed, result.data() + 8, sizeof(uncompressed));
+  EXPECT_EQ(uncompressed, 0u);
+}
+
+TEST_F(MessageSerializerTest, UncompressedSizeMatchesPayload) {
+  // Create a message with known serialized size
+  std::string topic = "/t";
+  std::vector<uint8_t> data = {0xAA, 0xBB};
+  auto msg = create_test_message(data);
+
+  serializer_.serialize_message(topic, 42, msg);
+
+  // Expected size: 2(topic_len) + 2(topic) + 8(timestamp) + 4(data_len) + 2(data) = 18
+  EXPECT_EQ(serializer_.get_serialized_data().size(), 18u);
+
+  auto result = serializer_.finalize();
+
+  uint32_t uncompressed_size;
+  std::memcpy(&uncompressed_size, result.data() + 8, sizeof(uncompressed_size));
+  EXPECT_EQ(uncompressed_size, 18u);
+}
