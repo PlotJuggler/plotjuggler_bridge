@@ -12,6 +12,9 @@ jobs:
     runs-on: ubuntu-24.04
     container:
       image: rostooling/setup-ros-docker:ubuntu-noble-ros-rolling-ros-base-latest
+    env:
+      HOME: /root
+      ROS_HOME: /root/.ros
     steps:
       # Checkout repository
       - uses: actions/checkout@v4
@@ -25,21 +28,20 @@ jobs:
 
       # Configure ccache for colcon
       - name: Configure ccache
-        run: |
-          echo "/usr/lib/ccache" >> $GITHUB_PATH
+        run: echo "/usr/lib/ccache" >> $GITHUB_PATH
 
       # Install dependencies via rosdep
       - name: Install dependencies
+        shell: bash
         run: |
+          source /opt/ros/rolling/setup.bash
           apt-get update
-          rosdep update
-          rosdep install --from-paths . --ignore-src -y
+          rosdep update --rosdistro rolling
+          rosdep install --from-paths . --ignore-src -y --rosdistro rolling
 
       # Build
       - name: Build
-        env:
-          HOME: /root
-          ROS_HOME: /root/.ros
+        shell: bash
         run: |
           source /opt/ros/rolling/setup.bash
           colcon build --packages-select pj_ros_bridge \
@@ -49,9 +51,7 @@ jobs:
 
       # Test
       - name: Test
-        env:
-          HOME: /root
-          ROS_HOME: /root/.ros
+        shell: bash
         run: |
           source /opt/ros/rolling/setup.bash
           source install/setup.bash
