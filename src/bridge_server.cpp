@@ -8,6 +8,7 @@
 #include <unordered_set>
 
 #include "pj_ros_bridge/message_serializer.hpp"
+#include "pj_ros_bridge/protocol_constants.hpp"
 
 using json = nlohmann::json;
 
@@ -102,11 +103,12 @@ bool BridgeServer::process_requests() {
 
   // Parse request JSON
   std::string response;
+  json request_json;
   try {
-    json request_json = json::parse(request);
+    request_json = json::parse(request);
 
     if (!request_json.contains("command")) {
-      response = create_error_response("INVALID_REQUEST", "Missing 'command' field");
+      response = create_error_response("INVALID_REQUEST", "Missing 'command' field", request_json);
     } else {
       std::string command = request_json["command"];
 
@@ -114,21 +116,21 @@ bool BridgeServer::process_requests() {
 
       // Route to appropriate handler
       if (command == "get_topics") {
-        response = handle_get_topics(client_id);
+        response = handle_get_topics(client_id, request_json);
       } else if (command == "subscribe") {
         response = handle_subscribe(client_id, request_json);
       } else if (command == "heartbeat") {
-        response = handle_heartbeat(client_id);
+        response = handle_heartbeat(client_id, request_json);
       } else {
-        response = create_error_response("UNKNOWN_COMMAND", "Unknown command: " + command);
+        response = create_error_response("UNKNOWN_COMMAND", "Unknown command: " + command, request_json);
       }
     }
   } catch (const json::exception& e) {
     RCLCPP_ERROR(node_->get_logger(), "JSON parse error: %s", e.what());
-    response = create_error_response("INVALID_JSON", "Failed to parse JSON request");
+    response = create_error_response("INVALID_JSON", "Failed to parse JSON request", json::object());
   } catch (const std::exception& e) {
     RCLCPP_ERROR(node_->get_logger(), "Error processing request: %s", e.what());
-    response = create_error_response("INTERNAL_ERROR", "Internal server error");
+    response = create_error_response("INTERNAL_ERROR", "Internal server error", request_json);
   }
 
   // Send response to the specific client
@@ -137,7 +139,7 @@ bool BridgeServer::process_requests() {
   return true;
 }
 
-std::string BridgeServer::handle_get_topics(const std::string& client_id) {
+std::string BridgeServer::handle_get_topics(const std::string& client_id, const nlohmann::json& request) {
   // Create session if it doesn't exist
   if (!session_manager_->session_exists(client_id)) {
     session_manager_->create_session(client_id);
@@ -162,6 +164,8 @@ std::string BridgeServer::handle_get_topics(const std::string& client_id) {
     response["topics"].push_back(topic_entry);
   }
 
+  inject_response_fields(response, request);
+
   RCLCPP_INFO(node_->get_logger(), "Returning %zu topics to client '%s'", topics.size(), client_id.c_str());
 
   return response.dump();
@@ -178,11 +182,11 @@ std::string BridgeServer::handle_subscribe(const std::string& client_id, const n
   session_manager_->update_heartbeat(client_id);
 
   if (!request.contains("topics")) {
-    return create_error_response("INVALID_REQUEST", "Missing 'topics' field");
+    return create_error_response("INVALID_REQUEST", "Missing 'topics' field", request);
   }
 
   if (!request["topics"].is_array()) {
-    return create_error_response("INVALID_REQUEST", "'topics' must be an array");
+    return create_error_response("INVALID_REQUEST", "'topics' must be an array", request);
   }
 
   // Get current subscriptions
@@ -341,10 +345,12 @@ std::string BridgeServer::handle_subscribe(const std::string& client_id, const n
     response["rate_limits"] = rate_limits;
   }
 
+  inject_response_fields(response, request);
+
   return response.dump();
 }
 
-std::string BridgeServer::handle_heartbeat(const std::string& client_id) {
+std::string BridgeServer::handle_heartbeat(const std::string& client_id, const nlohmann::json& request) {
   // Create session if it doesn't exist
   if (!session_manager_->session_exists(client_id)) {
     session_manager_->create_session(client_id);
@@ -359,15 +365,25 @@ std::string BridgeServer::handle_heartbeat(const std::string& client_id) {
   // Build response
   json response;
   response["status"] = "ok";
+  inject_response_fields(response, request);
 
   return response.dump();
 }
 
-std::string BridgeServer::create_error_response(const std::string& error_code, const std::string& message) const {
+void BridgeServer::inject_response_fields(nlohmann::json& response, const nlohmann::json& request) const {
+  response["protocol_version"] = kProtocolVersion;
+  if (request.contains("id") && request["id"].is_string()) {
+    response["id"] = request["id"];
+  }
+}
+
+std::string BridgeServer::create_error_response(
+    const std::string& error_code, const std::string& message, const nlohmann::json& request) const {
   json response;
   response["status"] = "error";
   response["error_code"] = error_code;
   response["message"] = message;
+  inject_response_fields(response, request);
 
   return response.dump();
 }

@@ -73,11 +73,15 @@ class BridgeServer {
   std::pair<uint64_t, uint64_t> get_publish_stats() const;
 
  private:
-  std::string handle_get_topics(const std::string& client_id);
-  std::string handle_subscribe(const std::string& client_id, const nlohmann::json& request_json);
-  std::string handle_heartbeat(const std::string& client_id);
-  std::string create_error_response(const std::string& error_code, const std::string& message) const;
+  std::string handle_get_topics(const std::string& client_id, const nlohmann::json& request);
+  std::string handle_subscribe(const std::string& client_id, const nlohmann::json& request);
+  std::string handle_heartbeat(const std::string& client_id, const nlohmann::json& request);
+  std::string create_error_response(
+      const std::string& error_code, const std::string& message, const nlohmann::json& request) const;
   void check_session_timeouts();
+
+  /// Inject standard response fields (protocol_version, optional id)
+  void inject_response_fields(nlohmann::json& response, const nlohmann::json& request) const;
   void cleanup_session(const std::string& client_id);
   void publish_aggregated_messages();
 

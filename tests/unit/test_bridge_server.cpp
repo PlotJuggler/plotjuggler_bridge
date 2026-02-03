@@ -567,3 +567,125 @@ TEST_F(BridgeServerTest, SubscribeBackwardCompatible) {
   // No rate_limits in response since all rates are 0.0 (unlimited)
   EXPECT_FALSE(reply.contains("rate_limits"));
 }
+
+// ---------------------------------------------------------------------------
+// Protocol Version and Request ID Tests
+// ---------------------------------------------------------------------------
+TEST_F(BridgeServerTest, ResponseIncludesProtocolVersion) {
+  ASSERT_TRUE(server_->initialize());
+
+  // Any command response should include protocol_version
+  json request;
+  request["command"] = "heartbeat";
+  mock_->push_request("client_proto_1", request.dump());
+  server_->process_requests();
+
+  json response = mock_->pop_reply("client_proto_1");
+  ASSERT_FALSE(response.is_discarded());
+  EXPECT_EQ(response["protocol_version"], 1);
+}
+
+TEST_F(BridgeServerTest, ResponseEchoesRequestId) {
+  ASSERT_TRUE(server_->initialize());
+
+  json request;
+  request["command"] = "heartbeat";
+  request["id"] = "test-123";
+  mock_->push_request("client_proto_2", request.dump());
+  server_->process_requests();
+
+  json response = mock_->pop_reply("client_proto_2");
+  ASSERT_FALSE(response.is_discarded());
+  EXPECT_EQ(response["id"], "test-123");
+}
+
+TEST_F(BridgeServerTest, ResponseOmitsIdWhenNotProvided) {
+  ASSERT_TRUE(server_->initialize());
+
+  json request;
+  request["command"] = "heartbeat";
+  mock_->push_request("client_proto_3", request.dump());
+  server_->process_requests();
+
+  json response = mock_->pop_reply("client_proto_3");
+  ASSERT_FALSE(response.is_discarded());
+  EXPECT_FALSE(response.contains("id"));
+  EXPECT_TRUE(response.contains("protocol_version"));
+}
+
+TEST_F(BridgeServerTest, GetTopicsIncludesProtocolVersion) {
+  ASSERT_TRUE(server_->initialize());
+
+  json request;
+  request["command"] = "get_topics";
+  request["id"] = "gt-1";
+  mock_->push_request("client_proto_4", request.dump());
+  server_->process_requests();
+
+  json response = mock_->pop_reply("client_proto_4");
+  ASSERT_FALSE(response.is_discarded());
+  EXPECT_EQ(response["protocol_version"], 1);
+  EXPECT_EQ(response["id"], "gt-1");
+}
+
+TEST_F(BridgeServerTest, ErrorResponseIncludesProtocolVersion) {
+  ASSERT_TRUE(server_->initialize());
+
+  json request;
+  request["command"] = "invalid_command";
+  request["id"] = "err-1";
+  mock_->push_request("client_proto_5", request.dump());
+  server_->process_requests();
+
+  json response = mock_->pop_reply("client_proto_5");
+  ASSERT_FALSE(response.is_discarded());
+  EXPECT_EQ(response["status"], "error");
+  EXPECT_EQ(response["protocol_version"], 1);
+  EXPECT_EQ(response["id"], "err-1");
+}
+
+TEST_F(BridgeServerTest, SubscribeResponseIncludesProtocolVersion) {
+  ASSERT_TRUE(server_->initialize());
+
+  json request;
+  request["command"] = "subscribe";
+  request["topics"] = json::array({"/nonexistent_topic"});
+  request["id"] = "sub-1";
+  mock_->push_request("client_proto_6", request.dump());
+  server_->process_requests();
+
+  json response = mock_->pop_reply("client_proto_6");
+  ASSERT_FALSE(response.is_discarded());
+  EXPECT_EQ(response["protocol_version"], 1);
+  EXPECT_EQ(response["id"], "sub-1");
+}
+
+TEST_F(BridgeServerTest, MalformedJsonIncludesProtocolVersion) {
+  ASSERT_TRUE(server_->initialize());
+
+  // Malformed JSON cannot have an "id" field, but should still get protocol_version
+  mock_->push_request("client_proto_7", "this is not json {{{");
+  server_->process_requests();
+
+  json response = mock_->pop_reply("client_proto_7");
+  ASSERT_FALSE(response.is_discarded());
+  EXPECT_EQ(response["status"], "error");
+  EXPECT_EQ(response["protocol_version"], 1);
+  EXPECT_FALSE(response.contains("id"));
+}
+
+TEST_F(BridgeServerTest, MissingCommandIncludesProtocolVersion) {
+  ASSERT_TRUE(server_->initialize());
+
+  json request;
+  request["not_a_command"] = "heartbeat";
+  request["id"] = "missing-cmd-1";
+  mock_->push_request("client_proto_8", request.dump());
+  server_->process_requests();
+
+  json response = mock_->pop_reply("client_proto_8");
+  ASSERT_FALSE(response.is_discarded());
+  EXPECT_EQ(response["status"], "error");
+  EXPECT_EQ(response["protocol_version"], 1);
+  EXPECT_EQ(response["id"], "missing-cmd-1");
+}
