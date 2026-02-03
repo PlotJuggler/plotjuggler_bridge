@@ -26,6 +26,10 @@ import zstandard as zstd
 class BridgeClient:
     """Client for pj_ros_bridge server over WebSocket"""
 
+    # Binary frame header constants
+    HEADER_SIZE = 16
+    MAGIC_PJRB = 0x42524A50  # "PJRB" in ASCII (little-endian)
+
     def __init__(self, host="localhost", port=8080):
         """
         Initialize the bridge client
@@ -118,7 +122,10 @@ class BridgeClient:
             topics: List of topic names to subscribe to
 
         Returns:
-            Dictionary mapping topic names to schemas
+            Dictionary mapping topic names to schema objects.
+            Each schema object has:
+              - "encoding": Schema encoding (e.g., "ros2msg")
+              - "definition": The actual schema definition string
         """
         request = {"command": "subscribe", "topics": topics}
         response = self.send_request(request)
@@ -221,11 +228,63 @@ class BridgeClient:
 
         return messages
 
-    def _process_binary_frame(self, compressed_data):
-        """Decompress and deserialize a single binary frame"""
-        decompressed = self.decompressor.decompress(compressed_data)
+    def _process_binary_frame(self, binary_data):
+        """
+        Parse header, decompress, and deserialize a single binary frame.
+
+        Binary frame format (API v2):
+          - 16-byte header (before compression):
+            - Offset 0: uint32_t magic (0x42524A50 = "PJRB")
+            - Offset 4: uint32_t message_count
+            - Offset 8: uint32_t uncompressed_size
+            - Offset 12: uint32_t flags (reserved)
+          - ZSTD-compressed payload (after header)
+
+        Args:
+            binary_data: Raw binary frame data including header
+
+        Returns:
+            List of message dictionaries, or empty list on error
+        """
+        # Validate minimum size for header
+        if len(binary_data) < self.HEADER_SIZE:
+            print(f"Binary frame too small: {len(binary_data)} bytes (need {self.HEADER_SIZE})")
+            return []
+
+        # Parse 16-byte header (little-endian)
+        magic, msg_count, uncompressed_size, flags = struct.unpack(
+            "<IIII", binary_data[: self.HEADER_SIZE]
+        )
+
+        # Validate magic bytes
+        if magic != self.MAGIC_PJRB:
+            print(f"Invalid magic: 0x{magic:08X} (expected 0x{self.MAGIC_PJRB:08X})")
+            return []
+
+        # Extract compressed payload (after header)
+        compressed_payload = binary_data[self.HEADER_SIZE :]
+
+        # Decompress payload
+        decompressed = self.decompressor.decompress(compressed_payload)
+
+        # Verify uncompressed size matches header
+        if len(decompressed) != uncompressed_size:
+            print(
+                f"Size mismatch: got {len(decompressed)} bytes, "
+                f"expected {uncompressed_size} bytes"
+            )
+
+        # Deserialize messages
         messages = self.deserialize_aggregated_messages(decompressed)
 
+        # Verify message count matches header
+        if len(messages) != msg_count:
+            print(
+                f"Message count mismatch: got {len(messages)}, "
+                f"expected {msg_count} from header"
+            )
+
+        # Update statistics
         for msg in messages:
             topic = msg["topic"]
             self.stats[topic]["count"] += 1
@@ -370,8 +429,17 @@ def main():
             schemas = client.subscribe(topics)
 
             print(f"Successfully subscribed to {len(schemas)} topic(s)")
-            for topic in schemas.keys():
-                print(f"  - {topic}")
+            for topic, schema_obj in schemas.items():
+                # Handle both old (string) and new (object) schema formats
+                if isinstance(schema_obj, dict):
+                    encoding = schema_obj.get("encoding", "unknown")
+                    definition = schema_obj.get("definition", "")
+                    def_preview = definition[:50] + "..." if len(definition) > 50 else definition
+                    def_preview = def_preview.replace("\n", " ")
+                    print(f"  - {topic} (encoding={encoding}, schema={def_preview})")
+                else:
+                    # Legacy string format
+                    print(f"  - {topic}")
 
             # Start heartbeat
             client.start_heartbeat()
