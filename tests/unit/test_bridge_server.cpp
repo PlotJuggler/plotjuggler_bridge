@@ -962,3 +962,173 @@ TEST_F(BridgeServerTest, UnsubscribeIncludesProtocolVersion) {
   EXPECT_EQ(response["protocol_version"], 1);
   EXPECT_EQ(response["id"], "proto-unsub-1");
 }
+
+// ---------------------------------------------------------------------------
+// Pause and Resume Command Tests
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// PauseSetsPausedState
+//
+// Tests that the pause command sets the session's paused state to true.
+// ---------------------------------------------------------------------------
+TEST_F(BridgeServerTest, PauseSetsPausedState) {
+  ASSERT_TRUE(server_->initialize());
+
+  // Create session via heartbeat
+  json hb;
+  hb["command"] = "heartbeat";
+  mock_->push_request("client_pause_1", hb.dump());
+  server_->process_requests();
+
+  // Send pause command
+  json request;
+  request["command"] = "pause";
+  request["id"] = "p1";
+  mock_->push_request("client_pause_1", request.dump());
+  server_->process_requests();
+
+  json response = mock_->pop_reply("client_pause_1");
+  ASSERT_FALSE(response.is_discarded());
+  EXPECT_EQ(response["status"], "ok");
+  EXPECT_EQ(response["id"], "p1");
+  EXPECT_TRUE(response.contains("protocol_version"));
+  EXPECT_TRUE(response["paused"].get<bool>());
+}
+
+// ---------------------------------------------------------------------------
+// ResumeUnsetsPausedState
+//
+// Tests that the resume command sets the session's paused state to false.
+// ---------------------------------------------------------------------------
+TEST_F(BridgeServerTest, ResumeUnsetsPausedState) {
+  ASSERT_TRUE(server_->initialize());
+
+  // Create session via heartbeat
+  json hb;
+  hb["command"] = "heartbeat";
+  mock_->push_request("client_resume_1", hb.dump());
+  server_->process_requests();
+
+  // First pause
+  json pause_req;
+  pause_req["command"] = "pause";
+  mock_->push_request("client_resume_1", pause_req.dump());
+  server_->process_requests();
+  mock_->pop_reply("client_resume_1");  // discard pause response
+
+  // Then resume
+  json resume_req;
+  resume_req["command"] = "resume";
+  resume_req["id"] = "r1";
+  mock_->push_request("client_resume_1", resume_req.dump());
+  server_->process_requests();
+
+  json response = mock_->pop_reply("client_resume_1");
+  ASSERT_FALSE(response.is_discarded());
+  EXPECT_EQ(response["status"], "ok");
+  EXPECT_EQ(response["id"], "r1");
+  EXPECT_TRUE(response.contains("protocol_version"));
+  EXPECT_FALSE(response["paused"].get<bool>());
+}
+
+// ---------------------------------------------------------------------------
+// PauseIsIdempotent
+//
+// Tests that calling pause multiple times returns ok without error.
+// ---------------------------------------------------------------------------
+TEST_F(BridgeServerTest, PauseIsIdempotent) {
+  ASSERT_TRUE(server_->initialize());
+
+  // Create session via heartbeat
+  json hb;
+  hb["command"] = "heartbeat";
+  mock_->push_request("client_pause_idem", hb.dump());
+  server_->process_requests();
+
+  // Pause once
+  json request;
+  request["command"] = "pause";
+  mock_->push_request("client_pause_idem", request.dump());
+  server_->process_requests();
+  mock_->pop_reply("client_pause_idem");  // discard first response
+
+  // Pause again
+  mock_->push_request("client_pause_idem", request.dump());
+  server_->process_requests();
+
+  json response = mock_->pop_reply("client_pause_idem");
+  ASSERT_FALSE(response.is_discarded());
+  EXPECT_EQ(response["status"], "ok");
+  EXPECT_TRUE(response["paused"].get<bool>());
+}
+
+// ---------------------------------------------------------------------------
+// ResumeIsIdempotent
+//
+// Tests that calling resume when not paused returns ok without error.
+// ---------------------------------------------------------------------------
+TEST_F(BridgeServerTest, ResumeIsIdempotent) {
+  ASSERT_TRUE(server_->initialize());
+
+  // Create session via heartbeat (starts unpaused)
+  json hb;
+  hb["command"] = "heartbeat";
+  mock_->push_request("client_resume_idem", hb.dump());
+  server_->process_requests();
+
+  // Resume when already not paused
+  json request;
+  request["command"] = "resume";
+  mock_->push_request("client_resume_idem", request.dump());
+  server_->process_requests();
+
+  json response = mock_->pop_reply("client_resume_idem");
+  ASSERT_FALSE(response.is_discarded());
+  EXPECT_EQ(response["status"], "ok");
+  EXPECT_FALSE(response["paused"].get<bool>());
+}
+
+// ---------------------------------------------------------------------------
+// PauseCreatesSessionIfNotExists
+//
+// Tests that pause creates a session if the client has not yet sent heartbeat.
+// ---------------------------------------------------------------------------
+TEST_F(BridgeServerTest, PauseCreatesSessionIfNotExists) {
+  ASSERT_TRUE(server_->initialize());
+  EXPECT_EQ(server_->get_active_session_count(), 0u);
+
+  json request;
+  request["command"] = "pause";
+  mock_->push_request("client_new_pause", request.dump());
+  server_->process_requests();
+
+  EXPECT_EQ(server_->get_active_session_count(), 1u);
+
+  json response = mock_->pop_reply("client_new_pause");
+  ASSERT_FALSE(response.is_discarded());
+  EXPECT_EQ(response["status"], "ok");
+  EXPECT_TRUE(response["paused"].get<bool>());
+}
+
+// ---------------------------------------------------------------------------
+// ResumeCreatesSessionIfNotExists
+//
+// Tests that resume creates a session if the client has not yet sent heartbeat.
+// ---------------------------------------------------------------------------
+TEST_F(BridgeServerTest, ResumeCreatesSessionIfNotExists) {
+  ASSERT_TRUE(server_->initialize());
+  EXPECT_EQ(server_->get_active_session_count(), 0u);
+
+  json request;
+  request["command"] = "resume";
+  mock_->push_request("client_new_resume", request.dump());
+  server_->process_requests();
+
+  EXPECT_EQ(server_->get_active_session_count(), 1u);
+
+  json response = mock_->pop_reply("client_new_resume");
+  ASSERT_FALSE(response.is_discarded());
+  EXPECT_EQ(response["status"], "ok");
+  EXPECT_FALSE(response["paused"].get<bool>());
+}

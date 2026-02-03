@@ -77,6 +77,12 @@ class BridgeServer {
   std::string handle_subscribe(const std::string& client_id, const nlohmann::json& request);
   std::string handle_unsubscribe(const std::string& client_id, const nlohmann::json& request);
   std::string handle_heartbeat(const std::string& client_id, const nlohmann::json& request);
+
+  /// Handle pause command - pauses binary frame delivery for client
+  std::string handle_pause(const std::string& client_id, const nlohmann::json& request);
+
+  /// Handle resume command - resumes binary frame delivery for client
+  std::string handle_resume(const std::string& client_id, const nlohmann::json& request);
   std::string create_error_response(
       const std::string& error_code, const std::string& message, const nlohmann::json& request) const;
   void check_session_timeouts();

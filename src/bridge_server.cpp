@@ -123,6 +123,10 @@ bool BridgeServer::process_requests() {
         response = handle_unsubscribe(client_id, request_json);
       } else if (command == "heartbeat") {
         response = handle_heartbeat(client_id, request_json);
+      } else if (command == "pause") {
+        response = handle_pause(client_id, request_json);
+      } else if (command == "resume") {
+        response = handle_resume(client_id, request_json);
       } else {
         response = create_error_response("UNKNOWN_COMMAND", "Unknown command: " + command, request_json);
       }
@@ -410,6 +414,107 @@ std::string BridgeServer::handle_heartbeat(const std::string& client_id, const n
   response["status"] = "ok";
   inject_response_fields(response, request);
 
+  return response.dump();
+}
+
+std::string BridgeServer::handle_pause(const std::string& client_id, const nlohmann::json& request) {
+  // Create session if it doesn't exist
+  if (!session_manager_->session_exists(client_id)) {
+    session_manager_->create_session(client_id);
+    RCLCPP_INFO(node_->get_logger(), "Created new session for client '%s'", client_id.c_str());
+  }
+
+  // Update heartbeat
+  session_manager_->update_heartbeat(client_id);
+
+  // Check if already paused (idempotent)
+  if (session_manager_->is_paused(client_id)) {
+    RCLCPP_DEBUG(node_->get_logger(), "Client '%s' already paused", client_id.c_str());
+    json response;
+    response["status"] = "ok";
+    response["paused"] = true;
+    inject_response_fields(response, request);
+    return response.dump();
+  }
+
+  // Set paused state
+  session_manager_->set_paused(client_id, true);
+
+  // Smart ROS2 management: decrement ref counts for all subscribed topics
+  auto subs = session_manager_->get_subscriptions(client_id);
+  for (const auto& [topic, rate] : subs) {
+    subscription_manager_->unsubscribe(topic);
+    RCLCPP_DEBUG(
+        node_->get_logger(), "Decremented ref count for topic '%s' (client '%s' paused)", topic.c_str(),
+        client_id.c_str());
+  }
+
+  RCLCPP_INFO(node_->get_logger(), "Client '%s' paused (%zu topics refs decremented)", client_id.c_str(), subs.size());
+
+  json response;
+  response["status"] = "ok";
+  response["paused"] = true;
+  inject_response_fields(response, request);
+  return response.dump();
+}
+
+std::string BridgeServer::handle_resume(const std::string& client_id, const nlohmann::json& request) {
+  // Create session if it doesn't exist
+  if (!session_manager_->session_exists(client_id)) {
+    session_manager_->create_session(client_id);
+    RCLCPP_INFO(node_->get_logger(), "Created new session for client '%s'", client_id.c_str());
+  }
+
+  // Update heartbeat
+  session_manager_->update_heartbeat(client_id);
+
+  // Check if not paused (idempotent)
+  if (!session_manager_->is_paused(client_id)) {
+    RCLCPP_DEBUG(node_->get_logger(), "Client '%s' not paused", client_id.c_str());
+    json response;
+    response["status"] = "ok";
+    response["paused"] = false;
+    inject_response_fields(response, request);
+    return response.dump();
+  }
+
+  // Set unpaused state
+  session_manager_->set_paused(client_id, false);
+
+  // Smart ROS2 management: increment ref counts for all subscribed topics
+  // Get all available topics for type lookup
+  auto available_topics = topic_discovery_->discover_topics();
+  std::unordered_map<std::string, std::string> topic_types;
+  for (const auto& topic : available_topics) {
+    topic_types[topic.name] = topic.type;
+  }
+
+  // Create callback for message buffer (same as in handle_subscribe)
+  auto callback = [this](
+                      const std::string& topic, const std::shared_ptr<rclcpp::SerializedMessage>& msg,
+                      uint64_t receive_time_ns) { message_buffer_->add_message(topic, receive_time_ns, msg); };
+
+  auto subs = session_manager_->get_subscriptions(client_id);
+  for (const auto& [topic, rate] : subs) {
+    auto type_it = topic_types.find(topic);
+    if (type_it != topic_types.end()) {
+      subscription_manager_->subscribe(topic, type_it->second, callback);
+      RCLCPP_DEBUG(
+          node_->get_logger(), "Incremented ref count for topic '%s' (client '%s' resumed)", topic.c_str(),
+          client_id.c_str());
+    } else {
+      RCLCPP_WARN(
+          node_->get_logger(), "Topic '%s' no longer exists, cannot re-subscribe for client '%s'", topic.c_str(),
+          client_id.c_str());
+    }
+  }
+
+  RCLCPP_INFO(node_->get_logger(), "Client '%s' resumed (%zu topics refs incremented)", client_id.c_str(), subs.size());
+
+  json response;
+  response["status"] = "ok";
+  response["paused"] = false;
+  inject_response_fields(response, request);
   return response.dump();
 }
 
