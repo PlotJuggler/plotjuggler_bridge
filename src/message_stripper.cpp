@@ -61,6 +61,17 @@ rclcpp::SerializedMessage strip_compressed_image(const rclcpp::SerializedMessage
   return output;
 }
 
+// Strip function for sensor_msgs/msg/PointCloud2
+rclcpp::SerializedMessage strip_pointcloud2(const rclcpp::SerializedMessage& input) {
+  rclcpp::Serialization<sensor_msgs::msg::PointCloud2> serializer;
+  sensor_msgs::msg::PointCloud2 msg;
+  serializer.deserialize_message(&input, &msg);
+  msg.data = {0};
+  rclcpp::SerializedMessage output;
+  serializer.serialize_message(&msg, &output);
+  return output;
+}
+
 }  // namespace
 
 bool MessageStripper::should_strip(const std::string& message_type) {
@@ -75,6 +86,10 @@ rclcpp::SerializedMessage MessageStripper::strip(
 
   if (message_type == "sensor_msgs/msg/CompressedImage") {
     return strip_compressed_image(input);
+  }
+
+  if (message_type == "sensor_msgs/msg/PointCloud2") {
+    return strip_pointcloud2(input);
   }
 
   throw std::runtime_error("strip() not implemented for type: " + message_type);

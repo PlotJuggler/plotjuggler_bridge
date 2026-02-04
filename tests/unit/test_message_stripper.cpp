@@ -139,3 +139,44 @@ TEST(MessageStripperTest, StripCompressedImageReplacesDataWithSentinel) {
   EXPECT_EQ(result.data[0], 0);
   EXPECT_LT(stripped.size(), 500);
 }
+
+TEST(MessageStripperTest, StripPointCloud2ReplacesDataWithSentinel) {
+  sensor_msgs::msg::PointCloud2 cloud;
+  cloud.header.stamp.sec = 22222;
+  cloud.header.frame_id = "lidar_frame";
+  cloud.height = 1;
+  cloud.width = 10000;
+  cloud.is_bigendian = false;
+  cloud.point_step = 16;
+  cloud.row_step = 160000;
+  cloud.is_dense = true;
+
+  // Add a point field
+  sensor_msgs::msg::PointField field;
+  field.name = "x";
+  field.offset = 0;
+  field.datatype = sensor_msgs::msg::PointField::FLOAT32;
+  field.count = 1;
+  cloud.fields.push_back(field);
+
+  cloud.data.resize(160000, 0xEF);  // 160KB of point data
+
+  auto serialized = serialize_message(cloud);
+  EXPECT_GT(serialized.size(), 159000);
+
+  auto stripped = MessageStripper::strip("sensor_msgs/msg/PointCloud2", serialized);
+  auto result = deserialize_message<sensor_msgs::msg::PointCloud2>(stripped);
+
+  EXPECT_EQ(result.header.stamp.sec, 22222);
+  EXPECT_EQ(result.header.frame_id, "lidar_frame");
+  EXPECT_EQ(result.height, 1u);
+  EXPECT_EQ(result.width, 10000u);
+  EXPECT_EQ(result.point_step, 16u);
+  EXPECT_EQ(result.row_step, 160000u);
+  EXPECT_EQ(result.is_dense, true);
+  ASSERT_EQ(result.fields.size(), 1u);
+  EXPECT_EQ(result.fields[0].name, "x");
+  ASSERT_EQ(result.data.size(), 1u);
+  EXPECT_EQ(result.data[0], 0);
+  EXPECT_LT(stripped.size(), 500);
+}
