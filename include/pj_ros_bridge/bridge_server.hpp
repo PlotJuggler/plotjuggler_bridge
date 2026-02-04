@@ -42,7 +42,7 @@ class BridgeServer {
    */
   explicit BridgeServer(
       std::shared_ptr<rclcpp::Node> node, std::shared_ptr<MiddlewareInterface> middleware, int port = 8080,
-      double session_timeout = 10.0, double publish_rate = 50.0);
+      double session_timeout = 10.0, double publish_rate = 50.0, bool strip_large_messages = true);
 
   /**
    * @brief Initialize the bridge server

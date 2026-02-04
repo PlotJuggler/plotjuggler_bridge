@@ -20,22 +20,25 @@ int main(int argc, char** argv) {
   node->declare_parameter<int>("port", 8080);
   node->declare_parameter<double>("publish_rate", 50.0);
   node->declare_parameter<double>("session_timeout", 10.0);
+  node->declare_parameter<bool>("strip_large_messages", true);
 
   int port = node->get_parameter("port").as_int();
   double publish_rate = node->get_parameter("publish_rate").as_double();
   double session_timeout = node->get_parameter("session_timeout").as_double();
+  bool strip_large_messages = node->get_parameter("strip_large_messages").as_bool();
 
   RCLCPP_INFO(
-      node->get_logger(), "Configuration: port=%d, publish_rate=%.1f Hz, session_timeout=%.1f s", port, publish_rate,
-      session_timeout);
+      node->get_logger(),
+      "Configuration: port=%d, publish_rate=%.1f Hz, session_timeout=%.1f s, strip_large_messages=%s", port,
+      publish_rate, session_timeout, strip_large_messages ? "true" : "false");
 
   try {
     // Create middleware
     auto middleware = std::make_shared<pj_ros_bridge::WebSocketMiddleware>();
 
     // Create bridge server
-    auto bridge_server =
-        std::make_shared<pj_ros_bridge::BridgeServer>(node, middleware, port, session_timeout, publish_rate);
+    auto bridge_server = std::make_shared<pj_ros_bridge::BridgeServer>(
+        node, middleware, port, session_timeout, publish_rate, strip_large_messages);
 
     // Initialize server
     if (!bridge_server->initialize()) {

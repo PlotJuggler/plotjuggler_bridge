@@ -17,7 +17,7 @@ namespace pj_ros_bridge {
 
 BridgeServer::BridgeServer(
     std::shared_ptr<rclcpp::Node> node, std::shared_ptr<MiddlewareInterface> middleware, int port,
-    double session_timeout, double publish_rate)
+    double session_timeout, double publish_rate, bool strip_large_messages)
     : node_(node),
       middleware_(middleware),
       port_(port),
@@ -26,7 +26,7 @@ BridgeServer::BridgeServer(
       initialized_(false),
       total_messages_published_(0),
       total_bytes_published_(0),
-      strip_large_messages_(true) {}
+      strip_large_messages_(strip_large_messages) {}
 
 bool BridgeServer::initialize() {
   if (initialized_) {
