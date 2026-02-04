@@ -33,6 +33,23 @@ const std::unordered_set<std::string> kStrippableTypes = {
     "sensor_msgs/msg/LaserScan", "nav_msgs/msg/OccupancyGrid",
 };
 
+// Strip function for sensor_msgs/msg/Image
+rclcpp::SerializedMessage strip_image(const rclcpp::SerializedMessage& input) {
+  rclcpp::Serialization<sensor_msgs::msg::Image> serializer;
+
+  // Deserialize
+  sensor_msgs::msg::Image msg;
+  serializer.deserialize_message(&input, &msg);
+
+  // Replace data with sentinel
+  msg.data = {0};
+
+  // Re-serialize
+  rclcpp::SerializedMessage output;
+  serializer.serialize_message(&msg, &output);
+  return output;
+}
+
 }  // namespace
 
 bool MessageStripper::should_strip(const std::string& message_type) {
@@ -41,10 +58,11 @@ bool MessageStripper::should_strip(const std::string& message_type) {
 
 rclcpp::SerializedMessage MessageStripper::strip(
     const std::string& message_type, const rclcpp::SerializedMessage& input) {
-  // TODO: Implement strip functions for each message type
-  (void)message_type;
-  (void)input;
-  throw std::runtime_error("strip() not yet implemented");
+  if (message_type == "sensor_msgs/msg/Image") {
+    return strip_image(input);
+  }
+
+  throw std::runtime_error("strip() not implemented for type: " + message_type);
 }
 
 }  // namespace pj_ros_bridge
