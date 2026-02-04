@@ -55,3 +55,66 @@ TEST(MessageStripperTest, ShouldStripReturnsFalseForUnknownType) {
   EXPECT_FALSE(MessageStripper::should_strip("sensor_msgs/msg/Imu"));
   EXPECT_FALSE(MessageStripper::should_strip("unknown/msg/Type"));
 }
+
+// ============================================================================
+// strip() tests
+// ============================================================================
+
+// Helper to serialize a ROS2 message
+template <typename T>
+rclcpp::SerializedMessage serialize_message(const T& msg) {
+  rclcpp::Serialization<T> serializer;
+  rclcpp::SerializedMessage serialized_msg;
+  serializer.serialize_message(&msg, &serialized_msg);
+  return serialized_msg;
+}
+
+// Helper to deserialize a ROS2 message
+template <typename T>
+T deserialize_message(const rclcpp::SerializedMessage& serialized_msg) {
+  rclcpp::Serialization<T> serializer;
+  T msg;
+  serializer.deserialize_message(&serialized_msg, &msg);
+  return msg;
+}
+
+TEST(MessageStripperTest, StripImageReplacesDataWithSentinel) {
+  // Create an Image with large data
+  sensor_msgs::msg::Image img;
+  img.header.stamp.sec = 12345;
+  img.header.stamp.nanosec = 67890;
+  img.header.frame_id = "camera_frame";
+  img.height = 480;
+  img.width = 640;
+  img.encoding = "rgb8";
+  img.is_bigendian = 0;
+  img.step = 640 * 3;
+  img.data.resize(640 * 480 * 3, 0xAB);  // ~921KB of data
+
+  // Serialize
+  auto serialized = serialize_message(img);
+  EXPECT_GT(serialized.size(), 900000);  // Should be large
+
+  // Strip
+  auto stripped = MessageStripper::strip("sensor_msgs/msg/Image", serialized);
+
+  // Deserialize stripped message
+  auto result = deserialize_message<sensor_msgs::msg::Image>(stripped);
+
+  // Verify metadata preserved
+  EXPECT_EQ(result.header.stamp.sec, 12345);
+  EXPECT_EQ(result.header.stamp.nanosec, 67890);
+  EXPECT_EQ(result.header.frame_id, "camera_frame");
+  EXPECT_EQ(result.height, 480u);
+  EXPECT_EQ(result.width, 640u);
+  EXPECT_EQ(result.encoding, "rgb8");
+  EXPECT_EQ(result.is_bigendian, 0u);
+  EXPECT_EQ(result.step, 640u * 3);
+
+  // Verify data stripped to sentinel
+  ASSERT_EQ(result.data.size(), 1u);
+  EXPECT_EQ(result.data[0], 0);
+
+  // Verify serialized size is much smaller
+  EXPECT_LT(stripped.size(), 1000);
+}
