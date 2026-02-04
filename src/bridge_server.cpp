@@ -8,6 +8,7 @@
 #include <unordered_set>
 
 #include "pj_ros_bridge/message_serializer.hpp"
+#include "pj_ros_bridge/message_stripper.hpp"
 #include "pj_ros_bridge/protocol_constants.hpp"
 
 using json = nlohmann::json;
@@ -24,7 +25,8 @@ BridgeServer::BridgeServer(
       publish_rate_(publish_rate),
       initialized_(false),
       total_messages_published_(0),
-      total_bytes_published_(0) {}
+      total_bytes_published_(0),
+      strip_large_messages_(true) {}
 
 bool BridgeServer::initialize() {
   if (initialized_) {
@@ -252,10 +254,18 @@ std::string BridgeServer::handle_subscribe(const std::string& client_id, const n
 
     std::string topic_type = topic_types[topic_name];
 
-    // Create callback to add messages to buffer
-    auto callback = [this](
+    // Create callback to add messages to buffer (with optional stripping)
+    auto callback = [this, topic_type](
                         const std::string& topic, const std::shared_ptr<rclcpp::SerializedMessage>& msg,
-                        uint64_t receive_time_ns) { message_buffer_->add_message(topic, receive_time_ns, msg); };
+                        uint64_t receive_time_ns) {
+      if (strip_large_messages_ && MessageStripper::should_strip(topic_type)) {
+        auto stripped = MessageStripper::strip(topic_type, *msg);
+        auto stripped_ptr = std::make_shared<rclcpp::SerializedMessage>(std::move(stripped));
+        message_buffer_->add_message(topic, receive_time_ns, stripped_ptr);
+      } else {
+        message_buffer_->add_message(topic, receive_time_ns, msg);
+      }
+    };
 
     // Get schema BEFORE subscribing to avoid corrupting the reference count
     // if schema extraction fails after subscribe() increments it.
@@ -489,16 +499,23 @@ std::string BridgeServer::handle_resume(const std::string& client_id, const nloh
     topic_types[topic.name] = topic.type;
   }
 
-  // Create callback for message buffer (same as in handle_subscribe)
-  auto callback = [this](
-                      const std::string& topic, const std::shared_ptr<rclcpp::SerializedMessage>& msg,
-                      uint64_t receive_time_ns) { message_buffer_->add_message(topic, receive_time_ns, msg); };
-
   auto subs = session_manager_->get_subscriptions(client_id);
   for (const auto& [topic, rate] : subs) {
     auto type_it = topic_types.find(topic);
     if (type_it != topic_types.end()) {
-      subscription_manager_->subscribe(topic, type_it->second, callback);
+      std::string topic_type = type_it->second;
+      auto callback = [this, topic_type](
+                          const std::string& t, const std::shared_ptr<rclcpp::SerializedMessage>& msg,
+                          uint64_t receive_time_ns) {
+        if (strip_large_messages_ && MessageStripper::should_strip(topic_type)) {
+          auto stripped = MessageStripper::strip(topic_type, *msg);
+          auto stripped_ptr = std::make_shared<rclcpp::SerializedMessage>(std::move(stripped));
+          message_buffer_->add_message(t, receive_time_ns, stripped_ptr);
+        } else {
+          message_buffer_->add_message(t, receive_time_ns, msg);
+        }
+      };
+      subscription_manager_->subscribe(topic, topic_type, callback);
       RCLCPP_DEBUG(
           node_->get_logger(), "Incremented ref count for topic '%s' (client '%s' resumed)", topic.c_str(),
           client_id.c_str());

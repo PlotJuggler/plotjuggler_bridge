@@ -120,6 +120,9 @@ class BridgeServer {
   uint64_t total_bytes_published_;
   mutable std::mutex stats_mutex_;
 
+  // Message stripping configuration
+  bool strip_large_messages_;
+
   // Protects cleanup_session from concurrent calls (disconnect + timeout)
   std::mutex cleanup_mutex_;
 
