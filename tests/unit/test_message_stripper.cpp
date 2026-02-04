@@ -217,3 +217,33 @@ TEST(MessageStripperTest, StripLaserScanReplacesRangesAndIntensitiesWithSentinel
 
   EXPECT_LT(stripped.size(), 500);
 }
+
+TEST(MessageStripperTest, StripOccupancyGridReplacesDataWithSentinel) {
+  nav_msgs::msg::OccupancyGrid grid;
+  grid.header.stamp.sec = 44444;
+  grid.header.frame_id = "map_frame";
+  grid.info.resolution = 0.05f;
+  grid.info.width = 1000;
+  grid.info.height = 1000;
+  grid.info.origin.position.x = -25.0;
+  grid.info.origin.position.y = -25.0;
+  grid.data.resize(1000000, 50);  // 1MB of map data
+
+  auto serialized = serialize_message(grid);
+  EXPECT_GT(serialized.size(), 999000);
+
+  auto stripped = MessageStripper::strip("nav_msgs/msg/OccupancyGrid", serialized);
+  auto result = deserialize_message<nav_msgs::msg::OccupancyGrid>(stripped);
+
+  EXPECT_EQ(result.header.stamp.sec, 44444);
+  EXPECT_EQ(result.header.frame_id, "map_frame");
+  EXPECT_FLOAT_EQ(result.info.resolution, 0.05f);
+  EXPECT_EQ(result.info.width, 1000u);
+  EXPECT_EQ(result.info.height, 1000u);
+  EXPECT_DOUBLE_EQ(result.info.origin.position.x, -25.0);
+
+  ASSERT_EQ(result.data.size(), 1u);
+  EXPECT_EQ(result.data[0], 0);
+
+  EXPECT_LT(stripped.size(), 500);
+}

@@ -84,6 +84,17 @@ rclcpp::SerializedMessage strip_laser_scan(const rclcpp::SerializedMessage& inpu
   return output;
 }
 
+// Strip function for nav_msgs/msg/OccupancyGrid
+rclcpp::SerializedMessage strip_occupancy_grid(const rclcpp::SerializedMessage& input) {
+  rclcpp::Serialization<nav_msgs::msg::OccupancyGrid> serializer;
+  nav_msgs::msg::OccupancyGrid msg;
+  serializer.deserialize_message(&input, &msg);
+  msg.data = {0};
+  rclcpp::SerializedMessage output;
+  serializer.serialize_message(&msg, &output);
+  return output;
+}
+
 }  // namespace
 
 bool MessageStripper::should_strip(const std::string& message_type) {
@@ -106,6 +117,10 @@ rclcpp::SerializedMessage MessageStripper::strip(
 
   if (message_type == "sensor_msgs/msg/LaserScan") {
     return strip_laser_scan(input);
+  }
+
+  if (message_type == "nav_msgs/msg/OccupancyGrid") {
+    return strip_occupancy_grid(input);
   }
 
   throw std::runtime_error("strip() not implemented for type: " + message_type);
