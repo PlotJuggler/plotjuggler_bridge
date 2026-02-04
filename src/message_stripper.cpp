@@ -72,6 +72,18 @@ rclcpp::SerializedMessage strip_pointcloud2(const rclcpp::SerializedMessage& inp
   return output;
 }
 
+// Strip function for sensor_msgs/msg/LaserScan
+rclcpp::SerializedMessage strip_laser_scan(const rclcpp::SerializedMessage& input) {
+  rclcpp::Serialization<sensor_msgs::msg::LaserScan> serializer;
+  sensor_msgs::msg::LaserScan msg;
+  serializer.deserialize_message(&input, &msg);
+  msg.ranges = {0.0f};
+  msg.intensities = {0.0f};
+  rclcpp::SerializedMessage output;
+  serializer.serialize_message(&msg, &output);
+  return output;
+}
+
 }  // namespace
 
 bool MessageStripper::should_strip(const std::string& message_type) {
@@ -90,6 +102,10 @@ rclcpp::SerializedMessage MessageStripper::strip(
 
   if (message_type == "sensor_msgs/msg/PointCloud2") {
     return strip_pointcloud2(input);
+  }
+
+  if (message_type == "sensor_msgs/msg/LaserScan") {
+    return strip_laser_scan(input);
   }
 
   throw std::runtime_error("strip() not implemented for type: " + message_type);

@@ -180,3 +180,40 @@ TEST(MessageStripperTest, StripPointCloud2ReplacesDataWithSentinel) {
   EXPECT_EQ(result.data[0], 0);
   EXPECT_LT(stripped.size(), 500);
 }
+
+TEST(MessageStripperTest, StripLaserScanReplacesRangesAndIntensitiesWithSentinel) {
+  sensor_msgs::msg::LaserScan scan;
+  scan.header.stamp.sec = 33333;
+  scan.header.frame_id = "laser_frame";
+  scan.angle_min = -1.57f;
+  scan.angle_max = 1.57f;
+  scan.angle_increment = 0.01f;
+  scan.time_increment = 0.0001f;
+  scan.scan_time = 0.1f;
+  scan.range_min = 0.1f;
+  scan.range_max = 30.0f;
+  scan.ranges.resize(1000, 5.0f);         // 4KB
+  scan.intensities.resize(1000, 100.0f);  // 4KB
+
+  auto serialized = serialize_message(scan);
+  EXPECT_GT(serialized.size(), 7000);
+
+  auto stripped = MessageStripper::strip("sensor_msgs/msg/LaserScan", serialized);
+  auto result = deserialize_message<sensor_msgs::msg::LaserScan>(stripped);
+
+  EXPECT_EQ(result.header.stamp.sec, 33333);
+  EXPECT_EQ(result.header.frame_id, "laser_frame");
+  EXPECT_FLOAT_EQ(result.angle_min, -1.57f);
+  EXPECT_FLOAT_EQ(result.angle_max, 1.57f);
+  EXPECT_FLOAT_EQ(result.angle_increment, 0.01f);
+  EXPECT_FLOAT_EQ(result.range_min, 0.1f);
+  EXPECT_FLOAT_EQ(result.range_max, 30.0f);
+
+  // Both ranges and intensities should be stripped
+  ASSERT_EQ(result.ranges.size(), 1u);
+  EXPECT_FLOAT_EQ(result.ranges[0], 0.0f);
+  ASSERT_EQ(result.intensities.size(), 1u);
+  EXPECT_FLOAT_EQ(result.intensities[0], 0.0f);
+
+  EXPECT_LT(stripped.size(), 500);
+}
