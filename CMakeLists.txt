@@ -31,6 +31,8 @@ list(APPEND CMAKE_MODULE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
 find_package(ament_cmake REQUIRED)
 find_package(ament_index_cpp REQUIRED)
 find_package(rclcpp REQUIRED)
+find_package(sensor_msgs REQUIRED)
+find_package(nav_msgs REQUIRED)
 
 # Find external dependencies
 find_package(ZSTD REQUIRED)
@@ -77,6 +79,7 @@ add_library(${PROJECT_NAME}_lib
   src/generic_subscription_manager.cpp
   src/session_manager.cpp
   src/message_serializer.cpp
+  src/message_stripper.cpp
   src/bridge_server.cpp
 )
 
@@ -88,6 +91,8 @@ target_link_libraries(${PROJECT_NAME}_lib
 ament_target_dependencies(${PROJECT_NAME}_lib
   ament_index_cpp
   rclcpp
+  sensor_msgs
+  nav_msgs
 )
 
 # Create executable
@@ -142,6 +147,7 @@ if(BUILD_TESTING)
     tests/unit/test_generic_subscription_manager.cpp
     tests/unit/test_session_manager.cpp
     tests/unit/test_message_serializer.cpp
+    tests/unit/test_message_stripper.cpp
     tests/unit/test_bridge_server.cpp
     tests/unit/test_protocol_constants.cpp
   )
@@ -153,6 +159,8 @@ if(BUILD_TESTING)
 
   ament_target_dependencies(${PROJECT_NAME}_tests
     rclcpp
+    sensor_msgs
+    nav_msgs
   )
 
   # When TSAN is enabled, suppress known third-party warnings during CTest runs
