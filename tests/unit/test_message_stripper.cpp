@@ -118,3 +118,24 @@ TEST(MessageStripperTest, StripImageReplacesDataWithSentinel) {
   // Verify serialized size is much smaller
   EXPECT_LT(stripped.size(), 1000);
 }
+
+TEST(MessageStripperTest, StripCompressedImageReplacesDataWithSentinel) {
+  sensor_msgs::msg::CompressedImage img;
+  img.header.stamp.sec = 11111;
+  img.header.frame_id = "compressed_frame";
+  img.format = "jpeg";
+  img.data.resize(50000, 0xCD);  // 50KB JPEG data
+
+  auto serialized = serialize_message(img);
+  EXPECT_GT(serialized.size(), 49000);
+
+  auto stripped = MessageStripper::strip("sensor_msgs/msg/CompressedImage", serialized);
+  auto result = deserialize_message<sensor_msgs::msg::CompressedImage>(stripped);
+
+  EXPECT_EQ(result.header.stamp.sec, 11111);
+  EXPECT_EQ(result.header.frame_id, "compressed_frame");
+  EXPECT_EQ(result.format, "jpeg");
+  ASSERT_EQ(result.data.size(), 1u);
+  EXPECT_EQ(result.data[0], 0);
+  EXPECT_LT(stripped.size(), 500);
+}

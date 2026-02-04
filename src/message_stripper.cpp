@@ -50,6 +50,17 @@ rclcpp::SerializedMessage strip_image(const rclcpp::SerializedMessage& input) {
   return output;
 }
 
+// Strip function for sensor_msgs/msg/CompressedImage
+rclcpp::SerializedMessage strip_compressed_image(const rclcpp::SerializedMessage& input) {
+  rclcpp::Serialization<sensor_msgs::msg::CompressedImage> serializer;
+  sensor_msgs::msg::CompressedImage msg;
+  serializer.deserialize_message(&input, &msg);
+  msg.data = {0};
+  rclcpp::SerializedMessage output;
+  serializer.serialize_message(&msg, &output);
+  return output;
+}
+
 }  // namespace
 
 bool MessageStripper::should_strip(const std::string& message_type) {
@@ -60,6 +71,10 @@ rclcpp::SerializedMessage MessageStripper::strip(
     const std::string& message_type, const rclcpp::SerializedMessage& input) {
   if (message_type == "sensor_msgs/msg/Image") {
     return strip_image(input);
+  }
+
+  if (message_type == "sensor_msgs/msg/CompressedImage") {
+    return strip_compressed_image(input);
   }
 
   throw std::runtime_error("strip() not implemented for type: " + message_type);
