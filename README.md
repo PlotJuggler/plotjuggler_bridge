@@ -18,6 +18,7 @@ A high-performance ROS2 bridge server that forwards ROS2 topic content over WebS
 - **Session Management**: Automatic cleanup of disconnected clients via heartbeat monitoring and WebSocket close events
 - **Runtime Schema Discovery**: Automatic extraction of message schemas from installed ROS2 packages
 - **Zero-Copy Design**: Efficient message handling using shared pointers and move semantics
+- **Large Message Stripping**: Automatic stripping of large array fields (Image, PointCloud2, LaserScan, OccupancyGrid) to reduce bandwidth while preserving metadata
 - **Type-Safe Error Handling**: Comprehensive error reporting using `tl::expected`
 
 ## Architecture
@@ -71,7 +72,7 @@ Note: IXWebSocket is automatically downloaded and built via CMake FetchContent d
 ### Running Tests
 
 ```bash
-# Run all unit tests (139 tests)
+# Run all unit tests (150 tests)
 colcon test --packages-select pj_ros_bridge
 
 # View test results
@@ -127,6 +128,7 @@ ros2 run pj_ros_bridge pj_ros_bridge_node --ros-args \
 | `port` | int | 8080 | WebSocket server port |
 | `publish_rate` | double | 50.0 | Aggregation publish rate in Hz |
 | `session_timeout` | double | 10.0 | Client timeout duration in seconds |
+| `strip_large_messages` | bool | true | Strip large arrays from Image, PointCloud2, LaserScan, OccupancyGrid messages |
 
 ### Testing with Sample Data
 
@@ -223,6 +225,7 @@ pj_ros_bridge/
 │   ├── schema_extractor.hpp
 │   ├── message_buffer.hpp
 │   ├── message_serializer.hpp
+│   ├── message_stripper.hpp
 │   ├── session_manager.hpp
 │   ├── generic_subscription_manager.hpp
 │   ├── time_utils.hpp
@@ -234,12 +237,13 @@ pj_ros_bridge/
 │   ├── schema_extractor.cpp
 │   ├── message_buffer.cpp
 │   ├── message_serializer.cpp
+│   ├── message_stripper.cpp
 │   ├── session_manager.cpp
 │   ├── generic_subscription_manager.cpp
 │   ├── bridge_server.cpp
 │   └── main.cpp
 ├── tests/
-│   ├── unit/                        # 139 unit tests (gtest)
+│   ├── unit/                        # 150 unit tests (gtest)
 │   └── integration/
 │       └── test_client.py
 ├── 3rdparty/                        # Header-only dependencies
