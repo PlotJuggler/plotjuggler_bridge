@@ -359,7 +359,8 @@ All core implementation milestones are complete.
 - Fixed serializer dangling pointer UB, wire format alignment, signal handler
 - Extracted duplicated time utility, fixed stats counting
 - Python test client updated for websocket-client library
-- 91 unit tests passing
+- Added MessageStripper to strip large array fields from Image, PointCloud2, LaserScan, OccupancyGrid, CompressedImage
+- New ROS2 parameter `strip_large_messages` (default: true)
 
 ## Important Design Decisions
 
@@ -542,8 +543,8 @@ ASAN_OPTIONS="new_delete_type_mismatch=0" LSAN_OPTIONS="suppressions=asan_suppre
 
 ---
 
-**Last Updated**: 2026-02-03
+**Last Updated**: 2026-02-04
 **Project Phase**: API v2 implemented, Conan removed (using FetchContent for ixwebsocket)
 **Middleware**: IXWebSocket (fetched via CMake FetchContent)
-**Test Status**: 139 unit tests passing
+**Test Status**: 150 unit tests passing
 **Executable**: pj_ros_bridge_node ready to run
