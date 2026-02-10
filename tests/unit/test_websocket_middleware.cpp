@@ -343,6 +343,55 @@ TEST_F(WebSocketMiddlewareTest, SendBinaryToConnectedClient) {
   std::this_thread::sleep_for(std::chrono::milliseconds(100));
 }
 
+TEST_F(WebSocketMiddlewareTest, ShutdownWithConnectedClientDoesNotDeadlock) {
+  auto result = middleware_->initialize(18094);
+  ASSERT_TRUE(result.has_value());
+
+  // Set a disconnect callback (simulates BridgeServer's callback).
+  // The fix clears callbacks before server_->stop(), so this must NOT fire
+  // during shutdown — otherwise it would call into a potentially dead object.
+  std::atomic<bool> disconnect_fired{false};
+  middleware_->set_on_disconnect([&](const std::string& /*client_id*/) { disconnect_fired.store(true); });
+
+  // Connect a real WebSocket client
+  ix::WebSocket client;
+  client.setUrl("ws://127.0.0.1:18094");
+  client.setOnMessageCallback([](const ix::WebSocketMessagePtr& /*msg*/) {});
+  client.start();
+
+  ASSERT_TRUE(wait_for_client_open(client)) << "Client failed to connect";
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+  // Call shutdown() in a separate thread so we can detect a deadlock via timeout.
+  // Before the fix, shutdown() held state_mutex_ while calling server_->stop();
+  // the Close event fired on IX IO threads tried to acquire the same mutex → deadlock.
+  std::atomic<bool> shutdown_completed{false};
+  std::thread shutdown_thread([&]() {
+    middleware_->shutdown();
+    shutdown_completed.store(true);
+  });
+
+  // Wait up to 5 seconds — far more than enough for a clean shutdown
+  auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  while (!shutdown_completed.load() && std::chrono::steady_clock::now() < deadline) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  }
+
+  EXPECT_TRUE(shutdown_completed.load()) << "shutdown() deadlocked with a connected client";
+
+  if (shutdown_thread.joinable()) {
+    shutdown_thread.join();
+  }
+
+  EXPECT_FALSE(middleware_->is_ready());
+
+  // Disconnect callback must NOT have fired during shutdown — callbacks are
+  // cleared before the server is stopped to prevent use-after-free.
+  EXPECT_FALSE(disconnect_fired.load());
+
+  client.stop();
+}
+
 int main(int argc, char** argv) {
   testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();

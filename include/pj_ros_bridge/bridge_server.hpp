@@ -44,6 +44,10 @@ class BridgeServer {
       std::shared_ptr<rclcpp::Node> node, std::shared_ptr<MiddlewareInterface> middleware, int port = 8080,
       double session_timeout = 10.0, double publish_rate = 50.0, bool strip_large_messages = true);
 
+  /// Shuts down middleware before members are destroyed, preventing
+  /// disconnect callbacks from firing into a partially destroyed object.
+  ~BridgeServer();
+
   /**
    * @brief Initialize the bridge server
    * @return true if initialization successful, false otherwise

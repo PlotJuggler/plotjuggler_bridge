@@ -28,6 +28,15 @@ BridgeServer::BridgeServer(
       total_bytes_published_(0),
       strip_large_messages_(strip_large_messages) {}
 
+BridgeServer::~BridgeServer() {
+  // Shut down the middleware before members are destroyed so that
+  // disconnect callbacks (which capture `this`) cannot fire into
+  // a partially destroyed BridgeServer.
+  if (middleware_) {
+    middleware_->shutdown();
+  }
+}
+
 bool BridgeServer::initialize() {
   if (initialized_) {
     RCLCPP_WARN(node_->get_logger(), "Bridge server already initialized");

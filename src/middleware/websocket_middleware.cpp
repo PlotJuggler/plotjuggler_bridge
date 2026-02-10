@@ -34,6 +34,14 @@ tl::expected<void, std::string> WebSocketMiddleware::initialize(uint16_t port) {
   server_->setOnClientMessageCallback([this](
                                           std::shared_ptr<ix::ConnectionState> connection_state,
                                           ix::WebSocket& web_socket, const ix::WebSocketMessagePtr& msg) {
+    // Guard against callbacks arriving after shutdown() has moved server_ out.
+    {
+      std::lock_guard<std::mutex> state_lock(state_mutex_);
+      if (!initialized_) {
+        return;
+      }
+    }
+
     std::string client_id = connection_state->getId();
 
     if (msg->type == ix::WebSocketMessageType::Open) {
@@ -107,15 +115,36 @@ tl::expected<void, std::string> WebSocketMiddleware::initialize(uint16_t port) {
 }
 
 void WebSocketMiddleware::shutdown() {
-  std::lock_guard<std::mutex> lock(state_mutex_);
+  std::unique_ptr<ix::WebSocketServer> server_to_stop;
 
-  if (!initialized_) {
-    return;
+  {
+    std::lock_guard<std::mutex> lock(state_mutex_);
+
+    if (!initialized_) {
+      return;
+    }
+
+    initialized_ = false;
+
+    // Clear callbacks before stopping so that Close events fired during
+    // stop() don't invoke into potentially destroyed objects (BridgeServer).
+    on_connect_ = nullptr;
+    on_disconnect_ = nullptr;
+
+    // Move server out — will be stopped outside the lock to avoid deadlock
+    // with IO threads that acquire state_mutex_ in their Close callbacks.
+    server_to_stop = std::move(server_);
   }
 
-  if (server_) {
-    server_->stop();
-    server_.reset();
+  // Wake any thread blocked in receive_request()
+  queue_cv_.notify_all();
+
+  // Stop the server WITHOUT holding state_mutex_.
+  // IX IO threads fire Close callbacks that acquire state_mutex_;
+  // releasing it first prevents the deadlock.
+  if (server_to_stop) {
+    server_to_stop->stop();
+    server_to_stop.reset();
   }
 
   // Clear client map
@@ -130,8 +159,6 @@ void WebSocketMiddleware::shutdown() {
     std::queue<IncomingRequest> empty;
     std::swap(incoming_queue_, empty);
   }
-
-  initialized_ = false;
 }
 
 bool WebSocketMiddleware::receive_request(std::vector<uint8_t>& data, std::string& client_identity) {
