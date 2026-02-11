@@ -257,19 +257,73 @@ pj_ros_bridge/
 
 ## License
 
-Copyright 2025 Davide Faconti
+**pj_ros_bridge** is licensed under the **GNU Affero General Public License v3.0 (AGPL-3.0)**.
 
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
+Copyright (C) 2026 Davide Faconti
 
-    http://www.apache.org/licenses/LICENSE-2.0
+This program is free software: you can redistribute it and/or modify it under the terms of the GNU Affero General Public License as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version.
 
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
+See the [LICENSE](LICENSE) file for the full license text.
+
+### License FAQ
+
+#### Can I use this software commercially?
+
+**Yes, absolutely.** The AGPL does not restrict commercial use. You can:
+- Use pj_ros_bridge in commercial products and services
+- Charge customers for services that use this software
+- Deploy it in production environments for profit
+
+The AGPL only requires that if you **distribute modified versions** (or provide them as a network service), you must share those modifications under the same license.
+
+#### Does using pj_ros_bridge affect my proprietary software?
+
+**No, it does not.** Because pj_ros_bridge is a **standalone application** that communicates via inter-process communication (WebSocket), it does not impose license restrictions on:
+- Your ROS2 nodes and packages
+- Client applications connecting to the bridge
+- Other software running on the same system
+- Proprietary code that publishes to or subscribes from ROS2 topics
+
+The AGPL "copyleft" provisions only apply to pj_ros_bridge itself and any modifications you make to it.
+
+#### When do I need to share my code?
+
+You must share modifications to pj_ros_bridge only if you:
+
+1. **Distribute** modified versions to others (e.g., shipping a modified binary), OR
+2. **Provide the modified software as a network service** to external users
+
+You do **NOT** need to share code if you:
+- Use pj_ros_bridge unmodified (even commercially)
+- Modify it for internal use only within your organization
+- Connect proprietary clients or ROS2 nodes to the bridge
+
+#### What if I modify pj_ros_bridge for internal use?
+
+**No obligations.** Internal modifications that are not distributed or provided as a service to external parties do not trigger any AGPL requirements. You can keep your internal improvements private.
+
+#### What about the AGPL "network" clause?
+
+The AGPL's network provision states that users who interact with the software over a network should have access to the source code. However, this only applies if you:
+
+1. **Modify** the software, AND
+2. **Provide it as a service** to external users
+
+If you're using the **unmodified** version, there are no source code disclosure obligations, even if accessed over a network.
+
+#### Why AGPL instead of a more permissive license?
+
+The AGPL ensures that improvements to pj_ros_bridge benefit the entire community. If someone builds upon this work and shares it with others, those improvements remain open source. This creates a sustainable ecosystem where everyone contributes back.
+
+For users who simply want to use the bridge (even commercially), the AGPL functions like any permissive license.
+
+#### I'm still concerned about licensing. What should I do?
+
+If you're using pj_ros_bridge **unmodified**, you have nothing to worry about - there are zero licensing obligations.
+
+If you're planning to **modify and redistribute** it, the AGPL simply requires you to share those modifications. This is a reasonable trade-off that helps the open source community grow.
+
+For specific legal questions, please consult with your legal team. The license text is available in the [LICENSE](LICENSE) file.
 
 ## References
 

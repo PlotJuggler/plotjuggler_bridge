@@ -6,7 +6,7 @@
   <description>ROS2 bridge server that forwards ROS2 topic content over WebSocket</description>
   <maintainer email="davide.faconti@gmail.com">davide</maintainer>
   <author email="davide.faconti@gmail.com">davide</author>
-  <license>Apache-2.0</license>
+  <license>AGPL-3.0</license>
   <url type="repository">https://github.com/PlotJuggler/plotjuggler_ros_bridge</url>
   <url type="bugtracker">https://github.com/PlotJuggler/plotjuggler_ros_bridge/issues</url>
 
