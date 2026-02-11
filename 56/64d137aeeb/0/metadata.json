@@ -1,0 +1,32 @@
+{
+  "cli_version": "0.4.2",
+  "checkpoint_id": "5664d137aeeb",
+  "session_id": "a95db63c-a989-43eb-9dad-900313d384a4",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-11T11:14:25.053459183Z",
+  "branch": "debians",
+  "checkpoints_count": 2,
+  "files_touched": [
+    ".github/workflows/release-debs.yaml"
+  ],
+  "agent": "Claude Code",
+  "transcript_identifier_at_start": "147ee5e9-c319-4bf6-aad5-46f348ae83cd",
+  "checkpoint_transcript_start": 282,
+  "transcript_lines_at_start": 282,
+  "token_usage": {
+    "input_tokens": 1132,
+    "cache_creation_tokens": 121914,
+    "cache_read_tokens": 4196186,
+    "output_tokens": 3314,
+    "api_call_count": 47
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-02-11T11:14:24.96001101Z",
+    "agent_lines": 125,
+    "human_added": 92,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 217,
+    "agent_percentage": 57.6036866359447
+  }
+}

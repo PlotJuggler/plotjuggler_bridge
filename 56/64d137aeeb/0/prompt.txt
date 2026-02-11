@@ -1,0 +1,61 @@
+I want to use bloom to create debian packages for ROS Humble / Jazzy / Rolling / Kilted. search the web to determine how to do this
+
+---
+
+try building the humble deb for pj_ros_bridge
+
+---
+
+sudo apt install -y debhelper dh-python
+
+---
+
+it's installed now, retry the build
+
+---
+
+[Request interrupted by user for tool use]
+
+---
+
+can I try using conan to fetch that dependency, instead? will that work?
+
+---
+
+2
+
+---
+
+websocketpp is already available in ubuntu and rosdistro, wouldi tbe worthy transitioning to that, or not?
+
+---
+
+where is the debina file?
+
+---
+
+try "catkin_prepare_release --bump=minor"
+
+---
+
+try that
+
+---
+
+now, I want you to create a github CI workflow that can be trigged manually or automatically when a new tag is created. This should create debian packages fro Humble / Jazzy / Kilted and Rolling, and upload them as artifact in a Release. is it clear? any question?
+
+---
+
+use manual trigger to test yourself that everything works, using "gh"
+
+---
+
+yes, commit and push
+
+---
+
+[Request interrupted by user]
+
+---
+
+continue monitoring and fix any error, if the occurs
