@@ -39,6 +39,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          path: src/pj_ros_bridge
 
       - name: Install build tools
         run: |
@@ -50,12 +51,19 @@ jobs:
         run: |
           source /opt/ros/${{ matrix.ros_distro }}/setup.bash
           rosdep update --rosdistro ${{ matrix.ros_distro }}
-          rosdep install --from-paths . --ignore-src -y --rosdistro ${{ matrix.ros_distro }}
+          rosdep install --from-paths src/pj_ros_bridge --ignore-src -y --rosdistro ${{ matrix.ros_distro }}
+
+      - name: Clean previous builds
+        shell: bash
+        run: |
+          cd src/pj_ros_bridge
+          rm -rf debian .obj-x86_64-linux-gnu
 
       - name: Generate debian packaging
         shell: bash
         run: |
           source /opt/ros/${{ matrix.ros_distro }}/setup.bash
+          cd src/pj_ros_bridge
           bloom-generate rosdebian \
             --os-name ubuntu \
             --os-version ${{ matrix.os_codename }} \
@@ -65,13 +73,14 @@ jobs:
         shell: bash
         run: |
           source /opt/ros/${{ matrix.ros_distro }}/setup.bash
+          cd src/pj_ros_bridge
           fakeroot debian/rules binary
 
       - name: Upload deb artifact
         uses: actions/upload-artifact@v4
         with:
           name: deb-${{ matrix.ros_distro }}
-          path: ../ros-${{ matrix.ros_distro }}-*.deb
+          path: src/ros-${{ matrix.ros_distro }}-*.deb
 
   release:
     needs: build-deb
