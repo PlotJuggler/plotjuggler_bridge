@@ -53,22 +53,6 @@ jobs:
           rosdep update --rosdistro ${{ matrix.ros_distro }}
           rosdep install --from-paths src/pj_ros_bridge --ignore-src -y --rosdistro ${{ matrix.ros_distro }}
 
-      - name: Pre-build IXWebSocket
-        shell: bash
-        run: |
-          set -e
-          TMPDIR=$(mktemp -d)
-          cd "$TMPDIR"
-          curl -sL -o ixwebsocket.tar.gz https://github.com/machinezone/IXWebSocket/archive/refs/tags/v11.4.6.tar.gz
-          tar xzf ixwebsocket.tar.gz
-          cd IXWebSocket-11.4.6
-          mkdir build && cd build
-          cmake -DCMAKE_BUILD_TYPE=Release -DUSE_TLS=OFF -DUSE_ZLIB=ON -DIXWEBSOCKET_INSTALL=ON ..
-          make -j$(nproc)
-          make install
-          rm -rf "$TMPDIR"
-          echo "IXWebSocket installed"
-
       - name: Clean previous builds
         shell: bash
         run: |

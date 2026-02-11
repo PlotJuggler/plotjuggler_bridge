@@ -37,21 +37,20 @@ find_package(nav_msgs REQUIRED)
 # Find external dependencies
 find_package(ZSTD REQUIRED)
 
-# Try to find ixwebsocket (Conan or system install), fall back to FetchContent
-find_package(ixwebsocket QUIET)
-if(NOT ixwebsocket_FOUND)
-  message(STATUS "ixwebsocket not found, fetching from GitHub...")
-  include(FetchContent)
-  FetchContent_Declare(
-    ixwebsocket
-    URL https://github.com/machinezone/IXWebSocket/archive/refs/tags/v11.4.6.tar.gz
-    URL_HASH SHA256=c024334f8e45980836c67008979a884d6dcc5ef067dd2eb1fa7241f4c17ddc32
-  )
-  # Configure ixwebsocket options
+# IXWebSocket dependency management
+option(USE_VENDORED_IXWEBSOCKET "Use vendored IXWebSocket library (on by default)" ON)
+
+if(USE_VENDORED_IXWEBSOCKET)
+  # Use vendored ixwebsocket from 3rdparty/
+  message(STATUS "Using vendored IXWebSocket (3rdparty/ixwebsocket)")
   set(USE_TLS OFF CACHE BOOL "" FORCE)
   set(USE_ZLIB ON CACHE BOOL "" FORCE)
   set(IXWEBSOCKET_INSTALL OFF CACHE BOOL "" FORCE)
-  FetchContent_MakeAvailable(ixwebsocket)
+  add_subdirectory(3rdparty/ixwebsocket)
+else()
+  # Try to find ixwebsocket from system (Conan, vcpkg, system package, etc.)
+  message(STATUS "Looking for system-installed IXWebSocket...")
+  find_package(ixwebsocket REQUIRED)
 endif()
 
 # Include directories
