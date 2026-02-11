@@ -1,0 +1,116 @@
+name: Build & Release Debian Packages
+
+on:
+  push:
+    tags: ['*']
+  workflow_dispatch:
+
+jobs:
+  build-deb:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - ros_distro: humble
+            os_codename: jammy
+            container: rostooling/setup-ros-docker:ubuntu-jammy-ros-humble-ros-base-latest
+            runner: ubuntu-22.04
+          - ros_distro: jazzy
+            os_codename: noble
+            container: rostooling/setup-ros-docker:ubuntu-noble-ros-jazzy-ros-base-latest
+            runner: ubuntu-24.04
+          - ros_distro: kilted
+            os_codename: noble
+            container: rostooling/setup-ros-docker:ubuntu-noble-ros-kilted-ros-base-latest
+            runner: ubuntu-24.04
+          - ros_distro: rolling
+            os_codename: noble
+            container: rostooling/setup-ros-docker:ubuntu-noble-ros-rolling-ros-base-latest
+            runner: ubuntu-24.04
+
+    runs-on: ${{ matrix.runner }}
+    container:
+      image: ${{ matrix.container }}
+    env:
+      HOME: /root
+      ROS_HOME: /root/.ros
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install build tools
+        run: |
+          apt-get update
+          apt-get install -y python3-bloom fakeroot debhelper dh-python
+
+      - name: Install ROS dependencies
+        shell: bash
+        run: |
+          source /opt/ros/${{ matrix.ros_distro }}/setup.bash
+          rosdep update --rosdistro ${{ matrix.ros_distro }}
+          rosdep install --from-paths . --ignore-src -y --rosdistro ${{ matrix.ros_distro }}
+
+      - name: Generate debian packaging
+        shell: bash
+        run: |
+          source /opt/ros/${{ matrix.ros_distro }}/setup.bash
+          bloom-generate rosdebian \
+            --os-name ubuntu \
+            --os-version ${{ matrix.os_codename }} \
+            --ros-distro ${{ matrix.ros_distro }}
+
+      - name: Build debian package
+        shell: bash
+        run: |
+          source /opt/ros/${{ matrix.ros_distro }}/setup.bash
+          fakeroot debian/rules binary
+
+      - name: Upload deb artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: deb-${{ matrix.ros_distro }}
+          path: ../ros-${{ matrix.ros_distro }}-*.deb
+
+  release:
+    needs: build-deb
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Determine release tag
+        id: tag
+        run: |
+          if [[ "${{ github.ref_type }}" == "tag" ]]; then
+            echo "name=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+          else
+            LATEST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "0.0.0")
+            echo "name=${LATEST_TAG}-dev" >> "$GITHUB_OUTPUT"
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Download all deb artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: debs
+          pattern: deb-*
+          merge-multiple: true
+
+      - name: List artifacts
+        run: ls -lh debs/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.name }}
+          name: ${{ steps.tag.outputs.name }}
+          prerelease: ${{ steps.tag.outputs.prerelease }}
+          generate_release_notes: true
+          files: debs/*.deb
