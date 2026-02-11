@@ -1,4 +1,4 @@
-# pj_ros_bridge
+# plotjuggler_ros_bridge
 
 [![ROS2 Humble](https://github.com/PlotJuggler/plotjuggler_ros_bridge/actions/workflows/ros-humble.yaml/badge.svg?branch=main)](https://github.com/PlotJuggler/plotjuggler_ros_bridge/actions/workflows/ros-humble.yaml)
 [![ROS2 Jazzy](https://github.com/PlotJuggler/plotjuggler_ros_bridge/actions/workflows/ros-jazzy.yaml/badge.svg?branch=main)](https://github.com/PlotJuggler/plotjuggler_ros_bridge/actions/workflows/ros-jazzy.yaml)
@@ -34,10 +34,8 @@ For detailed architecture documentation, see [docs/ARCHITECTURE.md](docs/ARCHITE
 #### System Libraries
 - **ZSTD** (libzstd): `sudo apt install libzstd-dev`
 
-#### Automatically Fetched Libraries (via CMake FetchContent)
+#### Vendored Packages
 - **IXWebSocket** (`v11.4.6`): WebSocket server/client
-
-#### Header-Only Libraries (Included in 3rdparty/)
 - **nlohmann/json** - JSON library
 - **tl/expected** - Type-safe error handling
 
@@ -67,8 +65,6 @@ colcon build --packages-select pj_ros_bridge --cmake-args -DCMAKE_BUILD_TYPE=Rel
 source install/setup.bash
 ```
 
-Note: IXWebSocket is automatically downloaded and built via CMake FetchContent during the first build.
-
 ### Running Tests
 
 ```bash
@@ -77,22 +73,6 @@ colcon test --packages-select pj_ros_bridge
 
 # View test results
 colcon test-result --verbose
-```
-
-### Code Formatting
-
-The project uses pre-commit hooks for code formatting:
-
-```bash
-# Install pre-commit (if needed)
-pip3 install pre-commit
-
-# Install hooks
-cd ~/ws_plotjuggler/src/pj_ros_bridge
-pre-commit install
-
-# Run manually on all files
-pre-commit run -a
 ```
 
 ## Usage
@@ -147,35 +127,6 @@ cd ~/ws_plotjuggler/src/pj_ros_bridge
 python3 tests/integration/test_client.py --subscribe /topic1 /topic2
 ```
 
-### Python Test Client
-
-The package includes a Python test client for testing and demonstration.
-
-**Install dependencies:**
-
-```bash
-pip install websocket-client zstandard
-```
-
-**Usage:**
-
-```bash
-# Discover available topics
-python3 tests/integration/test_client.py --command get_topics
-
-# Subscribe to specific topics
-python3 tests/integration/test_client.py --subscribe /imu /points
-
-# Subscribe with custom server address
-python3 tests/integration/test_client.py \
-  --server 192.168.1.100 \
-  --port 9090 \
-  --subscribe /topic1
-
-# Run for specific duration with verbose output
-python3 tests/integration/test_client.py --subscribe /topic1 --duration 60 --verbose
-```
-
 ## API Protocol
 
 For the full API protocol documentation (commands, responses, binary wire format), see [docs/API.md](docs/API.md).
@@ -211,48 +162,6 @@ The client stopped sending heartbeats. Ensure the client sends a heartbeat every
 
 ```bash
 ros2 run pj_ros_bridge pj_ros_bridge_node --ros-args -p session_timeout:=20.0
-```
-
-## Project Structure
-
-```
-pj_ros_bridge/
-├── include/pj_ros_bridge/
-│   ├── middleware/
-│   │   ├── middleware_interface.hpp
-│   │   └── websocket_middleware.hpp
-│   ├── topic_discovery.hpp
-│   ├── schema_extractor.hpp
-│   ├── message_buffer.hpp
-│   ├── message_serializer.hpp
-│   ├── message_stripper.hpp
-│   ├── session_manager.hpp
-│   ├── generic_subscription_manager.hpp
-│   ├── time_utils.hpp
-│   └── bridge_server.hpp
-├── src/
-│   ├── middleware/
-│   │   └── websocket_middleware.cpp
-│   ├── topic_discovery.cpp
-│   ├── schema_extractor.cpp
-│   ├── message_buffer.cpp
-│   ├── message_serializer.cpp
-│   ├── message_stripper.cpp
-│   ├── session_manager.cpp
-│   ├── generic_subscription_manager.cpp
-│   ├── bridge_server.cpp
-│   └── main.cpp
-├── tests/
-│   ├── unit/                        # 150 unit tests (gtest)
-│   └── integration/
-│       └── test_client.py
-├── 3rdparty/                        # Header-only dependencies
-├── DATA/                            # Test data (rosbag, reference schemas)
-├── cmake/                           # CMake modules
-├── CMakeLists.txt
-├── package.xml
-├── .clang-tidy
-└── .pre-commit-config.yaml
 ```
 
 ## License
@@ -323,7 +232,7 @@ If you're using pj_ros_bridge **unmodified**, you have nothing to worry about - 
 
 If you're planning to **modify and redistribute** it, the AGPL simply requires you to share those modifications. This is a reasonable trade-off that helps the open source community grow.
 
-For specific legal questions, please consult with your legal team. The license text is available in the [LICENSE](LICENSE) file.
+If still concerned, contact me for alternative licensing options.
 
 ## References
 
