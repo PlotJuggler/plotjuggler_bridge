@@ -1,0 +1,35 @@
+{
+  "cli_version": "0.4.2",
+  "checkpoint_id": "e805cf64b481",
+  "strategy": "manual-commit",
+  "branch": "debians",
+  "checkpoints_count": 2,
+  "files_touched": [
+    ".github/workflows/release-debs.yaml",
+    ".github/workflows/ros-humble.yaml",
+    ".github/workflows/ros-jazzy.yaml",
+    ".github/workflows/ros-rolling.yaml",
+    "CHANGELOG.rst",
+    "CMakeLists.txt",
+    "README.md",
+    "agpl-3.0.txt",
+    "package.xml",
+    "src/main.cpp"
+  ],
+  "sessions": [
+    {
+      "metadata": "/e8/05cf64b481/0/metadata.json",
+      "transcript": "/e8/05cf64b481/0/full.jsonl",
+      "context": "/e8/05cf64b481/0/context.md",
+      "content_hash": "/e8/05cf64b481/0/content_hash.txt",
+      "prompt": "/e8/05cf64b481/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 276,
+    "cache_creation_tokens": 85287,
+    "cache_read_tokens": 2446447,
+    "output_tokens": 3839,
+    "api_call_count": 38
+  }
+}
