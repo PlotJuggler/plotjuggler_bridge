@@ -8,7 +8,7 @@ A high-performance ROS2 bridge server that forwards ROS2 topic content over WebS
 
 ## Overview
 
-`pj_ros_bridge` enables clients to subscribe to ROS2 topics and receive aggregated messages at 50 Hz without needing a full ROS2/DDS installation. This is particularly useful for visualization tools like PlotJuggler, remote monitoring applications, and lightweight clients that need access to ROS2 data.
+`plotjuggler_ros_bridge` enables clients to subscribe to ROS2 topics and receive aggregated messages at 50 Hz without needing a full ROS2/DDS installation. This is particularly useful for visualization tools like PlotJuggler, remote monitoring applications, and lightweight clients that need access to ROS2 data.
 
 ### Key Features
 
@@ -49,7 +49,7 @@ mkdir -p ~/ws_plotjuggler/src
 cd ~/ws_plotjuggler/src
 
 # 2. Clone the repository
-git clone <repository_url> pj_ros_bridge
+git clone <repository_url> plotjuggler_ros_bridge
 
 # 3. Install system dependencies
 sudo apt install libzstd-dev
@@ -59,7 +59,7 @@ source /opt/ros/humble/setup.bash
 
 # 5. Build the package
 cd ~/ws_plotjuggler
-colcon build --packages-select pj_ros_bridge --cmake-args -DCMAKE_BUILD_TYPE=Release
+colcon build --packages-select plotjuggler_ros_bridge --cmake-args -DCMAKE_BUILD_TYPE=Release
 
 # 6. Source the workspace
 source install/setup.bash
@@ -69,7 +69,7 @@ source install/setup.bash
 
 ```bash
 # Run all unit tests (150 tests)
-colcon test --packages-select pj_ros_bridge
+colcon test --packages-select plotjuggler_ros_bridge
 
 # View test results
 colcon test-result --verbose
@@ -84,7 +84,7 @@ colcon test-result --verbose
 ```bash
 source /opt/ros/humble/setup.bash
 source ~/ws_plotjuggler/install/setup.bash
-ros2 run pj_ros_bridge pj_ros_bridge_node
+ros2 run plotjuggler_ros_bridge plotjuggler_ros_bridge_node
 ```
 
 Default configuration:
@@ -95,7 +95,7 @@ Default configuration:
 #### Custom Configuration
 
 ```bash
-ros2 run pj_ros_bridge pj_ros_bridge_node --ros-args \
+ros2 run plotjuggler_ros_bridge plotjuggler_ros_bridge_node --ros-args \
   -p port:=9090 \
   -p publish_rate:=30.0 \
   -p session_timeout:=15.0
@@ -120,10 +120,10 @@ ros2 bag play /path/to/sample.mcap --loop
 # Terminal 2: Run server
 source /opt/ros/humble/setup.bash
 source ~/ws_plotjuggler/install/setup.bash
-ros2 run pj_ros_bridge pj_ros_bridge_node
+ros2 run plotjuggler_ros_bridge plotjuggler_ros_bridge_node
 
 # Terminal 3: Run Python test client
-cd ~/ws_plotjuggler/src/pj_ros_bridge
+cd ~/ws_plotjuggler/src/plotjuggler_ros_bridge
 python3 tests/integration/test_client.py --subscribe /topic1 /topic2
 ```
 
@@ -138,15 +138,15 @@ For the full API protocol documentation (commands, responses, binary wire format
 Another process is using the port. Either kill the conflicting process or use a custom port:
 
 ```bash
-ros2 run pj_ros_bridge pj_ros_bridge_node --ros-args -p port:=9090
+ros2 run plotjuggler_ros_bridge plotjuggler_ros_bridge_node --ros-args -p port:=9090
 ```
 
 ### Client receives no data
 
-1. Verify server is running: `ps aux | grep pj_ros_bridge`
+1. Verify server is running: `ps aux | grep plotjuggler_ros_bridge`
 2. Check topics are being published: `ros2 topic list`
 3. Verify heartbeat is being sent (required every 1 second)
-4. Check server logs: `ros2 run pj_ros_bridge pj_ros_bridge_node --ros-args --log-level debug`
+4. Check server logs: `ros2 run plotjuggler_ros_bridge plotjuggler_ros_bridge_node --ros-args --log-level debug`
 
 ### "Failed to get schema for topic" error
 
@@ -161,12 +161,12 @@ ros2 interface show <package_name>/msg/<MessageType>
 The client stopped sending heartbeats. Ensure the client sends a heartbeat every 1 second. The default timeout is 10 seconds. Increase if needed:
 
 ```bash
-ros2 run pj_ros_bridge pj_ros_bridge_node --ros-args -p session_timeout:=20.0
+ros2 run plotjuggler_ros_bridge plotjuggler_ros_bridge_node --ros-args -p session_timeout:=20.0
 ```
 
 ## License
 
-**pj_ros_bridge** is licensed under the **GNU Affero General Public License v3.0 (AGPL-3.0)**.
+**plotjuggler_ros_bridge** is licensed under the **GNU Affero General Public License v3.0 (AGPL-3.0)**.
 
 Copyright (C) 2026 Davide Faconti
 
@@ -174,42 +174,40 @@ This program is free software: you can redistribute it and/or modify it under th
 
 See the [LICENSE](LICENSE) file for the full license text.
 
-### License FAQ
+-----
 
-#### Can I use this software commercially?
+## License FAQ
+
+### Can I use this software commercially?
 
 **Yes, absolutely.** The AGPL does not restrict commercial use. You can:
-- Use pj_ros_bridge in commercial products and services
+- Use plotjuggler_ros_bridge in commercial products and services
 - Charge customers for services that use this software
 - Deploy it in production environments for profit
 
 The AGPL only requires that if you **distribute modified versions** (or provide them as a network service), you must share those modifications under the same license.
 
-#### Does using pj_ros_bridge affect my proprietary software?
+### Does using plotjuggler_ros_bridge affect my proprietary software?
 
-**No, it does not.** Because pj_ros_bridge is a **standalone application** that communicates via inter-process communication (WebSocket), it does not impose license restrictions on:
+**No, it does not.** Because plotjuggler_ros_bridge is a **standalone application** that communicates via inter-process communication (WebSocket), it does not impose license restrictions on:
 - Your ROS2 nodes and packages
 - Client applications connecting to the bridge
 - Other software running on the same system
 - Proprietary code that publishes to or subscribes from ROS2 topics
 
-The AGPL "copyleft" provisions only apply to pj_ros_bridge itself and any modifications you make to it.
+The AGPL "copyleft" provisions only apply to plotjuggler_ros_bridge itself and any modifications you make to it.
 
-#### When do I need to share my code?
+### When do I need to share my code?
 
-You must share modifications to pj_ros_bridge only if you:
+You must share modifications to plotjuggler_ros_bridge only if you:
 
 1. **Distribute** modified versions to others (e.g., shipping a modified binary), OR
 2. **Provide the modified software as a network service** to external users
 
 You do **NOT** need to share code if you:
-- Use pj_ros_bridge unmodified (even commercially)
+- Use plotjuggler_ros_bridge unmodified (even commercially)
 - Modify it for internal use only within your organization
 - Connect proprietary clients or ROS2 nodes to the bridge
-
-#### What if I modify pj_ros_bridge for internal use?
-
-**No obligations.** Internal modifications that are not distributed or provided as a service to external parties do not trigger any AGPL requirements. You can keep your internal improvements private.
 
 #### What about the AGPL "network" clause?
 
@@ -218,20 +216,9 @@ The AGPL's network provision states that users who interact with the software ov
 1. **Modify** the software, AND
 2. **Provide it as a service** to external users
 
-If you're using the **unmodified** version, there are no source code disclosure obligations, even if accessed over a network.
-
-#### Why AGPL instead of a more permissive license?
-
-The AGPL ensures that improvements to pj_ros_bridge benefit the entire community. If someone builds upon this work and shares it with others, those improvements remain open source. This creates a sustainable ecosystem where everyone contributes back.
-
-For users who simply want to use the bridge (even commercially), the AGPL functions like any permissive license.
-
 #### I'm still concerned about licensing. What should I do?
 
-If you're using pj_ros_bridge **unmodified**, you have nothing to worry about - there are zero licensing obligations.
-
-If you're planning to **modify and redistribute** it, the AGPL simply requires you to share those modifications. This is a reasonable trade-off that helps the open source community grow.
-
+If you're using plotjuggler_ros_bridge **unmodified**, you have nothing to worry about - there are zero licensing obligations.
 If still concerned, contact me for alternative licensing options.
 
 ## References
