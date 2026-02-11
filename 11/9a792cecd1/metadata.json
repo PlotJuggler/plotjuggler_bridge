@@ -1,0 +1,26 @@
+{
+  "cli_version": "0.4.2",
+  "checkpoint_id": "119a792cecd1",
+  "strategy": "manual-commit",
+  "branch": "debians",
+  "checkpoints_count": 1,
+  "files_touched": [
+    ".github/workflows/release-debs.yaml"
+  ],
+  "sessions": [
+    {
+      "metadata": "/11/9a792cecd1/0/metadata.json",
+      "transcript": "/11/9a792cecd1/0/full.jsonl",
+      "context": "/11/9a792cecd1/0/context.md",
+      "content_hash": "/11/9a792cecd1/0/content_hash.txt",
+      "prompt": "/11/9a792cecd1/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 23,
+    "cache_creation_tokens": 26447,
+    "cache_read_tokens": 2585425,
+    "output_tokens": 577,
+    "api_call_count": 20
+  }
+}
