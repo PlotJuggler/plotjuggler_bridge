@@ -1,0 +1,33 @@
+I want to use bloom to create debian packages for ROS Humble / Jazzy / Rolling / Kilted. search the web to determine how to do this
+
+---
+
+try building the humble deb for pj_ros_bridge
+
+---
+
+sudo apt install -y debhelper dh-python
+
+---
+
+it's installed now, retry the build
+
+---
+
+[Request interrupted by user for tool use]
+
+---
+
+can I try using conan to fetch that dependency, instead? will that work?
+
+---
+
+2
+
+---
+
+websocketpp is already available in ubuntu and rosdistro, wouldi tbe worthy transitioning to that, or not?
+
+---
+
+where is the debina file?
