@@ -4,6 +4,10 @@ Changelog for package pj_ros_bridge
 
 0.1.0 (2026-02-11)
 ------------------
+* **License changed to AGPL-3.0** (was Apache-2.0 in development)
+  - Added comprehensive license FAQ to README
+  - Clarifies commercial use, proprietary software compatibility
+  - No restrictions on unmodified use
 * Initial release of pj_ros_bridge
 * WebSocket bridge server for ROS2 topics
 * Features:
