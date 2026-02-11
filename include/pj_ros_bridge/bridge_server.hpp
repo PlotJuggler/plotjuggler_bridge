@@ -1,5 +1,21 @@
-// Copyright 2025
-// ROS2 Bridge - Bridge Server
+/*
+ * Copyright (C) 2026 Davide Faconti
+ *
+ * This file is part of pj_ros_bridge.
+ *
+ * pj_ros_bridge is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Affero General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * pj_ros_bridge is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU Affero General Public License for more details.
+ *
+ * You should have received a copy of the GNU Affero General Public License
+ * along with pj_ros_bridge. If not, see <https://www.gnu.org/licenses/>.
+ */
 
 #ifndef PJ_ROS_BRIDGE__BRIDGE_SERVER_HPP_
 #define PJ_ROS_BRIDGE__BRIDGE_SERVER_HPP_
