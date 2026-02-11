@@ -41,6 +41,27 @@ For detailed architecture documentation, see [docs/ARCHITECTURE.md](docs/ARCHITE
 
 ## Installation
 
+### Installation with Pixi
+
+
+#### Install Pixi (if you don't have it)
+```bash
+curl -fsSL https://pixi.sh/install.sh | bash
+```
+
+Restart your terminal afterwards.
+
+```bash
+# 1. Clone the repository
+git clone <repository_url>
+cd plotjuggler_ros_bridge
+```
+
+```bash
+# 2. Build the package
+pixi run install
+```
+
 ### Building from Source
 
 ```bash
@@ -85,6 +106,12 @@ colcon test-result --verbose
 source /opt/ros/humble/setup.bash
 source ~/ws_plotjuggler/install/setup.bash
 ros2 run pj_ros_bridge pj_ros_bridge_node
+```
+
+or
+
+```bash
+pixi run ros2 run pj_ros_bridge pj_ros_bridge_node
 ```
 
 Default configuration:
