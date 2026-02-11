@@ -1,0 +1,23 @@
+[workspace]
+authors = ["avalen2022 <a.valencia.2022@alumnos.urjc.es>"]
+channels = ["robostack-jazzy", "conda-forge"]
+name = "ws_pixis"
+platforms = ["linux-64"]
+version = "0.1.0"
+
+[activation]
+scripts = ["install/setup.sh"]
+
+[tasks]
+build = { cmd = "colcon build --symlink-install", inputs = ["src"], outputs = ["install"] }
+install = { cmd = "colcon build --symlink-install", inputs = ["src"], outputs = ["install"] }
+clean = { cmd = "rm -rf build install log" }
+
+[dependencies]
+ros-jazzy-desktop = ">=0.11.0,<0.12"
+colcon-common-extensions = ">=0.3.0,<0.4"
+cmake = ">=4.2.3,<5"
+ninja = ">=1.13.2,<2"
+compilers = ">=1.11.0,<2"
+pkg-config = ">=0.29.2,<0.30"
+zstd = ">=1.5.7,<2"
