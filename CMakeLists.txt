@@ -44,8 +44,8 @@ if(NOT ixwebsocket_FOUND)
   include(FetchContent)
   FetchContent_Declare(
     ixwebsocket
-    GIT_REPOSITORY https://github.com/machinezone/IXWebSocket.git
-    GIT_TAG v11.4.6
+    URL https://github.com/machinezone/IXWebSocket/archive/refs/tags/v11.4.6.tar.gz
+    URL_HASH SHA256=c024334f8e45980836c67008979a884d6dcc5ef067dd2eb1fa7241f4c17ddc32
   )
   # Configure ixwebsocket options
   set(USE_TLS OFF CACHE BOOL "" FORCE)

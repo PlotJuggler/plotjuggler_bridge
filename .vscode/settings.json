@@ -101,5 +101,6 @@
         "expected": "cpp",
         "spanstream": "cpp",
         "stacktrace": "cpp"
-    }
+    },
+    "ROS2.distro": "humble"
 }
