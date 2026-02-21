@@ -140,18 +140,6 @@ git commit -m "build: Add sensor_msgs/nav_msgs deps and message_stripper sources
 ```cpp
 // Copyright 2025 Davide Faconti
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
 #ifndef PJ_ROS_BRIDGE__MESSAGE_STRIPPER_HPP_
 #define PJ_ROS_BRIDGE__MESSAGE_STRIPPER_HPP_
 
@@ -228,18 +216,6 @@ git commit -m "feat: Add MessageStripper header"
 ```cpp
 // Copyright 2025 Davide Faconti
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
 #include <gtest/gtest.h>
 
 #include <nav_msgs/msg/occupancy_grid.hpp>
@@ -304,18 +280,6 @@ git commit -m "test: Add failing tests for MessageStripper::should_strip"
 ```cpp
 // Copyright 2025 Davide Faconti
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
 #include "pj_ros_bridge/message_stripper.hpp"
 
 #include <nav_msgs/msg/occupancy_grid.hpp>
