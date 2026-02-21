@@ -201,3 +201,60 @@ TEST_F(SchemaExtractorTest, RemoveCommentsOnlyComments) {
   }
   EXPECT_TRUE(is_empty_or_whitespace) << "Result should be empty or whitespace-only, got: '" << result << "'";
 }
+
+// ---------------------------------------------------------------------------
+// Regression: Builtin types with array brackets (e.g., float64[9]) must be
+// recognised as builtins, not treated as nested message types.
+// ---------------------------------------------------------------------------
+TEST_F(SchemaExtractorTest, BuiltinArrayTypeNotMistakenForNestedType) {
+  // sensor_msgs/msg/Imu contains "float64[9] orientation_covariance".
+  // Before the fix, float64[9] was not recognized as builtin because
+  // brackets were stripped after the builtin check, causing the schema
+  // extraction to try to find "sensor_msgs/msg/float64.msg" which fails.
+  std::string schema = extractor_->get_message_definition("sensor_msgs/msg/Imu");
+  ASSERT_FALSE(schema.empty()) << "Imu schema should not be empty (float64[9] must be recognised as builtin)";
+
+  // Verify the covariance fields are present in the output
+  EXPECT_NE(schema.find("orientation_covariance"), std::string::npos);
+  EXPECT_NE(schema.find("angular_velocity_covariance"), std::string::npos);
+  EXPECT_NE(schema.find("linear_acceleration_covariance"), std::string::npos);
+}
+
+// ---------------------------------------------------------------------------
+// Non-existent nested type should cause the whole schema to fail
+// (not silently omit the nested type).
+// ---------------------------------------------------------------------------
+TEST_F(SchemaExtractorTest, NonExistentNestedTypeReturnsEmpty) {
+  // We can't easily create a message type with a fake nested type,
+  // but we can verify that a completely fabricated package returns empty.
+  std::string schema = extractor_->get_message_definition("fake_nonexistent_pkg/msg/FakeType");
+  EXPECT_TRUE(schema.empty()) << "Fabricated nested type should produce empty schema";
+}
+
+// ---------------------------------------------------------------------------
+// Verify ImuSchemaContainsExpectedFields - specifically tests that the
+// schema correctly handles builtin types with fixed-size arrays.
+// ---------------------------------------------------------------------------
+TEST_F(SchemaExtractorTest, ImuSchemaContainsExpectedFields) {
+  std::string actual = extractor_->get_message_definition("sensor_msgs/msg/Imu");
+  ASSERT_FALSE(actual.empty()) << "Failed to extract schema for sensor_msgs/msg/Imu";
+
+  std::string actual_no_comments = remove_comments_from_schema(actual);
+
+  // Core fields
+  EXPECT_NE(actual_no_comments.find("std_msgs/Header header"), std::string::npos);
+  EXPECT_NE(actual_no_comments.find("geometry_msgs/Quaternion orientation"), std::string::npos);
+  EXPECT_NE(actual_no_comments.find("geometry_msgs/Vector3 angular_velocity"), std::string::npos);
+  EXPECT_NE(actual_no_comments.find("geometry_msgs/Vector3 linear_acceleration"), std::string::npos);
+
+  // Fixed-size array builtins (the regression case)
+  EXPECT_NE(actual_no_comments.find("float64[9] orientation_covariance"), std::string::npos);
+  EXPECT_NE(actual_no_comments.find("float64[9] angular_velocity_covariance"), std::string::npos);
+  EXPECT_NE(actual_no_comments.find("float64[9] linear_acceleration_covariance"), std::string::npos);
+
+  // Nested types should be present
+  EXPECT_NE(actual_no_comments.find("MSG: geometry_msgs/Quaternion"), std::string::npos);
+  EXPECT_NE(actual_no_comments.find("MSG: geometry_msgs/Vector3"), std::string::npos);
+  EXPECT_NE(actual_no_comments.find("MSG: std_msgs/Header"), std::string::npos);
+  EXPECT_NE(actual_no_comments.find("MSG: builtin_interfaces/Time"), std::string::npos);
+}

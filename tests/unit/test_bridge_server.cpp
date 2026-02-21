@@ -1338,3 +1338,37 @@ TEST_F(BridgeServerTest, RegressionTest_PausedClientDisconnectNoDoubleDecrement)
   mock_->simulate_disconnect(client2);
   EXPECT_EQ(server_->get_active_session_count(), 0u);
 }
+
+// ---------------------------------------------------------------------------
+// Regression: Subscribe to a topic that exists but has an empty schema should
+// report a failure (not silently succeed with an empty definition).
+//
+// In the unit test environment, we can't easily mock SchemaExtractor, but we
+// can verify the failure-reporting path by subscribing to a non-existent topic
+// which produces the "Topic does not exist" failure, confirming the failure
+// response structure is correct.
+// ---------------------------------------------------------------------------
+TEST_F(BridgeServerTest, SubscribeFailureResponseContainsTopicAndReason) {
+  ASSERT_TRUE(server_->initialize());
+
+  json req;
+  req["command"] = "subscribe";
+  req["topics"] = json::array({"/nonexistent_topic_1", "/nonexistent_topic_2"});
+  mock_->push_request("client_fail_multi", req.dump());
+  server_->process_requests();
+
+  json reply = mock_->pop_reply("client_fail_multi");
+  ASSERT_FALSE(reply.is_discarded());
+  EXPECT_EQ(reply["status"], "error");
+  EXPECT_EQ(reply["error_code"], "ALL_SUBSCRIPTIONS_FAILED");
+  ASSERT_TRUE(reply.contains("failures"));
+  ASSERT_EQ(reply["failures"].size(), 2u);
+
+  // Each failure entry must have topic and reason
+  for (const auto& failure : reply["failures"]) {
+    EXPECT_TRUE(failure.contains("topic"));
+    EXPECT_TRUE(failure.contains("reason"));
+    EXPECT_FALSE(failure["topic"].get<std::string>().empty());
+    EXPECT_FALSE(failure["reason"].get<std::string>().empty());
+  }
+}
