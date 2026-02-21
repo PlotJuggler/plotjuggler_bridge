@@ -280,17 +280,7 @@ std::string BridgeServer::handle_subscribe(const std::string& client_id, const n
     std::string topic_type = topic_types[topic_name];
 
     // Create callback to add messages to buffer (with optional stripping)
-    auto callback = [this, topic_type](
-                        const std::string& topic, const std::shared_ptr<rclcpp::SerializedMessage>& msg,
-                        uint64_t receive_time_ns) {
-      if (strip_large_messages_ && MessageStripper::should_strip(topic_type)) {
-        auto stripped = MessageStripper::strip(topic_type, *msg);
-        auto stripped_ptr = std::make_shared<rclcpp::SerializedMessage>(std::move(stripped));
-        message_buffer_->add_message(topic, receive_time_ns, stripped_ptr);
-      } else {
-        message_buffer_->add_message(topic, receive_time_ns, msg);
-      }
-    };
+    auto callback = make_buffer_callback(topic_type);
 
     // Get schema BEFORE subscribing to avoid corrupting the reference count
     // if schema extraction fails after subscribe() increments it.
@@ -302,6 +292,16 @@ std::string BridgeServer::handle_subscribe(const std::string& client_id, const n
       json failure;
       failure["topic"] = topic_name;
       failure["reason"] = std::string("Schema extraction failed: ") + e.what();
+      failures.push_back(failure);
+      continue;
+    }
+
+    if (schema.empty()) {
+      RCLCPP_ERROR(
+          node_->get_logger(), "Empty schema for topic '%s' (type: %s)", topic_name.c_str(), topic_type.c_str());
+      json failure;
+      failure["topic"] = topic_name;
+      failure["reason"] = "Schema extraction returned empty definition";
       failures.push_back(failure);
       continue;
     }
@@ -529,17 +529,7 @@ std::string BridgeServer::handle_resume(const std::string& client_id, const nloh
     auto type_it = topic_types.find(topic);
     if (type_it != topic_types.end()) {
       std::string topic_type = type_it->second;
-      auto callback = [this, topic_type](
-                          const std::string& t, const std::shared_ptr<rclcpp::SerializedMessage>& msg,
-                          uint64_t receive_time_ns) {
-        if (strip_large_messages_ && MessageStripper::should_strip(topic_type)) {
-          auto stripped = MessageStripper::strip(topic_type, *msg);
-          auto stripped_ptr = std::make_shared<rclcpp::SerializedMessage>(std::move(stripped));
-          message_buffer_->add_message(t, receive_time_ns, stripped_ptr);
-        } else {
-          message_buffer_->add_message(t, receive_time_ns, msg);
-        }
-      };
+      auto callback = make_buffer_callback(topic_type);
       subscription_manager_->subscribe(topic, topic_type, callback);
       RCLCPP_DEBUG(
           node_->get_logger(), "Incremented ref count for topic '%s' (client '%s' resumed)", topic.c_str(),
@@ -629,6 +619,26 @@ size_t BridgeServer::get_active_session_count() const {
 std::pair<uint64_t, uint64_t> BridgeServer::get_publish_stats() const {
   std::lock_guard<std::mutex> lock(stats_mutex_);
   return {total_messages_published_, total_bytes_published_};
+}
+
+MessageCallback BridgeServer::make_buffer_callback(const std::string& topic_type) {
+  return
+      [this, topic_type](
+          const std::string& topic, const std::shared_ptr<rclcpp::SerializedMessage>& msg, uint64_t receive_time_ns) {
+        if (strip_large_messages_ && MessageStripper::should_strip(topic_type)) {
+          try {
+            auto stripped = MessageStripper::strip(topic_type, *msg);
+            auto stripped_ptr = std::make_shared<rclcpp::SerializedMessage>(std::move(stripped));
+            message_buffer_->add_message(topic, receive_time_ns, stripped_ptr);
+            return;
+          } catch (const std::exception& e) {
+            RCLCPP_WARN_THROTTLE(
+                node_->get_logger(), *node_->get_clock(), 5000,
+                "Failed to strip message on topic '%s': %s. Forwarding original.", topic.c_str(), e.what());
+          }
+        }
+        message_buffer_->add_message(topic, receive_time_ns, msg);
+      };
 }
 
 void BridgeServer::publish_aggregated_messages() {

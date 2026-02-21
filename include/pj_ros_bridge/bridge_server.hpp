@@ -112,6 +112,11 @@ class BridgeServer {
   void cleanup_session(const std::string& client_id);
   void publish_aggregated_messages();
 
+  /// Create a message callback that buffers messages with optional stripping.
+  /// If stripping fails (e.g., corrupted CDR data), the original message
+  /// is forwarded instead of crashing the callback.
+  MessageCallback make_buffer_callback(const std::string& topic_type);
+
   // ROS2 components
   std::shared_ptr<rclcpp::Node> node_;
 
