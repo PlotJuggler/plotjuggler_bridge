@@ -17,18 +17,6 @@
  * along with pj_ros_bridge. If not, see <https://www.gnu.org/licenses/>.
  */
 
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
 #ifndef PJ_ROS_BRIDGE__MIDDLEWARE__WEBSOCKET_MIDDLEWARE_HPP_
 #define PJ_ROS_BRIDGE__MIDDLEWARE__WEBSOCKET_MIDDLEWARE_HPP_
 
@@ -87,6 +75,9 @@ class WebSocketMiddleware : public MiddlewareInterface {
   std::queue<IncomingRequest> incoming_queue_;
   mutable std::mutex queue_mutex_;
   std::condition_variable queue_cv_;
+
+  // Lock ordering (to prevent deadlock):
+  //   state_mutex_ > clients_mutex_ > queue_mutex_
 
   // Connected clients: client_id -> WebSocket shared_ptr
   std::unordered_map<std::string, std::shared_ptr<ix::WebSocket>> clients_;

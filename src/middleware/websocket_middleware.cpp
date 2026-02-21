@@ -17,18 +17,6 @@
  * along with pj_ros_bridge. If not, see <https://www.gnu.org/licenses/>.
  */
 
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
 #include "pj_ros_bridge/middleware/websocket_middleware.hpp"
 
 namespace pj_ros_bridge {
@@ -51,21 +39,18 @@ tl::expected<void, std::string> WebSocketMiddleware::initialize(uint16_t port) {
   server_->setOnClientMessageCallback([this](
                                           std::shared_ptr<ix::ConnectionState> connection_state,
                                           ix::WebSocket& web_socket, const ix::WebSocketMessagePtr& msg) {
-    // Guard against callbacks arriving after shutdown() has moved server_ out.
-    {
-      std::lock_guard<std::mutex> state_lock(state_mutex_);
-      if (!initialized_) {
-        return;
-      }
-    }
-
     std::string client_id = connection_state->getId();
 
     if (msg->type == ix::WebSocketMessageType::Open) {
-      // Store client connection
+      // Store client connection. Hold state_mutex_ through server_ access
+      // to prevent shutdown() from moving server_ out between the
+      // initialized_ check and getClients() call.
       {
+        std::lock_guard<std::mutex> state_lock(state_mutex_);
+        if (!initialized_) {
+          return;
+        }
         std::lock_guard<std::mutex> clients_lock(clients_mutex_);
-        // Get a shared_ptr to this WebSocket from the server's client set
         for (const auto& client : server_->getClients()) {
           if (client.get() == &web_socket) {
             clients_[client_id] = client;
@@ -85,6 +70,13 @@ tl::expected<void, std::string> WebSocketMiddleware::initialize(uint16_t port) {
       }
 
     } else if (msg->type == ix::WebSocketMessageType::Close) {
+      {
+        std::lock_guard<std::mutex> state_lock(state_mutex_);
+        if (!initialized_) {
+          return;
+        }
+      }
+
       // Notify disconnect callback
       ConnectionCallback cb;
       {
@@ -102,6 +94,13 @@ tl::expected<void, std::string> WebSocketMiddleware::initialize(uint16_t port) {
       }
 
     } else if (msg->type == ix::WebSocketMessageType::Message) {
+      {
+        std::lock_guard<std::mutex> state_lock(state_mutex_);
+        if (!initialized_) {
+          return;
+        }
+      }
+
       if (!msg->binary) {
         // Text message = API request, push to queue
         IncomingRequest req;
