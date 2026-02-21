@@ -148,7 +148,10 @@ class BridgeServer {
   // Message stripping configuration
   bool strip_large_messages_;
 
-  // Protects cleanup_session from concurrent calls (disconnect + timeout)
+  // Lock ordering (to prevent deadlock):
+  //   cleanup_mutex_ > last_sent_mutex_ > stats_mutex_
+  // SessionManager::mutex_ may be acquired while holding any of these.
+  // Never acquire a higher-order lock while holding a lower-order one.
   std::mutex cleanup_mutex_;
 
   // Per-client per-topic last-sent timestamp (nanoseconds) for rate limiting
