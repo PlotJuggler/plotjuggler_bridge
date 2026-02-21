@@ -1,0 +1,35 @@
+{
+  "cli_version": "0.4.2",
+  "checkpoint_id": "00acef786069",
+  "strategy": "manual-commit",
+  "branch": "main",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "docs/plans/2026-02-21-p0-p1-fixes.md",
+    "include/pj_ros_bridge/bridge_server.hpp",
+    "include/pj_ros_bridge/middleware/websocket_middleware.hpp",
+    "src/bridge_server.cpp",
+    "src/generic_subscription_manager.cpp",
+    "src/middleware/websocket_middleware.cpp",
+    "src/schema_extractor.cpp",
+    "src/topic_discovery.cpp",
+    "tests/unit/test_bridge_server.cpp",
+    "tests/unit/test_schema_extractor.cpp"
+  ],
+  "sessions": [
+    {
+      "metadata": "/00/acef786069/0/metadata.json",
+      "transcript": "/00/acef786069/0/full.jsonl",
+      "context": "/00/acef786069/0/context.md",
+      "content_hash": "/00/acef786069/0/content_hash.txt",
+      "prompt": "/00/acef786069/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 125,
+    "cache_creation_tokens": 258078,
+    "cache_read_tokens": 10265569,
+    "output_tokens": 14180,
+    "api_call_count": 103
+  }
+}

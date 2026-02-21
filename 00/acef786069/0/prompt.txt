@@ -1,0 +1,2404 @@
+do a full review of this project
+
+---
+
+Base directory for this skill: /home/davide/.claude/plugins/cache/superpowers-marketplace/superpowers/4.0.3/skills/requesting-code-review
+
+# Requesting Code Review
+
+Dispatch superpowers:code-reviewer subagent to catch issues before they cascade.
+
+**Core principle:** Review early, review often.
+
+## When to Request Review
+
+**Mandatory:**
+- After each task in subagent-driven development
+- After completing major feature
+- Before merge to main
+
+**Optional but valuable:**
+- When stuck (fresh perspective)
+- Before refactoring (baseline check)
+- After fixing complex bug
+
+## How to Request
+
+**1. Get git SHAs:**
+```bash
+BASE_SHA=$(git rev-parse HEAD~1)  # or origin/main
+HEAD_SHA=$(git rev-parse HEAD)
+```
+
+**2. Dispatch code-reviewer subagent:**
+
+Use Task tool with superpowers:code-reviewer type, fill template at `code-reviewer.md`
+
+**Placeholders:**
+- `{WHAT_WAS_IMPLEMENTED}` - What you just built
+- `{PLAN_OR_REQUIREMENTS}` - What it should do
+- `{BASE_SHA}` - Starting commit
+- `{HEAD_SHA}` - Ending commit
+- `{DESCRIPTION}` - Brief summary
+
+**3. Act on feedback:**
+- Fix Critical issues immediately
+- Fix Important issues before proceeding
+- Note Minor issues for later
+- Push back if reviewer is wrong (with reasoning)
+
+## Example
+
+```
+[Just completed Task 2: Add verification function]
+
+You: Let me request code review before proceeding.
+
+BASE_SHA=$(git log --oneline | grep "Task 1" | head -1 | awk '{print }')
+HEAD_SHA=$(git rev-parse HEAD)
+
+[Dispatch superpowers:code-reviewer subagent]
+  WHAT_WAS_IMPLEMENTED: Verification and repair functions for conversation index
+  PLAN_OR_REQUIREMENTS: Task 2 from docs/plans/deployment-plan.md
+  BASE_SHA: a7981ec
+  HEAD_SHA: 3df7661
+  DESCRIPTION: Added verifyIndex() and repairIndex() with 4 issue types
+
+[Subagent returns]:
+  Strengths: Clean architecture, real tests
+  Issues:
+    Important: Missing progress indicators
+    Minor: Magic number (100) for reporting interval
+  Assessment: Ready to proceed
+
+You: [Fix progress indicators]
+[Continue to Task 3]
+```
+
+## Integration with Workflows
+
+**Subagent-Driven Development:**
+- Review after EACH task
+- Catch issues before they compound
+- Fix before moving to next task
+
+**Executing Plans:**
+- Review after each batch (3 tasks)
+- Get feedback, apply, continue
+
+**Ad-Hoc Development:**
+- Review before merge
+- Review when stuck
+
+## Red Flags
+
+**Never:**
+- Skip review because "it's simple"
+- Ignore Critical issues
+- Proceed with unfixed Important issues
+- Argue with valid technical feedback
+
+**If reviewer wrong:**
+- Push back with technical reasoning
+- Show code/tests that prove it works
+- Request clarification
+
+See template at: requesting-code-review/code-reviewer.md
+
+---
+
+<task-notification>
+<task-id>a1f115193fe5038eb</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<status>completed</status>
+<summary>Agent "Test coverage analysis" completed</summary>
+<result>Now I have a comprehensive picture of the entire codebase and test suite. Let me compile my analysis.
+
+---
+
+# Test Coverage Analysis: pj_ros_bridge
+
+## 1. Summary
+
+The project has 150 unit tests across 10 test files covering all major components. The overall test quality is **good** -- tests are meaningful, assertions verify real behavior, thread safety is tested for core components, and several regression tests document previously found bugs. However, there are some significant coverage gaps, particularly in the end-to-end message publishing path (the `publish_aggregated_messages()` method) and in some error/edge-case scenarios.
+
+---
+
+## 2. Critical Gaps (Criticality 8-10)
+
+### 2.1 publish_aggregated_messages() is essentially untested (Criticality: 9/10)
+
+**File:** `/home/davide/ws_plotjuggler/src/pj_ros_bridge/src/bridge_server.cpp`, lines 634-757
+
+This is the most complex method in the entire codebase. It handles per-client filtering, subscription group coalescing, rate limiting, ZSTD compression via `finalize()`, binary frame delivery, and statistics tracking. None of this logic is tested with actual messages flowing through it.
+
+The current BridgeServer tests cannot subscribe to real topics (no ROS2 graph in unit tests), so the publish timer always finds an empty buffer. Every test that touches the publish path ends with a comment like "since topics don't exist, no messages are buffered, so no binary sends should occur."
+
+**What this could hide:**
+- Rate limiting logic (`min_interval_ns` calculation, `last_sent_times_` bookkeeping) is completely untested. There is a potential integer division issue: `1'000'000'000'000ULL / static_cast<uint64_t>(rate_mhz)` would divide by zero if `rate_mhz` were ever 0, but the `if (rate_mhz == 0)` guard prevents this -- still, the rate filtering correctness is unverified.
+- The subscription grouping logic (grouping clients by `map<string,int>` key where rates are discretized to milli-Hz) is untested. If two clients have rates 10.0 and 10.001, they would get different groups (`10000` vs `10001`), causing redundant serialization. This may or may not be intended.
+- The `last_sent_times_` synchronization from the "representative" client to all clients in a group (line 738) is untested.
+- Statistics counting (the fix documented in `StatsNotInflatedByMultipleSessions`) is only tested in the negative case (no messages = zero stats), never in the positive case.
+
+**Recommendation:** Create a targeted test that bypasses GenericSubscriptionManager by directly injecting messages into the shared `MessageBuffer` before triggering the publish path. The mock middleware already captures `send_binary()` calls, so you could verify:
+- That binary frames are sent only to clients subscribed to those topics
+- That rate limiting works correctly (messages below the rate threshold are dropped)
+- That the binary frame contains a valid PJRB header with correct message count
+- That statistics are incremented correctly
+
+### 2.2 MessageStripper::strip() with unrecognized type throws but is never tested (Criticality: 8/10)
+
+**File:** `/home/davide/ws_plotjuggler/src/pj_ros_bridge/src/message_stripper.cpp`, line 143
+
+```cpp
+throw std::runtime_error("strip() not implemented for type: " + message_type);
+```
+
+If `should_strip()` returns true but `strip()` does not handle the type (a code maintenance error), or if `strip()` is called without checking `should_strip()` first, this throws an exception. The `bridge_server.cpp` subscribe callback (line 287) does call `should_strip()` first, but a future refactor could break this contract.
+
+**What this could hide:** A new message type added to `kStrippableTypes` but not to the `strip()` if-chain would throw at runtime, crashing the entire subscription callback.
+
+**Recommendation:** Add a test that calls `MessageStripper::strip("unknown/msg/Type", some_serialized_message)` and verifies it throws `std::runtime_error`. This is a one-line test that documents the expected contract.
+
+### 2.3 decompress_zstd error paths are not tested (Criticality: 8/10)
+
+**File:** `/home/davide/ws_plotjuggler/src/pj_ros_bridge/src/message_serializer.cpp`, lines 131-157
+
+The `decompress_zstd()` method has three error branches:
+- `ZSTD_CONTENTSIZE_ERROR` -- "not compressed by zstd"
+- `ZSTD_CONTENTSIZE_UNKNOWN` -- "original size unknown"  
+- `ZSTD_isError(result)` -- decompression failure
+
+None of these are tested. If a client or storage layer ever passes corrupt data, these code paths execute. If the error handling is broken (e.g., throws the wrong exception type), it would go unnoticed.
+
+**What this could hide:** Silent data corruption if error detection fails, or unexpected exception types that crash callers that expect `std::runtime_error`.
+
+**Recommendation:** Add tests that pass garbage data to `decompress_zstd()` and verify that `std::runtime_error` is thrown with a meaningful message.
+
+---
+
+## 3. Important Improvements (Criticality 5-7)
+
+### 3.1 BridgeServer: Double-initialization is not tested (Criticality: 7/10)
+
+**File:** `/home/davide/ws_plotjuggler/src/pj_ros_bridge/src/bridge_server.cpp`, lines 56-60
+
+The code handles `initialize()` being called twice by returning `true` with a warning:
+```cpp
+if (initialized_) {
+    RCLCPP_WARN(node_->get_logger(), "Bridge server already initialized");
+    return true;
+}
+```
+
+No test verifies this. A future refactor could change this to return false (breaking idempotency) or crash.
+
+**Recommendation:** Add a `DoubleInitializeReturnsTrue` test.
+
+### 3.2 BridgeServer: Invalid publish_rate is not tested (Criticality: 6/10)
+
+**File:** `/home/davide/ws_plotjuggler/src/pj_ros_bridge/src/bridge_server.cpp`, lines 93-96
+
+```cpp
+if (publish_rate_ <= 0.0) {
+    RCLCPP_ERROR(node_->get_logger(), "Invalid publish_rate: %.1f (must be > 0)", publish_rate_);
+    return false;
+}
+```
+
+No test passes a zero or negative publish rate to verify initialization fails gracefully.
+
+**Recommendation:** Add a test constructing BridgeServer with `publish_rate=0.0` and verifying `initialize()` returns false.
+
+### 3.3 BridgeServer: Empty client_id from middleware is not fully tested (Criticality: 6/10)
+
+**File:** `/home/davide/ws_plotjuggler/src/pj_ros_bridge/src/bridge_server.cpp`, lines 126-129
+
+```cpp
+if (client_id.empty()) {
+    RCLCPP_WARN(node_->get_logger(), "Received request with no client identity");
+    return true;
+}
+```
+
+This path is not tested. The mock middleware always provides a client_id. A request with an empty client_id should be silently dropped.
+
+**Recommendation:** Push a request with an empty client_id and verify no reply is sent and no session is created.
+
+### 3.4 GenericSubscriptionManager: Thread safety is not tested (Criticality: 6/10)
+
+**File:** `/home/davide/ws_plotjuggler/src/pj_ros_bridge/tests/unit/test_generic_subscription_manager.cpp`
+
+Unlike SessionManager and MessageBuffer which both have explicit `ThreadSafety` tests, GenericSubscriptionManager has no concurrent access tests. The class declares itself thread-safe (all methods use a mutex), but this is unverified.
+
+**Recommendation:** Add a test that spawns multiple threads subscribing/unsubscribing concurrently to verify no data corruption or crashes occur.
+
+### 3.5 SchemaExtractor: Concurrent access is not tested (Criticality: 5/10)
+
+**File:** `/home/davide/ws_plotjuggler/src/pj_ros_bridge/include/pj_ros_bridge/schema_extractor.hpp`
+
+SchemaExtractor uses a `shared_mutex` for thread safety and has two-level caching. No test exercises concurrent reads/writes to verify the caching + shared_mutex interaction works correctly. A race between a cache read and a cache write could theoretically corrupt data if the locking is wrong.
+
+**Recommendation:** Add a test that spawns multiple threads calling `get_message_definition()` concurrently with different and same message types.
+
+### 3.6 WebSocketMiddleware: publish_data() with connected clients is not tested (Criticality: 5/10)
+
+**File:** `/home/davide/ws_plotjuggler/src/pj_ros_bridge/tests/unit/test_websocket_middleware.cpp`
+
+The `publish_data()` broadcast method is tested only in the negative cases (without init, with no clients). The positive path -- broadcasting to multiple connected clients -- is never tested. The CLAUDE.md notes this method is "currently unused" but it remains in the interface and could be used in the future.
+
+### 3.7 WebSocketMiddleware: ConnectCallback is not tested (Criticality: 5/10)
+
+**File:** `/home/davide/ws_plotjuggler/src/pj_ros_bridge/tests/unit/test_websocket_middleware.cpp`
+
+The `set_on_connect()` callback is tested via the mock in BridgeServer tests (`simulate_connect`), but the real WebSocketMiddleware's connect callback is never verified in the websocket middleware test file. The disconnect callback (`DisconnectCallbackFires`) is tested with a real client, but the connect callback is not.
+
+---
+
+## 4. Test Quality Issues
+
+### 4.1 BridgeServer tests cannot exercise the happy path for subscribe
+
+Nearly every BridgeServer test that involves `subscribe` operates on non-existent topics, so the tests only exercise the failure/error path. The entire subscribe happy path (schema extraction succeeds, GenericSubscriptionManager creates a real subscription, schemas are returned to the client) is never tested at the unit level. This is a structural limitation -- unit tests don't have a live ROS2 graph with publishers.
+
+**Impact:** The subscribe success path is only covered by the Python integration tests. A bug in schema formatting, callback wiring, or subscription setup would not be caught by unit tests.
+
+**Mitigation suggestion:** Consider creating a secondary mock/stub for `TopicDiscovery` and `SchemaExtractor` that can be injected into BridgeServer, allowing the subscribe path to succeed even without a live ROS2 graph. Alternatively, accept this as a known limitation covered by integration tests.
+
+### 4.2 Time-dependent tests use real sleeps
+
+Several tests rely on `std::this_thread::sleep_for()` with short durations (10-120ms). For example:
+- `SessionManagerTest::TimeoutDetection` uses a 100ms timeout with 60ms sleeps
+- `MessageBufferTest::CleanupPreservesRecentMessages` uses 10ms sleep
+- `BridgeServerTest::PerClientFiltering` spins for 60ms
+
+These tests could be flaky on heavily loaded CI machines. They work today but are inherently non-deterministic.
+
+**Recommendation:** This is a minor concern since the timeouts seem generous enough. No immediate action needed unless flaky failures are observed.
+
+### 4.3 MockMiddleware is well-designed
+
+The `MockMiddleware` class in `test_bridge_server.cpp` is realistic and faithful to the `MiddlewareInterface` contract. It properly uses mutexes for thread safety, supports simulating connect/disconnect events, and captures replies and binary sends for verification. This is good mock design that doesn't mask problems.
+
+---
+
+## 5. Positive Observations
+
+### 5.1 Regression tests document real bugs found
+
+The test suite includes multiple regression tests with clear comments explaining the original bug:
+- `StatsNotInflatedByMultipleSessions` -- documents a stats counting bug where per-group stats were inflated by the number of clients
+- `RegressionTest_BinaryFrameIncludesHeader` -- documents a bug where `compress_zstd()` was called instead of `finalize()`
+- `RegressionTest_PausedClientDisconnectNoDoubleDecrement` -- documents a ref count corruption bug
+- `SpuriousUnsubscribeDoesNotCorruptSharedRef` -- documents a schema-before-subscribe ordering bug
+- `LargeMessageForcesReallocation` -- documents a dangling pointer UB in the serializer
+
+These are high-value tests that prevent known regressions.
+
+### 5.2 Thread safety testing is solid for core components
+
+Both `SessionManager` and `MessageBuffer` have dedicated thread safety tests that spawn multiple concurrent threads performing different operations. The project also runs TSAN and ASAN builds routinely (per MEMORY.md), which provides additional confidence.
+
+### 5.3 Wire format tests verify the binary protocol specification
+
+The `WireFormatMatchesProjectSpec` test in `test_message_serializer.cpp` carefully verifies that the binary serialization format matches the documented specification byte-by-byte. The `FinalizeIncludesBinaryHeader` and `DecompressedPayloadMatchesOriginal` tests verify the header+compression pipeline end-to-end.
+
+### 5.4 WebSocket middleware tests use real connections
+
+The websocket middleware tests go beyond mocking -- they create actual `ix::WebSocket` client connections, send real messages, and verify the full send/receive path including binary frames and disconnect callbacks. This provides high confidence in the networking layer.
+
+### 5.5 MessageStripper tests verify metadata preservation
+
+Each message stripper test creates a realistic message with populated metadata fields, strips it, and verifies that all non-data fields survive the strip-then-re-serialize round-trip. This is thorough and would catch CDR serialization issues.
+
+### 5.6 Schema validation against reference files
+
+The schema extractor tests compare extracted schemas against reference files (`sensor_msgs-imu.txt`, `pose_with_covariance_stamped.txt`) stored in the `DATA/` directory. This is a strong golden-file testing approach that catches schema extraction regressions immediately.
+
+---
+
+## 6. Prioritized Recommendations
+
+| Priority | Gap | Criticality | Effort |
+|----------|-----|-------------|--------|
+| 1 | Test `publish_aggregated_messages()` with real messages in buffer | 9/10 | Medium |
+| 2 | Test `decompress_zstd()` error paths (corrupt data) | 8/10 | Low |
+| 3 | Test `MessageStripper::strip()` with unsupported type throws | 8/10 | Low |
+| 4 | Test `BridgeServer::initialize()` with invalid publish_rate | 6/10 | Low |
+| 5 | Test `BridgeServer::initialize()` double-call idempotency | 7/10 | Low |
+| 6 | Test empty client_id from middleware is dropped | 6/10 | Low |
+| 7 | Thread safety test for GenericSubscriptionManager | 6/10 | Low |
+| 8 | Thread safety test for SchemaExtractor cache | 5/10 | Low |
+
+Items 2-8 are low-effort additions (each is 5-20 lines of test code). Item 1 requires more design work to inject messages into the buffer and then trigger the publish timer, but it would cover the most critical untested logic in the project.</result>
+<usage><total_tokens>131023</total_tokens><tool_uses>33</tool_uses><duration_ms>132797</duration_ms></usage>
+</task-notification>
+Full transcript available at: REDACTED.output
+
+---
+
+<task-notification>
+<task-id>a1bc8129b885831d3</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<status>completed</status>
+<summary>Agent "Full project code review" completed</summary>
+<result>Now I have a comprehensive understanding of the entire codebase. Let me compile the review.
+
+---
+
+# Comprehensive Code Review: pj_ros_bridge
+
+## Executive Summary
+
+This is a well-structured C++ ROS2 project with clear architecture, good separation of concerns, and strong attention to thread safety. The code is well-documented, consistently follows the project's naming conventions, and has excellent test coverage (150 tests across 10 test files). The codebase shows evidence of iterative improvement -- several past bugs have been identified, fixed, and documented with regression tests.
+
+That said, there are a handful of real issues that range from a potential data corruption bug in the serializer to thread-safety subtleties in the bridge server. Below I categorize findings by severity.
+
+---
+
+## CRITICAL Issues (Must Fix)
+
+### C1. `SchemaExtractor`: Recursive lock attempt on `shared_mutex` -- deadlock risk
+
+**File:** `/home/davide/ws_plotjuggler/src/pj_ros_bridge/src/schema_extractor.cpp`, lines 82-128
+
+The method `build_message_definition_recursive` is called from `get_message_definition` while no lock is held. However, inside `build_message_definition_recursive` (which is a `const` method), it acquires a `shared_lock` on `cache_mutex_` (line 90) to check the Level 2 cache, then acquires a `unique_lock` on `cache_mutex_` (line 125) to write to the cache if there's a miss. The method then calls itself recursively (line 214) while no lock is held, so the recursive call will again attempt to acquire locks.
+
+This is safe for `std::shared_mutex` because each lock acquisition and release is scoped. However, the real problem is a **TOCTOU race on the Level 2 cache**: two threads calling `get_message_definition` for the same type simultaneously could both see a cache miss at line 48 (Level 1) and then both proceed to `build_message_definition_recursive`. Inside, both could see a Level 2 cache miss at line 93-95, both read the file, and both write to the cache. The result is merely redundant work (not corruption), because `msg_file_cache_[full_type] = msg_content` is an assignment, and both threads write the same content.
+
+**However**, the actual concern is different: the `msg_content.empty()` check at line 98 is used as a cache-miss indicator. If a `.msg` file legitimately contains no content (empty file), this would cause an infinite loop of re-reading and re-caching the empty string. This is an edge case but worth defending against.
+
+**Recommendation:** Use a sentinel or `std::optional` instead of checking `empty()`, or guard the entire `build_message_definition_recursive` method within the `get_message_definition` unique lock.
+
+### C2. `publish_aggregated_messages`: Rate-limiting uses representative client's `last_sent_times_` but copies to other clients after sending
+
+**File:** `/home/davide/ws_plotjuggler/src/pj_ros_bridge/src/bridge_server.cpp`, lines 677-746
+
+The subscription grouping logic hashes rate as `int(rate_hz * 1000)`. For the rate-limiting path, it uses the first client in the group as the "representative" and filters messages based on that client's `last_sent_times_`. Then at line 738, it copies the representative's times to all other clients in the group.
+
+The problem: `rep_last_sent` is a reference to `last_sent_times_[client_ids.front()]`. If `client_ids.front()` is a paused client (line 730-731 checks and skips), the representative's `last_sent_times_` are still updated (lines 706-715) even though no data was actually sent to that client. When the client later resumes, its `last_sent_times_` will reflect messages that were never delivered, causing those messages to be rate-limited away.
+
+Additionally, if ALL clients in a group are paused, the serializer still runs for all messages (line 698-715), the representative's `last_sent_times_` are still updated, but `any_sent` remains false. The messages are serialized and compressed for nothing, and `last_sent_times_` advance even though nothing was sent.
+
+**Recommendation:** Check if the representative client is paused before using it for rate filtering, or compute rate filtering separately from the paused check. Alternatively, skip the entire group if all clients in it are paused.
+
+---
+
+## IMPORTANT Issues (Should Fix)
+
+### I1. `protocol_constants.hpp`: `static constexpr const char*` in header causes ODR concerns
+
+**File:** `/home/davide/ws_plotjuggler/src/pj_ros_bridge/include/pj_ros_bridge/protocol_constants.hpp`, line 37
+
+```cpp
+static constexpr const char* kSchemaEncodingRos2Msg = "ros2msg";
+```
+
+In C++17, `static constexpr` at namespace scope has internal linkage. Every translation unit that includes this header gets its own copy of the pointer. While this is not strictly a bug (all copies point to the same string literal due to string deduplication on most platforms), it means `kSchemaEncodingRos2Msg` cannot be reliably compared by pointer address across translation units, and each TU wastes a pointer-sized slot. The integer constants (`kProtocolVersion`, `kBinaryFrameMagic`, `kBinaryHeaderSize`) have the same issue but are harmless for integers.
+
+More importantly, `static` at namespace scope in a header is unusual and would be flagged by many linters. The idiomatic C++17 approach is `inline constexpr`.
+
+**Recommendation:** Change to:
+```cpp
+inline constexpr int kProtocolVersion = 1;
+inline constexpr uint32_t kBinaryFrameMagic = 0x42524A50;
+inline constexpr size_t kBinaryHeaderSize = 16;
+inline constexpr const char* kSchemaEncodingRos2Msg = "ros2msg";
+```
+
+### I2. `WebSocketMiddleware::receive_request` has a subtle shutdown race
+
+**File:** `/home/davide/ws_plotjuggler/src/pj_ros_bridge/src/middleware/websocket_middleware.cpp`, lines 181-202
+
+The method checks `initialized_` under `state_mutex_` (line 183-187), then releases it, then waits on `queue_cv_` under `queue_mutex_` (lines 189-194). If `shutdown()` is called between the `state_mutex_` release and the `queue_cv_` wait, the `notify_all()` at line 157 could fire before this thread enters the wait, causing the thread to block indefinitely on a dead server.
+
+In practice, the 10ms timeout at `kReceiveTimeoutMs` limits the impact -- the thread will wake up after 10ms, try again, see `initialized_ == false`, and return. So this is not a deadlock, but it introduces up to 10ms of shutdown latency.
+
+**Recommendation:** Consider checking `initialized_` inside the `wait_for` predicate (after acquiring `queue_mutex_`) to allow immediate exit on shutdown, or use a dedicated `shutting_down_` flag that is set atomically.
+
+### I3. `BridgeServer::cleanup_session` acquires `cleanup_mutex_` then `last_sent_mutex_` -- lock ordering not documented
+
+**File:** `/home/davide/ws_plotjuggler/src/pj_ros_bridge/src/bridge_server.cpp`, lines 591-623
+
+`cleanup_session` acquires `cleanup_mutex_` (line 592) then `last_sent_mutex_` (line 616). `publish_aggregated_messages` acquires `last_sent_mutex_` (line 675) without `cleanup_mutex_`. These two methods can run concurrently (publish timer vs. disconnect callback). While there is no AB/BA deadlock here (cleanup takes A then B; publish only takes B), the relationship between `cleanup_mutex_`, `last_sent_mutex_`, and `stats_mutex_` should be documented to prevent future regressions.
+
+Furthermore, `publish_aggregated_messages` calls `session_manager_->get_subscriptions()` and `session_manager_->is_paused()` while holding `last_sent_mutex_`. Those SessionManager methods each acquire `SessionManager::mutex_`. If `cleanup_session` (which holds `cleanup_mutex_`) calls `session_manager_->remove_session()` (which acquires `SessionManager::mutex_`), the lock ordering is: `cleanup_mutex_ -> SessionManager::mutex_ -> last_sent_mutex_`. In `publish_aggregated_messages`, the ordering is: `last_sent_mutex_ -> SessionManager::mutex_`. This is an inversion risk.
+
+**Recommendation:** Document the lock ordering hierarchy. Consider acquiring `last_sent_mutex_` only for the brief write operations, not for the entire publish loop.
+
+### I4. `schema_extractor.cpp`: Constant definitions (e.g., `uint8 SOME_CONST = 42`) not recognized as non-type lines
+
+**File:** `/home/davide/ws_plotjuggler/src/pj_ros_bridge/src/schema_extractor.cpp`, lines 145-198
+
+The `.msg` file parser checks if a line's first word is a builtin type or contains a `/`. Lines like `uint8 INT8 = 1` have `uint8` as the first word, which is recognized as a builtin. However, lines with constant definitions of complex types like `MyType MY_CONST = 5` would be parsed as nested types. This is a very unlikely edge case in standard ROS2 messages, but the parser does not handle the `= value` syntax for constant definitions of non-builtin types.
+
+Also, bounded strings like `string<=256 field_name` would fail the builtin check because `first_word` would be `string<=256`, not `string`. Similarly, bounded sequences like `float32[<=100]` would not be properly stripped of their bound notation.
+
+**Recommendation:** Strip bounded type annotations before the builtin check. Check for `=` to identify constant definitions.
+
+### I5. Dual license headers create legal ambiguity
+
+**File:** All source files
+
+Every file has both an AGPL-3.0 block header and an Apache 2.0 comment header. These two licenses are incompatible (AGPL is copyleft, Apache is permissive). Having both in the same file without explicit "dual licensing" language creates confusion about which license applies.
+
+**Recommendation:** Remove one of the license headers, or add explicit dual-licensing text (e.g., "Licensed under either AGPL-3.0 or Apache-2.0, at the user's option").
+
+### I6. `main.cpp`: `bridge_server` captured by reference in lambda, but `shared_ptr` could be moved
+
+**File:** `/home/davide/ws_plotjuggler/src/pj_ros_bridge/src/main.cpp`, lines 70-72
+
+```cpp
+auto request_timer = node->create_wall_timer(
+    std::chrono::milliseconds(10),
+    [&bridge_server]() { bridge_server->process_requests(); });
+```
+
+The lambda captures `bridge_server` by reference (`&bridge_server`). This is a `std::shared_ptr<BridgeServer>` on the stack. The timer callback runs on the ROS2 executor, which is in the same thread, so this is safe in practice. However, if the architecture ever changes to multi-threaded execution, this could dangle. More robustly, capture the shared_ptr by value.
+
+**Recommendation:** Capture by value: `[bridge_server]()` instead of `[&bridge_server]()`.
+
+---
+
+## SUGGESTIONS (Nice to Have)
+
+### S1. `MessageBuffer::move_messages` uses `std::move` + `clear()` instead of `std::swap`
+
+**File:** `/home/davide/ws_plotjuggler/src/pj_ros_bridge/src/message_buffer.cpp`, lines 55-60
+
+```cpp
+void MessageBuffer::move_messages(...& out_messages) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  out_messages = std::move(topic_buffers_);
+  topic_buffers_.clear();
+  ...
+}
+```
+
+The CLAUDE.md documentation says this method uses `std::swap()`, but the implementation uses `std::move` then `clear()`. After a `std::move`, the source is in a valid but unspecified state -- calling `clear()` is correct but technically redundant for most standard library implementations. The documentation should match the implementation.
+
+### S2. `GenericSubscriptionManager::subscribe` stores the callback but never uses it on re-subscription
+
+**File:** `/home/davide/ws_plotjuggler/src/pj_ros_bridge/src/generic_subscription_manager.cpp`, lines 40-73
+
+When a topic is already subscribed (line 46-49), the method increments the reference count but ignores the new callback. The existing ROS2 subscription continues to use the original callback. This is the correct behavior for the current design (single callback shared across clients, routing through `MessageBuffer`), but it could be surprising if someone passes a different callback expecting it to be used.
+
+**Recommendation:** Consider asserting or documenting that the callback parameter is ignored on re-subscription.
+
+### S3. `TopicDiscovery` is not thread-safe but used from `BridgeServer` in timer callbacks
+
+**File:** `/home/davide/ws_plotjuggler/src/pj_ros_bridge/include/pj_ros_bridge/topic_discovery.hpp`, line 57
+
+The header documents "Thread safety: Not thread-safe. External synchronization required." However, `BridgeServer::handle_get_topics`, `handle_subscribe`, and `handle_resume` all call `topic_discovery_->discover_topics()` from the `process_requests()` path which runs on a timer. Since `BridgeServer` uses a single-threaded executor, this is safe in practice. But if the executor model changes, this would become a data race.
+
+### S4. `AggregatedMessageSerializer::finalize()` uses `memcpy` for header while `write_le` template exists
+
+**File:** `/home/davide/ws_plotjuggler/src/pj_ros_bridge/src/message_serializer.cpp`, lines 61-106
+
+The `finalize()` method uses raw `memcpy` for the header fields, relying on the platform being little-endian. The rest of the class uses `write_le<T>()` which is endian-safe. For consistency and portability, the header writes should also use the `write_le` helper.
+
+### S5. Missing `#pragma once` vs include guards inconsistency
+
+Most headers use traditional `#ifndef` include guards, but `protocol_constants.hpp` uses `#pragma once`. This is a minor inconsistency.
+
+### S6. `remove_comments_from_schema` drops full-line comments but preserves blank lines
+
+**File:** `/home/davide/ws_plotjuggler/src/pj_ros_bridge/src/schema_extractor.cpp`, lines 239-271
+
+Lines that are entirely comments (like `# This is a comment`) result in `before_comment` being empty and are skipped. But lines that have no `#` at all, including blank lines, are preserved with `output << line << "\n"`. This means blank lines in the original schema are preserved, which is the correct behavior, but the behavior is not documented.
+
+---
+
+## Architecture Assessment
+
+**Strengths:**
+- Clean layered architecture with well-defined component boundaries
+- Middleware abstraction allows future transport replacement
+- Zero-copy message passing through `shared_ptr<SerializedMessage>` is well-implemented
+- Shared subscription with reference counting is correct and well-tested
+- The shutdown sequence in `WebSocketMiddleware` (clearing callbacks before stopping the server, releasing `state_mutex_` before `stop()`) shows careful thinking about destruction ordering
+- `BridgeServer` destructor calling `middleware_->shutdown()` before member destruction prevents use-after-free
+- The `cleanup_mutex_` for idempotent session cleanup is a good pattern
+
+**Areas for improvement:**
+- The `BridgeServer` class has grown large (~760 lines) with many responsibilities. The `publish_aggregated_messages` method alone is ~120 lines with subscription grouping, rate limiting, serialization, compression, and delivery logic. Consider extracting a `MessagePublisher` component.
+- The duplicated message-stripping callback lambda appears in both `handle_subscribe` (lines 283-293) and `handle_resume` (lines 532-542). This should be factored into a private helper method.
+
+---
+
+## Test Quality Assessment
+
+The test suite is comprehensive and well-organized:
+- **150 tests** across 10 test files covering all components
+- Good regression tests (stats inflation, double-decrement on paused disconnect, dangling pointer in serializer)
+- Thread safety tests in `SessionManager` and `MessageBuffer`
+- Real WebSocket integration tests in `test_websocket_middleware.cpp`
+- The `MockMiddleware` class for `BridgeServer` tests is well-designed
+
+**Gap:** There are no tests that exercise `publish_aggregated_messages` with actual messages flowing through. The bridge server tests cannot inject messages into the buffer because the subscription manager requires real ROS2 types. Consider adding a test that manually injects `BufferedMessage` objects into the shared `MessageBuffer` and then triggers the publish timer to verify the full serialization, compression, and per-client delivery path.
+
+---
+
+## Naming Convention Compliance
+
+The codebase adheres well to the `.clang-tidy` naming rules:
+- Classes: `CamelCase` -- all correct
+- Methods: `lower_case` -- all correct
+- Private members: trailing `_` -- all correct
+- Constants: `kCamelCase` prefix -- all correct (`kMaxMessageAgeNs`, `kReceiveTimeoutMs`, `kBinaryFrameMagic`, etc.)
+- Structs: `CamelCase` with `lower_case` members -- all correct (`TopicInfo`, `BufferedMessage`, `Session`, `IncomingRequest`)
+
+---
+
+## Summary of Recommendations by Priority
+
+| Priority | ID | Summary |
+|----------|-----|---------|
+| Critical | C1 | `SchemaExtractor` empty .msg file causes infinite re-read loop |
+| Critical | C2 | Rate-limiting advances `last_sent_times_` for paused clients |
+| Important | I1 | `static constexpr` in header should be `inline constexpr` |
+| Important | I2 | Shutdown race in `receive_request` (bounded by 10ms timeout) |
+| Important | I3 | Lock ordering between `last_sent_mutex_` and `SessionManager::mutex_` is inverted |
+| Important | I4 | Schema parser does not handle bounded strings/sequences |
+| Important | I5 | Dual license headers (AGPL + Apache) create legal ambiguity |
+| Important | I6 | Lambda captures `shared_ptr` by reference instead of by value in `main.cpp` |
+| Suggestion | S1 | Documentation says `swap()` but implementation uses `move()` |
+| Suggestion | S2 | Callback ignored on re-subscription (document this) |
+| Suggestion | S3 | `TopicDiscovery` thread-safety relies on single-threaded executor |
+| Suggestion | S4 | `finalize()` header uses `memcpy` instead of endian-safe `write_le` |</result>
+<usage><total_tokens>138233</total_tokens><tool_uses>39</tool_uses><duration_ms>157283</duration_ms></usage>
+</task-notification>
+Full transcript available at: REDACTED.output
+
+---
+
+<task-notification>
+<task-id>aee242cbe43f0d0ea</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<status>completed</status>
+<summary>Agent "Comment quality analysis" completed</summary>
+<result>Now I have read all 22 files (12 headers + 10 source files). Let me perform the comprehensive analysis.
+
+---
+
+**Summary**
+
+I analyzed all 12 header files and 10 source files in the pj_ros_bridge project, totaling approximately 2,200 lines of production code. The codebase is generally well-documented at the class and method level, with consistent Doxygen-style documentation on public interfaces. However, I found several issues spanning factual inaccuracy, contradictory license headers, missing documentation for non-obvious logic, and a few comments that have drifted from the actual implementation.
+
+---
+
+**Critical Issues**
+
+1. **Dual/contradictory license headers across nearly all files**
+   - Location: Every file except `/home/davide/ws_plotjuggler/src/pj_ros_bridge/include/pj_ros_bridge/session_manager.hpp`, `/home/davide/ws_plotjuggler/src/pj_ros_bridge/include/pj_ros_bridge/protocol_constants.hpp`, `/home/davide/ws_plotjuggler/src/pj_ros_bridge/include/pj_ros_bridge/message_serializer.hpp`, `/home/davide/ws_plotjuggler/src/pj_ros_bridge/src/session_manager.cpp`, and `/home/davide/ws_plotjuggler/src/pj_ros_bridge/src/main.cpp` (those have only the AGPL header).
+   - Issue: Most files contain **both** an AGPL-3.0 block license header (lines 1-18) **and** an Apache 2.0 block license header (lines 20-30). These two licenses are legally incompatible -- AGPL-3.0 is copyleft while Apache 2.0 is permissive. Having both in the same file is confusing and potentially creates legal ambiguity. The CHANGELOG mentions the project was changed to AGPL-3.0, which strongly suggests the Apache 2.0 blocks are leftover artifacts that were never removed.
+   - Suggestion: Remove all Apache 2.0 license blocks from every file. The project is AGPL-3.0 per the CHANGELOG and the primary header block. The residual Apache blocks are comment rot from a license migration.
+
+2. **`move_messages()` documentation claims `std::swap()` but implementation uses `std::move()`**
+   - Location: `/home/davide/ws_plotjuggler/src/pj_ros_bridge/include/pj_ros_bridge/message_buffer.hpp` lines 86-96 and `/home/davide/ws_plotjuggler/src/pj_ros_bridge/src/message_buffer.cpp` lines 55-60
+   - Issue: The header comment for `move_messages()` says "zero-copy via std::swap" and the class-level comment says "Move semantics: Buffer ownership transferred via std::swap() in move_messages()". However, the actual implementation on line 57 of the .cpp file is:
+     ```cpp
+     out_messages = std::move(topic_buffers_);
+     topic_buffers_.clear();
+     ```
+     This is `std::move` assignment, not `std::swap`. The distinction matters: `std::swap` would exchange the two containers (placing whatever was in `out_messages` into `topic_buffers_`), while `std::move` transfers `topic_buffers_` into `out_messages` and leaves `topic_buffers_` in a moved-from state (which is then explicitly cleared). The CLAUDE.md also repeatedly references `std::swap()` for this operation.
+   - Suggestion: Update all comments (header lines 61, 86-88) and CLAUDE.md to say `std::move` assignment instead of `std::swap()`. The current code is correct in behavior, but the documentation is factually wrong about the mechanism used.
+
+3. **`publish_data()` comment says "Currently unused" but the method still exists in the interface and implementation**
+   - Location: `/home/davide/ws_plotjuggler/src/pj_ros_bridge/include/pj_ros_bridge/middleware/middleware_interface.hpp` lines 88-97
+   - Issue: The comment says "Currently unused -- per-client delivery uses send_binary() instead. Retained in the interface for future broadcast scenarios." This is accurate regarding usage, but the comment creates a maintenance risk. A future developer may reasonably question whether this dead code should be kept. More importantly, the comment does not document what distinguishes `publish_data()` from `send_binary()` in terms of behavior (broadcast vs. unicast). Someone reading only the method signatures might not understand why both exist.
+   - Suggestion: Either remove the method entirely if it truly has no callers (dead code), or rewrite the comment to clearly state: "Broadcasts binary data to ALL connected clients, unlike send_binary() which targets a single client. Currently no callers exist; retained for anticipated broadcast use cases." The current comment is borderline -- it is honest about being unused, which is good, but the "retained for future scenarios" pattern tends to accumulate dead code indefinitely.
+
+4. **`parse_message_type()` output parameter names are misleading**
+   - Location: `/home/davide/ws_plotjuggler/src/pj_ros_bridge/include/pj_ros_bridge/schema_extractor.hpp` lines 72-83 and `/home/davide/ws_plotjuggler/src/pj_ros_bridge/src/schema_extractor.cpp` lines 220-237
+   - Issue: The comment says the function "Converts 'pkg_name/msg/MsgType' to library name and type name for use with rosidl type support lookup." The output parameters are named `library_name` and `type_name`. However, looking at the implementation, `library_name` receives the package name (e.g., "sensor_msgs"), and the function is only called from `get_message_definition()` where the results are passed to `build_message_definition_recursive()` as `package_name` and `type_name`. The mention of "rosidl type support lookup" is entirely wrong -- this function is used for file-based .msg reading, not runtime type support introspection. This comment appears to be a fossil from an earlier design that used runtime introspection.
+   - Suggestion: Rename `library_name` to `package_name` in both the declaration and definition. Rewrite the comment to: "Parses 'pkg_name/msg/MsgType' into the package name and type name components used for .msg file lookup."
+
+---
+
+**Improvement Opportunities**
+
+5. **`time_utils.hpp` -- No documentation at all for the only function**
+   - Location: `/home/davide/ws_plotjuggler/src/pj_ros_bridge/include/pj_ros_bridge/time_utils.hpp` lines 40-44
+   - Current state: The `get_current_time_ns()` function has no documentation. It uses `system_clock`, which means it returns wall-clock time (affected by NTP adjustments), not monotonic time. This is a deliberate choice (timestamps need to be meaningful across processes), but the choice is non-obvious and undocumented.
+   - Suggestion: Add a brief comment: "Returns wall-clock time in nanoseconds since epoch. Uses system_clock (not steady_clock) so timestamps are meaningful across processes, but may be affected by system clock adjustments."
+
+6. **`MessageBuffer::cleanup_old_messages()` -- assumes message ordering but does not document the assumption**
+   - Location: `/home/davide/ws_plotjuggler/src/pj_ros_bridge/src/message_buffer.cpp` lines 79-104
+   - Current state: The code has a comment "Messages are ordered by time, so we can stop here" (line 91). This is a critical correctness assumption -- if messages ever arrive out of order (which can happen with system_clock adjustments or multi-threaded publishers), the cleanup would leave stale messages in the buffer. The assumption is not documented at the class level or in `add_message()`.
+   - Suggestion: Add a precondition note to `add_message()` in the header: "Assumes messages are added in chronological order per topic. Out-of-order timestamps may cause cleanup_old_messages() to retain stale entries."
+
+7. **`GenericSubscriptionManager::subscribe()` -- callback replacement behavior undocumented**
+   - Location: `/home/davide/ws_plotjuggler/src/pj_ros_bridge/include/pj_ros_bridge/generic_subscription_manager.hpp` lines 65-75 and `/home/davide/ws_plotjuggler/src/pj_ros_bridge/src/generic_subscription_manager.cpp` lines 40-73
+   - Current state: When a topic is already subscribed, the method increments the reference count but **silently discards the new callback**. The comment says "If already subscribed, increments reference count" but does not mention that the callback parameter is ignored in this case. This is a potential source of bugs: if client A subscribes with callback_A and client B subscribes with callback_B, only callback_A will ever fire, yet the reference count is 2.
+   - Suggestion: Add to the comment: "Note: If already subscribed, the callback parameter is ignored -- the original callback continues to be used. All clients sharing this subscription receive messages through the same callback."
+
+8. **`BridgeServer::publish_aggregated_messages()` -- complex rate-limiting logic has minimal inline documentation**
+   - Location: `/home/davide/ws_plotjuggler/src/pj_ros_bridge/src/bridge_server.cpp` lines 634-757
+   - Current state: This is the most complex method in the codebase (~120 lines). The subscription grouping strategy and rate-limiting logic using milli-Hz as integers is documented at the top of the grouping block (lines 651-653), which is good. However, the rate-limiting interval calculation on line 705 (`1'000'000'000'000ULL / rate_mhz`) involves a 10^12 constant that is not explained.
+   - Suggestion: Add an inline comment: "rate_mhz is milli-Hz (e.g., 10 Hz = 10000 mHz). Interval = 1e9 ns/s * 1e3 mHz/Hz / rate_mhz = 1e12 / rate_mhz nanoseconds."
+
+9. **`SchemaExtractor` -- `std_msgs/Header` reordering logic lacks rationale**
+   - Location: `/home/davide/ws_plotjuggler/src/pj_ros_bridge/src/schema_extractor.cpp` lines 200-206
+   - Current state: The comment "std_msgs/Header always goes last" does not explain **why** Header must be moved to the end. This is a critical compatibility detail -- it matches the rosbag2 MCAP storage format -- but without that context, a future developer might remove this code as an unnecessary quirk.
+   - Suggestion: Expand to: "std_msgs/Header always goes last to match the rosbag2 MCAP message definition format, which places the Header sub-definition after all other nested types."
+
+10. **`Session::subscribed_topics` member comment says "Set of topic names" in the getter but the type is `unordered_map<string, double>`**
+    - Location: `/home/davide/ws_plotjuggler/src/pj_ros_bridge/include/pj_ros_bridge/session_manager.hpp` lines 97-100
+    - Current state: The `get_subscriptions()` return documentation says "Set of subscribed topic names (empty if session doesn't exist)" but it actually returns `std::unordered_map<std::string, double>`, which is a map of topic name to max rate in Hz.
+    - Suggestion: Change to "Map of subscribed topic names to their max rate in Hz (0.0 = unlimited). Empty if session doesn't exist."
+
+11. **`MessageStripper` class documentation says "[0] sentinel" but does not explain what the sentinel means to the consumer**
+    - Location: `/home/davide/ws_plotjuggler/src/pj_ros_bridge/include/pj_ros_bridge/message_stripper.hpp` lines 40-54
+    - Current state: "Stripped fields are replaced with a single sentinel byte [0] to indicate the field was intentionally removed." This tells the reader what the sentinel is, but not how a consumer should interpret it. Does the client need to know? Will the CDR deserialization still work? Is it a valid CDR encoding of a single-element array?
+    - Suggestion: Add: "The sentinel is a valid CDR-encoded single-element array, so the message remains deserializable. Clients should check the data length to detect stripped fields."
+
+12. **`WebSocketMiddleware::shutdown()` -- excellent deadlock-avoidance comment, but missing one detail**
+    - Location: `/home/davide/ws_plotjuggler/src/pj_ros_bridge/src/middleware/websocket_middleware.cpp` lines 134-178
+    - Current state: The shutdown method has some of the best comments in the codebase, clearly explaining the deadlock avoidance strategy (lines 147-153 and 159-161). However, the comment on line 156 says "Wake any thread blocked in receive_request()" but does not mention that `receive_request()` will then return false because `initialized_` has already been set to false. This linkage is important for understanding the shutdown sequence.
+    - Suggestion: Expand to: "Wake any thread blocked in receive_request(). The woken thread will see initialized_==false and return false."
+
+13. **`BridgeServer` constructor documentation does not mention `strip_large_messages` parameter**
+    - Location: `/home/davide/ws_plotjuggler/src/pj_ros_bridge/include/pj_ros_bridge/bridge_server.hpp` lines 51-61
+    - Current state: The Doxygen `@param` list documents `node`, `middleware`, `port`, `session_timeout`, and `publish_rate`, but omits `strip_large_messages` even though it is present in the constructor signature.
+    - Suggestion: Add `@param strip_large_messages Whether to strip large array fields from known message types (default: true)`.
+
+14. **`schema_extractor.hpp` -- `remove_comments_from_schema()` free function is completely undocumented**
+    - Location: `/home/davide/ws_plotjuggler/src/pj_ros_bridge/include/pj_ros_bridge/schema_extractor.hpp` line 112
+    - Current state: This is a public free function declared in the header with no documentation at all.
+    - Suggestion: Add: "Removes comment lines (starting with #) from a ROS2 .msg schema definition. Lines with trailing comments have the comment portion stripped; pure comment lines are removed entirely."
+
+---
+
+**Recommended Removals**
+
+15. **Redundant inline comments in `message_buffer.cpp`**
+    - Location: `/home/davide/ws_plotjuggler/src/pj_ros_bridge/src/message_buffer.cpp` lines 44-47
+    - Rationale: The comments "Cleanup old messages first" (line 44) and "Add the new message" (line 47) restate what the immediately following function call and variable declaration already make obvious. They add no value.
+
+16. **Redundant inline comments in `schema_extractor.cpp`**
+    - Location: `/home/davide/ws_plotjuggler/src/pj_ros_bridge/src/schema_extractor.cpp` lines 45 ("Level 1 cache: Check if complete definition is cached"), 54 ("Cache miss - build the definition"), 73 ("Store in cache"), 87 ("Level 2 cache: Check if .msg file content is cached"), 97 ("Cache miss - read the .msg file"), 115 ("Read entire file into string"), 123 ("Store in cache")
+    - Rationale: While individually each of these is minor, the "Level 1 / Level 2 cache" annotations (lines 45 and 87) are actually valuable because they connect back to the class-level documentation that describes two-level caching. The others ("Cache miss", "Store in cache", "Read entire file into string") are restatements of obvious code and could be removed. Keep the Level 1/Level 2 annotations.
+
+17. **Redundant comments in `session_manager.cpp`**
+    - Location: `/home/davide/ws_plotjuggler/src/pj_ros_bridge/src/session_manager.cpp` lines 31 ("Check if session already exists") and 36 ("Create new session")
+    - Rationale: These restate the immediately following if-statement and variable declaration. The code is self-explanatory.
+
+18. **Redundant comment in `websocket_middleware.cpp`**
+    - Location: `/home/davide/ws_plotjuggler/src/pj_ros_bridge/src/middleware/websocket_middleware.cpp` line 65 ("Store client connection"), line 77 ("Notify connect callback"), line 88 ("Notify disconnect callback"), line 98 ("Remove client connection"), line 106 ("Text message = API request, push to queue")
+    - Rationale: Lines 65, 77, 88, and 98 are section markers that restate the obvious from the code structure. Line 106 however is genuinely useful -- it clarifies the text vs. binary frame distinction which is a protocol design decision. Keep line 106 and line 117 ("Binary messages from clients are ignored (server-to-client only)").
+
+---
+
+**Positive Findings**
+
+- **`WebSocketMiddleware::shutdown()`** (`/home/davide/ws_plotjuggler/src/pj_ros_bridge/src/middleware/websocket_middleware.cpp` lines 134-178): The deadlock-avoidance comments explaining why the server is moved out before stopping, and why callbacks are cleared before stopping, are excellent examples of "why" documentation that prevents future regressions.
+
+- **`MiddlewareInterface` class documentation** (`/home/davide/ws_plotjuggler/src/pj_ros_bridge/include/pj_ros_bridge/middleware/middleware_interface.hpp` lines 44-52): Clear description of the abstraction's purpose, connection model, and thread safety requirements.
+
+- **`MessageBuffer` class documentation** (`/home/davide/ws_plotjuggler/src/pj_ros_bridge/include/pj_ros_bridge/message_buffer.hpp` lines 57-67): The "Design principles" list clearly communicates the key design decisions (zero-copy, move semantics, auto-cleanup, thread-safe).
+
+- **`AggregatedMessageSerializer` class documentation** (`/home/davide/ws_plotjuggler/src/pj_ros_bridge/include/pj_ros_bridge/message_serializer.hpp` lines 30-47): The binary format specification is precise and matches the implementation exactly. The design principles list is concise and accurate.
+
+- **`BridgeServer::~BridgeServer()` comment** (`/home/davide/ws_plotjuggler/src/pj_ros_bridge/src/bridge_server.cpp` lines 48-50): Clearly explains the subtle reason for shutting down middleware in the destructor, preventing use-after-free from disconnect callbacks.
+
+- **`BridgeServer::cleanup_session()` idempotency guard** (`/home/davide/ws_plotjuggler/src/pj_ros_bridge/src/bridge_server.cpp` lines 591-618): The comment "Unsubscribe from all topics (only if not paused - paused clients already decremented ref counts)" on line 603 documents a critical invariant that prevents double-decrement of reference counts. This is exactly the kind of comment that prevents bugs.
+
+- **Subscription grouping rationale** (`/home/davide/ws_plotjuggler/src/pj_ros_bridge/src/bridge_server.cpp` lines 651-653): Good explanation of why milli-Hz integers are used instead of float keys, preventing float equality comparison issues.
+
+- **`cleanup_old_messages()` precondition** (`/home/davide/ws_plotjuggler/src/pj_ros_bridge/include/pj_ros_bridge/message_buffer.hpp` line 125): "Must be called with mutex_ locked" is a critical thread-safety precondition that prevents misuse.</result>
+<usage><total_tokens>75948</total_tokens><tool_uses>24</tool_uses><duration_ms>134741</duration_ms></usage>
+</task-notification>
+Full transcript available at: REDACTED.output
+
+---
+
+<task-notification>
+<task-id>a67c7b85b62f160fa</task-id>
+<tool-use-id>toolu_01Qu3SCnmRsyTBoRRkspfqDy</tool-use-id>
+<status>completed</status>
+<summary>Agent "Silent failure analysis" completed</summary>
+<result>I have now read every source file in the project. Let me compile my complete findings.
+
+---
+
+# Error Handling Audit Report: pj_ros_bridge
+
+## Summary
+
+After a thorough review of all 12 header files and 10 source files, I identified **14 distinct error handling defects** across the codebase. The most dangerous issues involve swallowed exceptions that destroy diagnostic information, unprotected callbacks on a hot path that can crash the server, and silent data corruption from unchecked integer truncation. Several of these will produce scenarios that are extremely difficult to debug in production.
+
+---
+
+## FINDING 1 -- CRITICAL: Swallowed Exception in GenericSubscriptionManager::subscribe
+
+**Location:** `/home/davide/ws_plotjuggler/src/pj_ros_bridge/src/generic_subscription_manager.cpp`, lines 70-72
+
+**Issue:** The catch block catches `const std::exception&` but discards the exception entirely -- no logging, no context, nothing. The caller (`BridgeServer::handle_subscribe`) sees only a boolean `false` and produces a generic "Subscription manager failed to create subscription" message to the user.
+
+```cpp
+  } catch (const std::exception&) {
+    return false;
+  }
+```
+
+**Hidden Errors:** This catch block will silently swallow:
+- `rclcpp::exceptions::RCLError` from DDS layer failures (e.g., permissions, resource limits)
+- `std::bad_alloc` from memory exhaustion
+- `std::invalid_argument` from malformed topic types
+- Any ROS2-specific exception from middleware layer failures
+
+**User Impact:** When a ROS2 subscription fails, the user sees "Subscription manager failed to create subscription" with zero indication of *why*. Was it a permission error? A malformed type? A DDS resource limit? The user has no way to know. The developer has no way to know either, because nothing is logged.
+
+**Recommendation:** Log the exception with full context before returning false.
+
+```cpp
+  } catch (const std::exception& e) {
+    RCLCPP_ERROR(
+        node_->get_logger(),
+        "Failed to create generic subscription for topic '%s' (type '%s'): %s",
+        topic_name.c_str(), topic_type.c_str(), e.what());
+    return false;
+  }
+```
+
+---
+
+## FINDING 2 -- CRITICAL: Swallowed Exception in TopicDiscovery::refresh
+
+**Location:** `/home/davide/ws_plotjuggler/src/pj_ros_bridge/src/topic_discovery.cpp`, lines 69-71
+
+**Issue:** Identical pattern to Finding 1. The exception is caught and discarded entirely.
+
+```cpp
+  } catch (const std::exception&) {
+    return false;
+  }
+```
+
+**Hidden Errors:** This will silently swallow:
+- ROS2 node errors (node destroyed, context shutdown)
+- DDS discovery failures
+- Any networking or middleware exception
+
+**User Impact:** If topic discovery fails, the caller has no diagnostic information. Since `discover_topics()` is called on every `get_topics` request, repeated silent failures here mean the client sees an empty topic list with no explanation.
+
+**Recommendation:**
+
+```cpp
+  } catch (const std::exception& e) {
+    RCLCPP_ERROR(
+        node_->get_logger(),
+        "Topic discovery refresh failed: %s", e.what());
+    return false;
+  }
+```
+
+---
+
+## FINDING 3 -- CRITICAL: Unprotected MessageStripper::strip Call in ROS2 Subscription Callback
+
+**Location:** `/home/davide/ws_plotjuggler/src/pj_ros_bridge/src/bridge_server.cpp`, lines 283-293 and lines 532-541
+
+**Issue:** The lambda callback passed to `GenericSubscriptionManager::subscribe` calls `MessageStripper::strip()` without any try-catch. The `strip()` method performs CDR deserialization and re-serialization, which can throw `std::runtime_error` on corrupted or unexpected CDR data. This callback runs on the ROS2 subscription callback thread. An uncaught exception from the ROS2 executor callback will terminate the process.
+
+```cpp
+    auto callback = [this, topic_type](
+                        const std::string& topic, const std::shared_ptr<rclcpp::SerializedMessage>& msg,
+                        uint64_t receive_time_ns) {
+      if (strip_large_messages_ && MessageStripper::should_strip(topic_type)) {
+        auto stripped = MessageStripper::strip(topic_type, *msg);  // CAN THROW - UNPROTECTED
+        auto stripped_ptr = std::make_shared<rclcpp::SerializedMessage>(std::move(stripped));
+        message_buffer_->add_message(topic, receive_time_ns, stripped_ptr);
+      } else {
+        message_buffer_->add_message(topic, receive_time_ns, msg);
+      }
+    };
+```
+
+**Hidden Errors:**
+- `std::runtime_error` from CDR deserialization failure (corrupted message, version mismatch)
+- `std::runtime_error` from CDR serialization failure on output
+- `std::bad_alloc` during message copy/move
+
+**User Impact:** A single corrupted ROS2 message on any strippable topic type will crash the entire bridge server. This is especially dangerous because the server processes many different topics and message corruption is not uncommon in real robotics systems.
+
+**Recommendation:** Wrap the strip call in a try-catch, log the failure, and fall through to buffer the original unstripped message as a graceful degradation.
+
+```cpp
+    auto callback = [this, topic_type](
+                        const std::string& topic, const std::shared_ptr<rclcpp::SerializedMessage>& msg,
+                        uint64_t receive_time_ns) {
+      if (strip_large_messages_ && MessageStripper::should_strip(topic_type)) {
+        try {
+          auto stripped = MessageStripper::strip(topic_type, *msg);
+          auto stripped_ptr = std::make_shared<rclcpp::SerializedMessage>(std::move(stripped));
+          message_buffer_->add_message(topic, receive_time_ns, stripped_ptr);
+          return;
+        } catch (const std::exception& e) {
+          RCLCPP_WARN_THROTTLE(
+              node_->get_logger(), *node_->get_clock(), 5000,
+              "Failed to strip message on topic '%s' (type '%s'): %s. "
+              "Forwarding original message.",
+              topic.c_str(), topic_type.c_str(), e.what());
+        }
+      }
+      message_buffer_->add_message(topic, receive_time_ns, msg);
+    };
+```
+
+This applies to **both** instances of this callback -- the one in `handle_subscribe` (line 283) and the one in `handle_resume` (line 532).
+
+---
+
+## FINDING 4 -- CRITICAL: Swallowed Exception in SchemaExtractor Hides File System Errors
+
+**Location:** `/home/davide/ws_plotjuggler/src/pj_ros_bridge/src/schema_extractor.cpp`, lines 101-105
+
+**Issue:** The `ament_index_cpp::get_package_share_directory()` exception is caught and silently converted to a `return false`. No logging. The caller chain eventually returns an empty string from `get_message_definition()`, which then gets treated as a successful-but-empty schema.
+
+```cpp
+    try {
+      package_share_dir = ament_index_cpp::get_package_share_directory(package_name);
+    } catch (const std::exception& e) {
+      return false;  // Package not found -- COMPLETELY SILENT
+    }
+```
+
+Similarly, at lines 110-113, a failed file open is completely silent:
+
+```cpp
+    std::ifstream msg_file(msg_file_path);
+    if (!msg_file.is_open()) {
+      return false;  // Cannot open .msg file -- NO LOGGING
+    }
+```
+
+**Hidden Errors:**
+- Package not installed (most common reason for this to fail)
+- `AMENT_PREFIX_PATH` not set
+- File permissions issues
+- Corrupted ROS2 installation
+
+**User Impact:** When a client subscribes to a topic and schema extraction silently returns empty string, the client gets an empty schema definition. The client has no way to know if this is a valid empty message type or a failed extraction. Debugging this in a production robotics system would be extremely frustrating because there is no log entry pointing to the root cause.
+
+**Recommendation:** Add logging at both failure points in the recursive builder.
+
+```cpp
+    try {
+      package_share_dir = ament_index_cpp::get_package_share_directory(package_name);
+    } catch (const std::exception& e) {
+      // Cannot use RCLCPP_ERROR here (no node), but at minimum propagate the error info.
+      // Consider changing the function signature to return a tl::expected or string error,
+      // or adding a logger/error-string output parameter.
+      return false;
+    }
+```
+
+Note: Since `SchemaExtractor` has no access to a ROS2 logger, the recommendation here is architectural: either pass a logger to `SchemaExtractor`, or change the return type to `tl::expected<std::string, std::string>` so the error reason propagates to the caller (`BridgeServer::handle_subscribe`) which does have a logger and already logs schema extraction failures.
+
+---
+
+## FINDING 5 -- HIGH: Silent Return of Empty String from get_message_definition on Parse Failure
+
+**Location:** `/home/davide/ws_plotjuggler/src/pj_ros_bridge/src/schema_extractor.cpp`, lines 58-59
+
+**Issue:** When `parse_message_type` fails (malformed type string), the function returns an empty string with no indication of what went wrong.
+
+```cpp
+  if (!parse_message_type(message_type, package_name, type_name)) {
+    return "";
+  }
+```
+
+**User Impact:** The caller in `handle_subscribe` does a try-catch around `get_message_definition`, but an empty return is not an exception -- it is treated as success with an empty definition. The client receives an empty schema for a malformed type. If the type string is something like `my_pkg/MyMsg` (missing the `msg/` component), this silently fails without any hint as to why.
+
+**Recommendation:** Either throw an exception on parse failure, or change the return type to `tl::expected<std::string, std::string>`. At minimum, the caller (`handle_subscribe`) should check for empty schema and treat it as an error.
+
+---
+
+## FINDING 6 -- HIGH: Ignored Return Value of send_reply in process_requests
+
+**Location:** `/home/davide/ws_plotjuggler/src/pj_ros_bridge/src/bridge_server.cpp`, line 171
+
+**Issue:** The return value of `middleware_->send_reply()` is ignored. If the WebSocket send fails (client disconnected between receiving the request and sending the reply, or send buffer full), the failure is completely silent.
+
+```cpp
+  middleware_->send_reply(client_id, response_data);  // Return value IGNORED
+  return true;
+```
+
+**User Impact:** The client sends a command (e.g., `subscribe`), the server processes it and creates subscriptions, but the response never reaches the client. The client has no idea whether its subscription succeeded, and the server has no log of the failed delivery. In a robotics system, this could mean the client thinks it is not subscribed when it actually is.
+
+**Recommendation:**
+
+```cpp
+  if (!middleware_->send_reply(client_id, response_data)) {
+    RCLCPP_WARN(
+        node_->get_logger(),
+        "Failed to send reply to client '%s' (client may have disconnected)",
+        client_id.c_str());
+  }
+  return true;
+```
+
+---
+
+## FINDING 7 -- HIGH: Unchecked Integer Truncation in message_serializer.cpp
+
+**Location:** `/home/davide/ws_plotjuggler/src/pj_ros_bridge/src/message_serializer.cpp`, lines 42 and 169
+
+**Issue 7a -- Line 42:** The serialized message size is truncated from `size_t` (64-bit) to `uint32_t` without any overflow check.
+
+```cpp
+  uint32_t msg_size = static_cast<uint32_t>(serialized_msg.size());
+```
+
+If a serialized message exceeds 4 GB (unlikely but possible with very large PointCloud2 or Image messages in robotics), this silently truncates the size, causing the receiver to read a corrupted frame.
+
+**Issue 7b -- Line 169:** Topic name length is truncated from `size_t` to `uint16_t` without an overflow check.
+
+```cpp
+  write_le<uint16_t>(buffer, static_cast<uint16_t>(str.size()));
+```
+
+If a topic name exceeds 65535 bytes (extremely unlikely in practice, but the code has no defense), this silently truncates.
+
+**User Impact:** Data corruption without any error or warning. The deserialization side will read the wrong number of bytes and produce garbage output or crash. The corruption may not manifest immediately but could cause intermittent, hard-to-reproduce failures.
+
+**Recommendation:** Add overflow checks.
+
+```cpp
+  if (serialized_msg.size() > std::numeric_limits<uint32_t>::max()) {
+    RCLCPP_ERROR(/* logger */, "Message too large to serialize: %zu bytes", serialized_msg.size());
+    return;  // or throw
+  }
+  uint32_t msg_size = static_cast<uint32_t>(serialized_msg.size());
+```
+
+Note: Since `AggregatedMessageSerializer` does not hold a logger, this would either require passing one in, or changing `serialize_message` to return a bool/throw on overflow.
+
+---
+
+## FINDING 8 -- HIGH: Unchecked uint32_t Truncation in finalize() for Uncompressed Size
+
+**Location:** `/home/davide/ws_plotjuggler/src/pj_ros_bridge/src/message_serializer.cpp`, lines 70-74
+
+**Issue:** Both `message_count_` and `serialized_data_.size()` are truncated to `uint32_t` without overflow checks.
+
+```cpp
+  uint32_t count = static_cast<uint32_t>(message_count_);
+  // ...
+  uint32_t uncompressed = static_cast<uint32_t>(serialized_data_.size());
+```
+
+If the aggregation cycle collects more than ~4 billion messages (effectively impossible) or more than 4 GB of uncompressed data (plausible with many high-bandwidth topics), the header will contain incorrect values. The receiver relies on the `uncompressed_size` field to allocate the decompression buffer, so a truncated value will cause decompression to fail or produce a buffer overrun.
+
+**User Impact:** Silent data corruption in the binary frame header. The client's decompression step will fail with a confusing ZSTD error or produce truncated output.
+
+**Recommendation:** Add a guard before finalize that checks the payload size fits in uint32_t.
+
+---
+
+## FINDING 9 -- HIGH: Silent Skip of Malformed Topic Entries in handle_unsubscribe
+
+**Location:** `/home/davide/ws_plotjuggler/src/pj_ros_bridge/src/bridge_server.cpp`, lines 400-406
+
+**Issue:** When a topic entry in the unsubscribe request is not a string, it is silently skipped with `continue`.
+
+```cpp
+    if (topic_item.is_string()) {
+      topic_name = topic_item.get<std::string>();
+    } else {
+      continue;  // Skip invalid entries -- SILENT
+    }
+```
+
+**User Impact:** If a client sends `{"command": "unsubscribe", "topics": [42, null, {"name": "foo"}]}`, all three entries are silently ignored. The client receives a "success" response with an empty `removed` array but has no feedback that its input was malformed. The client may believe the unsubscription succeeded when it did not.
+
+**Recommendation:** At minimum, add the invalid entries to a warnings array in the response.
+
+---
+
+## FINDING 10 -- HIGH: Silent Skip of Malformed Topic Entries in handle_subscribe
+
+**Location:** `/home/davide/ws_plotjuggler/src/pj_ros_bridge/src/bridge_server.cpp`, lines 231-244
+
+**Issue:** When parsing the `topics` array, entries that are neither a string nor a valid object are silently ignored. There is no feedback to the client that their request contained malformed entries.
+
+```cpp
+    if (topic.is_string()) {
+      requested_topics[topic.get<std::string>()] = 0.0;
+    } else if (topic.is_object() && topic.contains("name") && topic["name"].is_string()) {
+      // ...
+    }
+    // ELSE: silently ignored -- no feedback
+```
+
+**User Impact:** A client that sends `{"command": "subscribe", "topics": [123, true]}` receives a success response with empty schemas, as if there were zero topics requested. No indication that the input was invalid.
+
+**Recommendation:** Track skipped entries and include them in the response, or return an error for malformed entries.
+
+---
+
+## FINDING 11 -- MEDIUM: receive_request Can Return Stale Data After Shutdown
+
+**Location:** `/home/davide/ws_plotjuggler/src/pj_ros_bridge/src/middleware/websocket_middleware.cpp`, lines 181-202
+
+**Issue:** There is a TOCTOU race between the `initialized_` check (line 184) and the queue wait (line 191-193). If `shutdown()` is called between these two operations, the `initialized_` flag is set to false and `queue_cv_.notify_all()` is called. However, the `wait_for` predicate only checks `!incoming_queue_.empty()`, not `initialized_`. If the queue happens to be non-empty at the moment `shutdown()` wakes the waiter, `receive_request` will return a stale request from the queue even though the middleware is shutting down.
+
+```cpp
+  {
+    std::lock_guard<std::mutex> state_lock(state_mutex_);
+    if (!initialized_) {       // Check 1: initialized
+      return false;
+    }
+  }
+  // ** WINDOW: shutdown() can run here **
+  std::unique_lock<std::mutex> lock(queue_mutex_);
+  if (!queue_cv_.wait_for(
+          lock, std::chrono::milliseconds(kReceiveTimeoutMs),
+          [this]() { return !incoming_queue_.empty(); })) {  // Does NOT check initialized_
+    return false;
+  }
+```
+
+**User Impact:** During shutdown, a request could be dequeued and processed after the middleware has been torn down, potentially causing undefined behavior if the response send path accesses the destroyed server.
+
+**Recommendation:** Add `initialized_` to the wait predicate (requires `state_mutex_` and `queue_mutex_` coordination, or switching to an atomic for `initialized_`).
+
+---
+
+## FINDING 12 -- MEDIUM: No ifstream Error Check After Reading .msg File
+
+**Location:** `/home/davide/ws_plotjuggler/src/pj_ros_bridge/src/schema_extractor.cpp`, lines 117-121
+
+**Issue:** After reading the `.msg` file line by line, there is no check for I/O errors on the `ifstream`. If a read error occurs mid-file (e.g., disk failure, NFS timeout), the partial content is silently cached as if it were the complete file.
+
+```cpp
+    std::ostringstream content_stream;
+    std::string line;
+    while (std::getline(msg_file, line)) {
+      content_stream << line << "\n";
+    }
+    msg_content = content_stream.str();
+    // NO CHECK: msg_file.bad() could be true here
+```
+
+**User Impact:** A partially-read `.msg` file will produce a truncated schema that gets cached permanently (until server restart). The client receives a corrupted schema with no indication of the corruption. Nested types referenced in the truncated portion will be silently missing.
+
+**Recommendation:**
+
+```cpp
+    if (msg_file.bad()) {
+      // I/O error during read -- do not cache partial content
+      return false;
+    }
+```
+
+---
+
+## FINDING 13 -- MEDIUM: Permanent Caching of Empty Schema on Failure
+
+**Location:** `/home/davide/ws_plotjuggler/src/pj_ros_bridge/src/schema_extractor.cpp`, lines 98 and 44-80
+
+**Issue:** When `msg_content` is empty after a cache miss, the code assumes it needs to read from disk. But if the file *exists* and is *empty* (a legitimate edge case for some message types), the empty content gets read, cached, and the `if (msg_content.empty())` check on line 98 will succeed on subsequent calls, causing the file to be re-read every time (no caching for empty files).
+
+More critically, if `build_message_definition_recursive` returns false, `get_message_definition` returns an empty string on line 69. However, this empty result is NOT cached in `definition_cache_`. This means that every subsequent call for the same failed type will repeat the entire (failing) recursive build. While not strictly a silent failure, it is a performance issue that could cause repeated I/O errors and log spam (once logging is added per Finding 4).
+
+**User Impact:** Repeated failed schema extractions cause unnecessary file system accesses on every subscribe request for the same failing type.
+
+**Recommendation:** Cache negative results. Store a sentinel value (or use `std::optional`) in the cache to indicate "this type's schema extraction has already failed."
+
+---
+
+## FINDING 14 -- MEDIUM: publish_aggregated_messages Catch Block Is Too Broad
+
+**Location:** `/home/davide/ws_plotjuggler/src/pj_ros_bridge/src/bridge_server.cpp`, lines 754-756
+
+**Issue:** The entire `publish_aggregated_messages()` function body is wrapped in a single `try-catch(const std::exception&)`. This catches everything from ZSTD compression failures to bad_alloc to any bug in the serialization logic.
+
+```cpp
+  } catch (const std::exception& e) {
+    RCLCPP_ERROR(node_->get_logger(), "Error publishing aggregated messages: %s", e.what());
+  }
+```
+
+While this does log the error (which is good), it then silently continues to the next publish cycle. For transient errors (like a single ZSTD failure), this is acceptable. But for persistent errors (like a `std::bad_alloc` indicating the system is out of memory), silently retrying every 20ms (50 Hz) will flood the log and never recover.
+
+**User Impact:** Persistent serialization/compression failures result in log flooding at 50 Hz with no escalation or backoff. The client receives no data but has no indication why. There is also no distinction between "recoverable" errors (skip this cycle) and "fatal" errors (shut down gracefully).
+
+**Recommendation:** At minimum, add throttled logging. Better yet, track consecutive failures and escalate.
+
+```cpp
+  } catch (const std::bad_alloc& e) {
+    RCLCPP_FATAL(node_->get_logger(), "Out of memory during message publishing: %s", e.what());
+    throw;  // Let this propagate -- the system cannot recover
+  } catch (const std::exception& e) {
+    RCLCPP_ERROR_THROTTLE(
+        node_->get_logger(), *node_->get_clock(), 5000,
+        "Error publishing aggregated messages: %s", e.what());
+  }
+```
+
+---
+
+## Additional Observations (Not Defects)
+
+**Well-handled areas:**
+- The `BridgeServer::process_requests()` method at lines 134-167 does a good job of catching both `json::exception` (specific) and `std::exception` (fallback) separately, and sends meaningful error responses to the client.
+- The `cleanup_session` method properly uses a mutex and an idempotency guard to handle concurrent disconnect and timeout calls.
+- The `WebSocketMiddleware::shutdown()` method carefully avoids deadlocks by moving the server out before stopping it, and clearing callbacks first.
+- The `BridgeServer` destructor correctly shuts down middleware before members are destroyed.
+
+**Design concern worth noting:** The `SchemaExtractor` class has no access to any logging facility. This forces every error inside it to be either silent or communicated through return values. Since the return value is a plain `std::string` (empty = failure), there is no way to propagate error details. This architectural limitation is the root cause of Findings 4 and 5. A refactor to use `tl::expected<std::string, std::string>` for the return type would allow rich error propagation without adding a logger dependency.
+
+---
+
+## Priority Summary
+
+| Priority | Finding | File | Line(s) | Issue |
+|----------|---------|------|---------|-------|
+| CRITICAL | 1 | generic_subscription_manager.cpp | 70-72 | Swallowed exception in subscribe() |
+| CRITICAL | 2 | topic_discovery.cpp | 69-71 | Swallowed exception in refresh() |
+| CRITICAL | 3 | bridge_server.cpp | 283-293, 532-541 | Unprotected strip() in ROS2 callback can crash server |
+| CRITICAL | 4 | schema_extractor.cpp | 101-105, 110-113 | Silent schema extraction failures |
+| HIGH | 5 | schema_extractor.cpp | 58-59 | Empty string returned on parse failure |
+| HIGH | 6 | bridge_server.cpp | 171 | Ignored send_reply return value |
+| HIGH | 7 | message_serializer.cpp | 42, 169 | Unchecked integer truncation |
+| HIGH | 8 | message_serializer.cpp | 70-74 | Unchecked uint32_t truncation in header |
+| HIGH | 9 | bridge_server.cpp | 400-406 | Silent skip of malformed unsubscribe entries |
+| HIGH | 10 | bridge_server.cpp | 231-244 | Silent skip of malformed subscribe entries |
+| MEDIUM | 11 | websocket_middleware.cpp | 181-202 | TOCTOU race in receive_request during shutdown |
+| MEDIUM | 12 | schema_extractor.cpp | 117-121 | No I/O error check after reading .msg file |
+| MEDIUM | 13 | schema_extractor.cpp | 98, 44-80 | No negative caching for failed schema extractions |
+| MEDIUM | 14 | bridge_server.cpp | 754-756 | Overly broad catch block in publish loop |
+
+The four CRITICAL findings should be addressed immediately. Findings 1, 2, and 3 are one-line to three-line fixes. Finding 3 is especially dangerous because a single corrupted message on an Image or PointCloud2 topic will bring down the entire bridge server in production.</result>
+<usage><total_tokens>78298</total_tokens><tool_uses>24</tool_uses><duration_ms>154766</duration_ms></usage>
+</task-notification>
+Full transcript available at: REDACTED.output
+
+---
+
+<task-notification>
+<task-id>a384deac076b212fd</task-id>
+<tool-use-id>toolu_015UvjcAhFbuGcusx5ALVBuA</tool-use-id>
+<status>completed</status>
+<summary>Agent "Type design analysis" completed</summary>
+<result>Now I have a complete picture of the codebase. Let me provide the full type design analysis.
+
+---
+
+# Full Type Design Review: pj_ros_bridge
+
+## Type: BufferedMessage
+
+**File:** `/home/davide/ws_plotjuggler/src/pj_ros_bridge/include/pj_ros_bridge/message_buffer.hpp` (lines 51-54)
+
+```cpp
+struct BufferedMessage {
+  uint64_t timestamp_ns;
+  std::shared_ptr<rclcpp::SerializedMessage> msg;
+};
+```
+
+### Invariants Identified
+- `timestamp_ns` should represent a valid time in nanoseconds since epoch (not zero, not in the future by a large margin)
+- `msg` should be non-null for the message to be meaningful
+- The pair (timestamp, message) should be consistent -- the timestamp should reflect when this message was received
+
+### Ratings
+- **Encapsulation**: 3/10
+  This is a plain data struct with all members public. There is no way to enforce that `msg` is non-null or that `timestamp_ns` is valid. Any code can create a `BufferedMessage` with a null `msg` pointer, which would crash at `serialize_message` when dereferenced.
+
+- **Invariant Expression**: 2/10
+  The type expresses no constraints whatsoever. A `BufferedMessage{0, nullptr}` is perfectly constructible.
+
+- **Invariant Usefulness**: 5/10
+  The invariant that `msg != nullptr` would prevent real crashes. The timestamp validity is less critical.
+
+- **Invariant Enforcement**: 1/10
+  No enforcement at all. The struct has no constructor, no validation.
+
+### Strengths
+- Zero-copy semantics via `shared_ptr` is well-designed for the use case
+- Simple and lightweight -- appropriate for a high-throughput data path
+
+### Concerns
+- A null `msg` pointer will cause undefined behavior when dereferenced in `AggregatedMessageSerializer::serialize_message` (line 46 of `message_serializer.cpp`: `serialized_msg.get_rcl_serialized_message().buffer`)
+- The struct is implicitly copyable, which means `shared_ptr` reference counts can silently grow
+
+### Recommended Improvements
+Given that this is a high-throughput data path type, adding a heavyweight class with constructor validation would be overkill. A pragmatic improvement:
+
+```cpp
+struct BufferedMessage {
+  uint64_t timestamp_ns;
+  std::shared_ptr<rclcpp::SerializedMessage> msg;
+
+  // Factory that enforces non-null
+  static BufferedMessage create(uint64_t ts, std::shared_ptr<rclcpp::SerializedMessage> m) {
+    assert(m && "BufferedMessage requires non-null message");
+    return {ts, std::move(m)};
+  }
+};
+```
+
+Alternatively, since this is only constructed inside `MessageBuffer::add_message`, a precondition assert there is sufficient.
+
+---
+
+## Type: TopicInfo
+
+**File:** `/home/davide/ws_plotjuggler/src/pj_ros_bridge/include/pj_ros_bridge/topic_discovery.hpp` (lines 45-48)
+
+```cpp
+struct TopicInfo {
+  std::string name;
+  std::string type;
+};
+```
+
+### Invariants Identified
+- `name` should be a valid ROS2 topic name (starts with `/`, no empty string)
+- `type` should be a valid ROS2 message type in `package/msg/Type` format
+- Name and type should correspond to an actually existing topic
+
+### Ratings
+- **Encapsulation**: 3/10
+  Public struct, no validation. Any code can create `TopicInfo{"", ""}`.
+
+- **Invariant Expression**: 2/10
+  Both fields are plain `std::string` with no structural constraint. The "must be a valid ROS2 topic name" invariant is expressed only in documentation, not in the type.
+
+- **Invariant Usefulness**: 4/10
+  This is a DTO (data transfer object) that flows from `TopicDiscovery` to JSON serialization. The downstream code does not depend on format validity -- it just passes the strings through.
+
+- **Invariant Enforcement**: 1/10
+  No enforcement.
+
+### Strengths
+- Appropriate simplicity for a read-only DTO
+- Used only as output from `TopicDiscovery::discover_topics()` and consumed by `BridgeServer`, so the creation site is controlled
+
+### Concerns
+- Minor: the struct is used as a value type returned in vectors, which is fine for small strings
+
+### Recommended Improvements
+This is acceptable as-is given its limited role. If you wanted more rigor, making the fields `const` would express the read-only intent. However, this would prevent move semantics in vectors, so the trade-off is not worth it here. No change recommended.
+
+---
+
+## Type: Session
+
+**File:** `/home/davide/ws_plotjuggler/src/pj_ros_bridge/include/pj_ros_bridge/session_manager.hpp` (lines 34-49)
+
+```cpp
+struct Session {
+  std::string client_id;
+  std::unordered_map<std::string, double> subscribed_topics;
+  std::chrono::steady_clock::time_point last_heartbeat;
+  std::chrono::steady_clock::time_point created_at;
+  bool paused{false};
+};
+```
+
+### Invariants Identified
+- `client_id` must be non-empty and correspond to a real WebSocket connection
+- `last_heartbeat >= created_at` must always hold
+- `subscribed_topics` values represent max_rate_hz where 0.0 means unlimited, negative should not occur
+- If `paused == true`, the subscription reference counts in `GenericSubscriptionManager` have been decremented for this session's topics (a cross-component invariant)
+- `created_at` should be set once and never change
+
+### Ratings
+- **Encapsulation**: 2/10
+  Fully public struct. `SessionManager` constructs it and copies it out to callers via `get_session()`. Any caller receiving a `Session` copy can observe its fields, which is fine. However, the fact that `Session` is publicly modifiable means nothing prevents creating a `Session` with `last_heartbeat < created_at` or an empty `client_id`.
+
+- **Invariant Expression**: 3/10
+  The cross-component invariant linking `paused` to subscription reference counts is not expressed in the type at all. The rate constraint (non-negative) is not encoded.
+
+- **Invariant Usefulness**: 6/10
+  The `last_heartbeat >= created_at` invariant matters for timeout logic correctness. The `paused` / ref-count coupling is critical for resource management.
+
+- **Invariant Enforcement**: 3/10
+  `SessionManager::create_session` correctly initializes `last_heartbeat = created_at`, maintaining the ordering invariant. But the `Session` struct itself enforces nothing.
+
+### Strengths
+- The `paused` field has a sensible default of `false`
+- `steady_clock` is the correct clock for timeout measurement (monotonic, not affected by system clock changes)
+
+### Concerns
+- **The `paused` flag creates a distributed invariant:** When `paused` is true, the BridgeServer has already decremented ref counts on the GenericSubscriptionManager. If `cleanup_session` is called on a paused session, it skips unsubscribe (line 604 of `bridge_server.cpp`). This coupling between `Session::paused`, `BridgeServer::handle_pause`, and `BridgeServer::cleanup_session` is fragile. A bug in any one of these sites could leak subscription reference counts or double-decrement.
+- `created_at` is mutable but should logically be immutable after construction
+
+### Recommended Improvements
+1. Make `created_at` initialization-only by setting it in a constructor and not providing a setter in `SessionManager`. It already works this way in practice, but the type does not express it.
+2. Consider encapsulating the `subscribed_topics` rate values behind a small value type that rejects negative values:
+
+```cpp
+// In SessionManager, validate rates at the update_subscriptions boundary:
+bool SessionManager::update_subscriptions(
+    const std::string& client_id,
+    const std::unordered_map<std::string, double>& topics) {
+  // ... existing code ...
+  for (const auto& [topic, rate] : topics) {
+    assert(rate >= 0.0);  // or clamp
+  }
+  // ...
+}
+```
+
+This keeps the struct simple while guarding the boundary.
+
+---
+
+## Type: SessionManager
+
+**File:** `/home/davide/ws_plotjuggler/src/pj_ros_bridge/include/pj_ros_bridge/session_manager.hpp` (lines 58-159)
+
+### Invariants Identified
+- Every session in `sessions_` has a non-empty `client_id` matching its map key
+- `timeout_duration_` is positive (negative or zero timeout would break `get_timed_out_sessions`)
+- All public methods are individually thread-safe via `mutex_`
+- Session heartbeats are monotonically updated (always set to `now()`)
+
+### Ratings
+- **Encapsulation**: 8/10
+  Good encapsulation. All state is private. The only concern is `get_session()` which copies out the entire `Session` struct including mutable fields. This is an intentional snapshot design, which is correct.
+
+- **Invariant Expression**: 6/10
+  The timeout duration positivity is not enforced at construction. `SessionManager(0.0)` or `SessionManager(-1.0)` would create a manager that times out all sessions immediately or behaves erratically.
+
+- **Invariant Usefulness**: 8/10
+  The invariants directly support the session lifecycle correctness.
+
+- **Invariant Enforcement**: 7/10
+  Thread safety is consistently enforced with `mutex_` on every public method. The `create_session` method correctly prevents duplicate sessions. However, `timeout_duration_` is never validated.
+
+### Strengths
+- Consistent locking discipline across all methods
+- Clean separation of concerns -- manages only session state, not subscription logic
+- `get_timed_out_sessions()` correctly returns IDs without removing them, letting the caller decide what to do
+
+### Concerns
+- **TOCTOU in BridgeServer:** `session_exists()` followed by `create_session()` in BridgeServer handlers (e.g., lines 177-179 of `bridge_server.cpp`) is a check-then-act pattern. Since both calls independently acquire and release the mutex, another thread could create or remove the session between the two calls. In practice this is safe because `create_session` returns false for duplicates, but the pattern is misleading -- it suggests the check is needed when it is not.
+- **No validation of `timeout_seconds`:** A zero or negative timeout would silently misbehave.
+
+### Recommended Improvements
+1. Validate timeout in constructor:
+```cpp
+explicit SessionManager(double timeout_seconds = 10.0)
+    : timeout_duration_(timeout_seconds) {
+  if (timeout_seconds <= 0.0) {
+    throw std::invalid_argument("Session timeout must be positive");
+  }
+}
+```
+
+2. In BridgeServer, replace the check-then-act pattern with a single `create_session` call that returns "already exists" gracefully (which it already does). The `if (!session_exists(...))` guard is redundant and can be removed for clarity, or replaced with a `create_or_get_session` method that is idempotent.
+
+---
+
+## Type: MessageBuffer
+
+**File:** `/home/davide/ws_plotjuggler/src/pj_ros_bridge/include/pj_ros_bridge/message_buffer.hpp` (lines 68-128)
+
+### Invariants Identified
+- Messages within a topic buffer are ordered by `timestamp_ns` (ascending). The cleanup logic in `cleanup_old_messages()` relies on this by only checking the front.
+- No message older than `kMaxMessageAgeNs` relative to current wall-clock time persists in the buffer
+- `last_read_timestamp_ns_` tracks when messages were last consumed
+- All access is protected by `mutex_`
+- After `move_messages()`, the internal buffer is empty
+
+### Ratings
+- **Encapsulation**: 9/10
+  Excellent. All internals are private. The public API is minimal: add, move, clear, size. The `cleanup_old_messages()` is correctly private and documented as requiring the lock.
+
+- **Invariant Expression**: 7/10
+  The temporal ordering invariant is implicit -- it holds because ROS2 callbacks arrive with monotonically increasing `get_current_time_ns()` values. But the type does not enforce it: a caller of `add_message` could pass timestamps out of order, breaking the cleanup logic.
+
+- **Invariant Usefulness**: 8/10
+  Preventing unbounded memory growth is critical for a long-running server. The 1-second window is a sensible default.
+
+- **Invariant Enforcement**: 7/10
+  Thread safety is well-enforced. The cleanup-on-add pattern guarantees bounded memory. However, the ordering invariant is only maintained by convention, not by the type.
+
+### Strengths
+- `move_messages` using `std::move` + `clear()` is correct and efficient
+- `cleanup_old_messages` runs on every `add_message`, preventing accumulation
+- `kMaxMessageAgeNs` is a named constant with clear semantics
+- The `deque` choice is appropriate for front-removal, back-insertion
+
+### Concerns
+- **Out-of-order timestamps:** If `add_message` receives messages with non-monotonic timestamps (e.g., due to clock adjustments or threading), the cleanup logic would not remove the right messages. The oldest message (by timestamp) might not be at the front.
+- **`last_read_timestamp_ns_` is written but never read outside the class.** It appears to be dead state. In the header it is documented as "Timestamp of last read operation" but no code uses it for anything.
+
+### Recommended Improvements
+1. Remove `last_read_timestamp_ns_` if it serves no purpose. Dead state is a maintenance burden and suggests an incomplete feature.
+2. Add an assertion in `add_message` that timestamps are non-decreasing within a topic:
+```cpp
+auto& buffer = topic_buffers_[topic_name];
+assert(buffer.empty() || timestamp_ns >= buffer.back().timestamp_ns);
+```
+This is a debug-only check that documents the invariant without runtime cost in release builds.
+
+---
+
+## Type: AggregatedMessageSerializer
+
+**File:** `/home/davide/ws_plotjuggler/src/pj_ros_bridge/include/pj_ros_bridge/message_serializer.hpp` (lines 48-128)
+
+### Invariants Identified
+- `message_count_` accurately reflects the number of `serialize_message` calls since last `clear()`
+- `serialized_data_` contains a valid concatenation of the wire format specification
+- After `finalize()`, the returned vector has the 16-byte header followed by ZSTD-compressed payload
+- `message_count_` fits in `uint32_t` (cast at finalize time)
+- Topic name length fits in `uint16_t`, message data length fits in `uint32_t`
+
+### Ratings
+- **Encapsulation**: 7/10
+  Internal buffer is private. The `get_serialized_data()` returns a const reference, preventing external modification. However, it exposes the raw unfinished buffer, which could be confusing since `finalize()` produces a different output format. A user could read `get_serialized_data()` expecting the final wire format and get uncompressed, unheadered data.
+
+- **Invariant Expression**: 5/10
+  The size constraints on topic names and message data are not enforced. A topic name longer than 65535 bytes would silently truncate due to the `uint16_t` cast. Similarly, message data larger than 4GB would truncate with the `uint32_t` cast.
+
+- **Invariant Usefulness**: 7/10
+  The size overflow invariants are real: truncation would produce corrupt binary frames that clients cannot parse. The message count overflow is less likely but still a correctness concern.
+
+- **Invariant Enforcement**: 4/10
+  No bounds checking on topic name length or message data size. The `static_cast<uint16_t>` and `static_cast<uint32_t>` silently truncate.
+
+### Strengths
+- Clean streaming API: serialize -> finalize is a clear lifecycle
+- Static utility methods (`compress_zstd`, `decompress_zstd`) are appropriately separated
+- The `write_le` template is a clean abstraction for endianness handling
+- The `finalize()` method correctly handles the empty payload case
+
+### Concerns
+- **Silent truncation of topic name length**: In `write_str` (line 169 of `message_serializer.cpp`), `static_cast<uint16_t>(str.size())` will silently truncate if `str.size() > 65535`. This would produce a corrupt binary frame.
+- **Silent truncation of message data size**: In `serialize_message` (line 42), `static_cast<uint32_t>(serialized_msg.size())` would truncate for messages > 4GB.
+- **`get_serialized_data()` exposes intermediate state**: Callers might confuse the raw buffer with the finalized output.
+- **`finalize()` does not clear internal state**: After calling `finalize()`, the `serialized_data_` and `message_count_` remain populated. Calling `serialize_message` again and then `finalize()` again would produce a frame containing both old and new messages.
+
+### Recommended Improvements
+1. Add bounds checking in `serialize_message`:
+```cpp
+void serialize_message(const std::string& topic_name, uint64_t timestamp_ns,
+                       const rclcpp::SerializedMessage& serialized_msg) {
+  if (topic_name.size() > std::numeric_limits<uint16_t>::max()) {
+    throw std::runtime_error("Topic name exceeds uint16_t maximum length");
+  }
+  if (serialized_msg.size() > std::numeric_limits<uint32_t>::max()) {
+    throw std::runtime_error("Message data exceeds uint32_t maximum length");
+  }
+  // ... rest of method
+}
+```
+
+2. Consider making `finalize()` consume the serializer (clear internal state after producing output), making the lifecycle explicit: construct -> serialize N messages -> finalize -> done. Or, document clearly that `clear()` must be called before reuse.
+
+3. Remove or restrict `get_serialized_data()`. If it is only used in tests, mark it as such. If it must exist, rename it to `get_uncompressed_payload()` to distinguish from the finalized output.
+
+---
+
+## Type: MessageStripper
+
+**File:** `/home/davide/ws_plotjuggler/src/pj_ros_bridge/include/pj_ros_bridge/message_stripper.hpp` (lines 55-76)
+
+### Invariants Identified
+- `should_strip` and `strip` must agree: if `should_strip` returns true, `strip` must succeed for that type
+- `strip` throws for types not in the supported set, creating a contract mismatch if called without checking `should_strip` first
+- The class is stateless (all static methods)
+
+### Ratings
+- **Encapsulation**: 8/10
+  Purely static class with no state. The interface is clean.
+
+- **Invariant Expression**: 6/10
+  The coupling between `should_strip` and `strip` is a documentation-only invariant. The type system does not enforce that `strip` is only called for valid types. Calling `strip("sensor_msgs/msg/String", ...)` would throw at runtime.
+
+- **Invariant Usefulness**: 7/10
+  Preventing strip calls on unsupported types is important; the runtime_error is a reasonable fallback.
+
+- **Invariant Enforcement**: 5/10
+  `should_strip` correctly uses the same set as `strip`. But the enforcement is split across two call sites that must be kept in sync.
+
+### Strengths
+- Stateless design makes it inherently thread-safe
+- Clear separation of the decision (`should_strip`) from the action (`strip`)
+- Sentinel byte `{0}` is a well-documented convention
+
+### Concerns
+- **Duplication between `should_strip` and `strip`:** The supported types are listed in `kStrippableTypes` (for `should_strip`) and also as an if-else chain in `strip`. If a new type is added to one but not the other, the invariant breaks silently.
+- **`strip` deserializes and re-serializes entire messages.** For high-throughput topics like PointCloud2, this adds CPU cost per message. The CLAUDE.md notes this is intentional, so it is a known trade-off.
+
+### Recommended Improvements
+Unify the dispatch to eliminate the duplication. Use a map from type name to strip function:
+
+```cpp
+namespace {
+using StripFn = std::function<rclcpp::SerializedMessage(const rclcpp::SerializedMessage&)>;
+const std::unordered_map<std::string, StripFn> kStripRegistry = {
+    {"sensor_msgs/msg/Image", strip_image},
+    {"sensor_msgs/msg/CompressedImage", strip_compressed_image},
+    // ...
+};
+}
+
+bool MessageStripper::should_strip(const std::string& type) {
+  return kStripRegistry.count(type) > 0;
+}
+
+rclcpp::SerializedMessage MessageStripper::strip(
+    const std::string& type, const rclcpp::SerializedMessage& input) {
+  auto it = kStripRegistry.find(type);
+  if (it == kStripRegistry.end()) {
+    throw std::runtime_error("strip() not implemented for type: " + type);
+  }
+  return it->second(input);
+}
+```
+
+This makes it structurally impossible for `should_strip` and `strip` to disagree.
+
+---
+
+## Type: MiddlewareInterface
+
+**File:** `/home/davide/ws_plotjuggler/src/pj_ros_bridge/include/pj_ros_bridge/middleware/middleware_interface.hpp` (lines 53-127)
+
+### Invariants Identified
+- `initialize` must be called before any other method
+- After `initialize`, `is_ready()` returns true
+- After `shutdown`, `is_ready()` returns false and no further operations succeed
+- `receive_request` populates `client_identity` and `data` only if it returns true
+- `send_reply` and `send_binary` require valid `client_identity` from a connected client
+- Callbacks (`on_connect`, `on_disconnect`) must be set before `initialize` to avoid missing events
+
+### Ratings
+- **Encapsulation**: 7/10
+  As an abstract interface, encapsulation is good by design. No state to leak.
+
+- **Invariant Expression**: 4/10
+  The lifecycle constraints (must initialize before use, must set callbacks before initialize) are expressed only in documentation. The type system does not prevent calling `send_reply` before `initialize`. The `tl::expected` return from `initialize` is a good use of a sum type for error handling.
+
+- **Invariant Usefulness**: 8/10
+  The lifecycle ordering is critical for correctness. The BridgeServer destructor carefully calls `shutdown()` first, showing the importance of this ordering.
+
+- **Invariant Enforcement**: 3/10
+  Enforcement is left entirely to implementations. The interface itself cannot enforce lifecycle ordering.
+
+### Strengths
+- `tl::expected<void, std::string>` for `initialize` is excellent -- avoids boolean return with separate error channel
+- The interface is minimal: 7 pure virtuals covering the complete communication surface
+- The `ConnectionCallback` type alias is clean
+- `publish_data` is retained for future use even though currently unused, which is a reasonable forward-looking choice
+
+### Concerns
+- **Lifecycle not encoded in the type:** There is no state machine enforcing `initialize -> use -> shutdown`. A common pattern would be to use the "initialized/ready" object as a separate type (RAII handle), but that would significantly complicate the interface.
+- **`receive_request` output parameters:** The signature `bool receive_request(std::vector<uint8_t>& data, std::string& client_identity)` uses two output parameters. This is harder to use correctly than a return type. A caller must check the bool before reading the outputs.
+- **Missing const on `is_ready`:** It is correctly const. Good.
+
+### Recommended Improvements
+1. Consider returning `std::optional<IncomingRequest>` from `receive_request` instead of the two-output-parameter + bool pattern:
+```cpp
+struct IncomingRequest {
+  std::string client_id;
+  std::vector<uint8_t> data;
+};
+virtual std::optional<IncomingRequest> receive_request() = 0;
+```
+This eliminates the possibility of reading output parameters after a false return. Note: `WebSocketMiddleware` already has an `IncomingRequest` struct internally -- it could be promoted to the interface level.
+
+2. The `publish_data` method is documented as "currently unused." Consider removing it from the interface until it is needed to keep the interface minimal. Dead interface methods create implementation burden.
+
+---
+
+## Type: WebSocketMiddleware
+
+**File:** `/home/davide/ws_plotjuggler/src/pj_ros_bridge/include/pj_ros_bridge/middleware/websocket_middleware.hpp` (lines 58-103)
+
+### Invariants Identified
+- `initialized_` accurately tracks whether the server is running
+- `clients_` map is consistent with actual WebSocket connections
+- Copy/move are explicitly deleted (non-copyable, non-movable)
+- The `server_` pointer is non-null when `initialized_ == true`
+- Callbacks are cleared during shutdown to prevent use-after-free
+
+### Ratings
+- **Encapsulation**: 9/10
+  All state is private. Copy/move are properly deleted. The interface is exactly the `MiddlewareInterface` contract.
+
+- **Invariant Expression**: 7/10
+  Explicit deletion of copy/move constructors prevents accidental duplication. The `initialized_` flag is the lifecycle state machine, though it only has two states.
+
+- **Invariant Usefulness**: 9/10
+  The lifecycle invariants prevent use-after-shutdown crashes. The callback clearing during shutdown prevents the dangerous use-after-free pattern that was explicitly noted in the destructor comment.
+
+- **Invariant Enforcement**: 8/10
+  Each public method checks `initialized_` under `state_mutex_`. The shutdown sequence carefully clears callbacks before stopping the server. The lock ordering (release `state_mutex_` before calling `server_->stop()`) correctly prevents deadlock with IO threads.
+
+### Strengths
+- **Careful shutdown sequence:** The `shutdown()` method in `websocket_middleware.cpp` is well-engineered. It clears callbacks under lock, moves the server out, releases the lock, then stops the server. This prevents deadlock with IO threads that acquire `state_mutex_`.
+- **Non-copyable/non-movable:** Correct for a class that manages a network server.
+- **`kReceiveTimeoutMs` as a constant:** Clear and adjustable.
+
+### Concerns
+- **Three mutexes with implicit ordering:** `state_mutex_`, `clients_mutex_`, and `queue_mutex_` create a lock ordering requirement. The code appears to respect this (never holding two at once in most paths), but the ordering is not documented. In `setOnClientMessageCallback`, `state_mutex_` is acquired inside the callback, and `clients_mutex_` or `queue_mutex_` may also be acquired. If a future change acquires them in a different order, deadlock is possible.
+- **Client lookup in `Open` handler is O(n):** Line 69-74 of `websocket_middleware.cpp` iterates `server_->getClients()` to find the shared_ptr matching a raw reference. This is O(n) in the number of connected clients.
+- **`receive_request` blocks for up to `kReceiveTimeoutMs`:** This is documented behavior, but `process_requests` in BridgeServer is described as "non-blocking" in the header comment (line 77 of `bridge_server.hpp`). The 10ms timeout makes it nearly non-blocking, but the documentation is slightly misleading.
+
+### Recommended Improvements
+1. Document the lock ordering as a comment near the mutex declarations:
+```cpp
+// Lock ordering (to prevent deadlock): state_mutex_ -> clients_mutex_ -> queue_mutex_
+// Never acquire a lower-order mutex while holding a higher-order one.
+mutable std::mutex state_mutex_;   // Level 1
+mutable std::mutex clients_mutex_; // Level 2
+mutable std::mutex queue_mutex_;   // Level 3
+```
+
+2. The O(n) client lookup in the `Open` handler could be avoided by IXWebSocket providing a shared_ptr directly. If the library does not support this, consider caching the mapping differently. For the expected scale (<=10 concurrent clients per the success criteria), this is not a practical issue.
+
+---
+
+## Type: GenericSubscriptionManager
+
+**File:** `/home/davide/ws_plotjuggler/src/pj_ros_bridge/include/pj_ros_bridge/generic_subscription_manager.hpp` (lines 61-119)
+
+### Invariants Identified
+- `reference_count > 0` for every entry in `subscriptions_` (entries are removed when count reaches 0)
+- The callback stored in `SubscriptionInfo` is only used for the first subscriber; subsequent subscribers increment the count but do not update the callback
+- `node_` must outlive the subscription manager (shared_ptr ensures this)
+- All public methods are thread-safe
+
+### Ratings
+- **Encapsulation**: 8/10
+  All internals are private. The `SubscriptionInfo` struct is an implementation detail hidden from the public API. The interface is minimal.
+
+- **Invariant Expression**: 6/10
+  The `reference_count > 0` invariant is maintained by code but not expressed structurally. An underflow guard exists in `unsubscribe()` (line 84), but this is a runtime check.
+
+- **Invariant Usefulness**: 9/10
+  Reference counting correctness is critical. A leaked reference count means a ROS2 subscription lives forever. A double-decrement means premature removal and lost messages for other clients.
+
+- **Invariant Enforcement**: 7/10
+  The underflow guard in `unsubscribe()` prevents decrementing below zero. The erase-at-zero logic is correct. However, the callback issue (next point) is a real semantic concern.
+
+### Strengths
+- Clean reference-counting pattern
+- Thread safety is consistently enforced
+- The `unsubscribe_all()` method exists for clean shutdown
+
+### Concerns
+- **Callback pinning on first subscriber:** When a second client subscribes to the same topic, `subscribe()` increments the reference count but ignores the new callback (line 48). The stored callback from the first subscriber is used for all messages. In practice this works because all callbacks do the same thing (add to message buffer). But the interface promises that `callback` is used when it is actually discarded for existing subscriptions. This is misleading.
+- **`subscribe` returns `true` both for "created new" and "incremented existing."** The caller cannot distinguish these cases if it needs to. For this codebase it does not matter, but the API is ambiguous.
+- **No way to query all subscribed topics.** This is fine for the current use case but limits testability.
+
+### Recommended Improvements
+1. Document explicitly that the callback is only used for the first subscription to a topic:
+```cpp
+/// @note If the topic is already subscribed, the callback parameter is ignored
+///       and the existing callback continues to be used. Only the reference
+///       count is incremented.
+bool subscribe(const std::string& topic_name, const std::string& topic_type,
+               MessageCallback callback);
+```
+
+2. Consider asserting that all callbacks are equivalent (they should be, since they all feed the same MessageBuffer). Or better, remove the callback parameter from `subscribe` and set it once during manager construction, since in this design every topic uses the same callback pattern.
+
+---
+
+## Type: SchemaExtractor
+
+**File:** `/home/davide/ws_plotjuggler/src/pj_ros_bridge/include/pj_ros_bridge/schema_extractor.hpp` (lines 56-113)
+
+### Invariants Identified
+- Cache consistency: if a key exists in `definition_cache_`, its value is the correct definition for that message type
+- `msg_file_cache_` accurately reflects .msg file contents at the time of first read (stale if files change on disk)
+- Thread safety via `shared_mutex` (multiple readers, single writer)
+- `parse_message_type` correctly decomposes "pkg/msg/Type" format
+
+### Ratings
+- **Encapsulation**: 8/10
+  Caches are private. The public API is a single method (`get_message_definition`). The free function `remove_comments_from_schema` is appropriately at namespace scope since it is stateless.
+
+- **Invariant Expression**: 6/10
+  The caching invariant is maintained by code (read-through cache pattern) but not structurally enforced. The `shared_mutex` usage is correct but the cache could technically be invalidated if .msg files change on disk.
+
+- **Invariant Usefulness**: 7/10
+  Cache correctness prevents returning wrong schemas. Thread safety prevents data races in concurrent schema lookups.
+
+- **Invariant Enforcement**: 7/10
+  The two-level cache with `shared_lock` for reads and `unique_lock` for writes is well-implemented. The `build_message_definition_recursive` method correctly uses `processed_types` to prevent infinite recursion on circular type references.
+
+### Strengths
+- Two-level caching is a thoughtful optimization (avoid re-reading .msg files and re-building definitions)
+- `shared_mutex` allows concurrent reads which is appropriate since schema lookups happen on every subscribe
+- The recursive definition builder with `processed_types` correctly handles diamond dependencies
+
+### Concerns
+- **`get_message_definition` returns empty string for errors.** There is no way to distinguish "type not found" from "file read error" from "no schema available." This is a weak error reporting pattern.
+- **`build_message_definition_recursive` is `const` but modifies `msg_file_cache_` via mutable.** This is technically correct (the cache is a logical optimization, not part of the observable state), but the `const` method acquiring a `unique_lock` on a `mutable` shared_mutex to write to a `mutable` cache is worth a comment explaining why.
+- **Empty `msg_content` used as cache-miss sentinel:** If a .msg file is genuinely empty, the code will re-read it on every call (line 98: `if (msg_content.empty())`).
+- **The free function `remove_comments_from_schema` is declared in the header but seems unrelated to the class.** It could be a utility function in its own header or a static method.
+
+### Recommended Improvements
+1. Use `std::optional<std::string>` or `tl::expected` for the cache to distinguish "not cached" from "cached as empty":
+```cpp
+mutable std::unordered_map<std::string, std::optional<std::string>> msg_file_cache_;
+```
+Then check `has_value()` instead of `empty()`.
+
+2. Consider returning `tl::expected<std::string, std::string>` from `get_message_definition` to provide error details:
+```cpp
+tl::expected<std::string, std::string> get_message_definition(const std::string& message_type);
+```
+
+3. Move `remove_comments_from_schema` to a separate utility header or make it a static method of `SchemaExtractor` to clarify its relationship.
+
+---
+
+## Type: TopicDiscovery
+
+**File:** `/home/davide/ws_plotjuggler/src/pj_ros_bridge/include/pj_ros_bridge/topic_discovery.hpp` (lines 58-94)
+
+### Invariants Identified
+- `topics_` reflects the last call to `discover_topics()` or is empty
+- `node_` must be valid for the lifetime of the object
+- The filter list in `should_filter_topic` is consistent and complete
+- Not thread-safe (explicitly documented)
+
+### Ratings
+- **Encapsulation**: 7/10
+  Private state, clean interface. The `topics_` member serves as a cache, and `get_topics()` returns a copy.
+
+- **Invariant Expression**: 5/10
+  The "not thread-safe" contract is documented but not enforced (no deleted copy constructor, no static_assert, etc.).
+
+- **Invariant Usefulness**: 5/10
+  The cached `topics_` is useful, but `discover_topics()` both refreshes and returns, making `get_topics()` somewhat redundant.
+
+- **Invariant Enforcement**: 4/10
+  No enforcement of thread safety. The class is called from multiple BridgeServer handler methods which could theoretically be invoked concurrently (though in practice they are serialized by the request processing loop).
+
+### Strengths
+- `should_filter_topic` correctly filters system topics
+- The static filter list is a named constant
+
+### Concerns
+- **`discover_topics()` mutates `topics_` AND returns a copy.** This dual behavior is unusual. A caller might expect `discover_topics()` to be a pure query that returns the result, not realizing it also updates the cache. Conversely, `refresh()` calls `discover_topics()` but discards the return value.
+- **`discover_topics()` clears `topics_` before filling it.** If called concurrently (despite the documentation), this would leave `topics_` in an inconsistent state.
+- **`get_topics()` returns a copy of the cache.** This is correct for thread safety but means the data is always one step behind `discover_topics()`.
+
+### Recommended Improvements
+1. Separate the mutation from the query:
+```cpp
+// Refreshes internal cache from ROS2. Returns the new list.
+std::vector<TopicInfo> discover_topics();
+
+// Returns the last discovered topics without querying ROS2.
+const std::vector<TopicInfo>& get_topics() const;
+
+// Explicit refresh (same as discover_topics but discards return value)
+// Consider removing this in favor of just calling discover_topics().
+```
+
+2. Either add a mutex for thread safety or clearly document that all calls must come from the same thread. Given that `BridgeServer` calls this from handler methods that could theoretically overlap, adding a mutex would be safer.
+
+---
+
+## Type: BridgeServer
+
+**File:** `/home/davide/ws_plotjuggler/src/pj_ros_bridge/include/pj_ros_bridge/bridge_server.hpp` (lines 49-152)
+
+### Invariants Identified
+- `initialized_` must be true before `process_requests()` or timers fire
+- All sub-components (`topic_discovery_`, `session_manager_`, etc.) are non-null after `initialize()` succeeds
+- `middleware_` is non-null for the entire lifetime (injected at construction)
+- `node_` is non-null for the entire lifetime
+- `cleanup_mutex_` prevents concurrent session cleanup (timeout + disconnect race)
+- `stats_mutex_` protects statistics counters
+- `last_sent_mutex_` protects per-client rate limiting state
+- `port_` must be in valid port range (0-65535)
+- `publish_rate_` must be positive
+
+### Ratings
+- **Encapsulation**: 8/10
+  All state is private. The public API is small: constructor, destructor, initialize, process_requests, and two query methods. The destructor correctly shuts down middleware first.
+
+- **Invariant Expression**: 5/10
+  The two-phase initialization pattern (construct, then initialize) leaves the object in a "not yet ready" state after construction. This is a well-known anti-pattern, but it is pragmatic here because initialization can fail and ROS2 timers need a fully constructed node.
+
+- **Invariant Usefulness**: 8/10
+  The cleanup mutex prevents a real race condition (disconnect callback vs timeout timer). The lifecycle management in the destructor prevents use-after-free.
+
+- **Invariant Enforcement**: 6/10
+  `process_requests` correctly checks `initialized_`. But timer callbacks (`check_session_timeouts`, `publish_aggregated_messages`) do not check `initialized_`. They are only created in `initialize()`, so they should only fire when initialized. However, there is a window during destruction where timers could fire while members are being destroyed (before `middleware_->shutdown()` in the destructor clears callbacks).
+
+### Strengths
+- **Destructor ordering is correct:** `middleware_->shutdown()` is called first, preventing disconnect callbacks from firing into a partially destroyed object
+- **`cleanup_session` is idempotent:** The check for `session_exists` prevents double-cleanup
+- **Comprehensive error handling:** The `process_requests` method catches both JSON parse errors and general exceptions
+- **The `inject_response_fields` pattern is clean:** Centralized protocol version and request ID handling
+
+### Concerns
+- **Three separate mutexes** (`stats_mutex_`, `cleanup_mutex_`, `last_sent_mutex_`) with no documented ordering. In `publish_aggregated_messages()`, `last_sent_mutex_` is held while `stats_mutex_` is also acquired (line 675 holds `sent_lock`, line 750 acquires `stats_mutex_`). This creates an implicit lock ordering: `last_sent_mutex_` -> `stats_mutex_`. If any other code path acquires them in the reverse order, deadlock occurs.
+- **`publish_rate_` validation is deferred to `initialize()`** (line 93). Passing `publish_rate = 0.0` at construction is silently accepted; the error only surfaces at `initialize()` time.
+- **`port_` is `int` but ports are `uint16_t`.** The constructor accepts `int` and casts to `uint16_t` at initialize time. Negative ports would wrap silently.
+- **Duplicated callback creation logic** in `handle_subscribe` (lines 283-293) and `handle_resume` (lines 532-541). These lambda closures are identical. If one is updated and the other is not, behavior diverges.
+- **The `initialized_` flag is not atomic or mutex-protected.** It is written in `initialize()` (single-threaded, presumably) and read in `process_requests()`, but also conceptually read by timer callbacks. This is likely safe because timer callbacks are only created after `initialized_ = true`, but it is not formally correct for the C++ memory model without a happens-before relationship.
+
+### Recommended Improvements
+1. **Validate constructor parameters eagerly:**
+```cpp
+explicit BridgeServer(
+    std::shared_ptr<rclcpp::Node> node,
+    std::shared_ptr<MiddlewareInterface> middleware,
+    int port = 8080, double session_timeout = 10.0,
+    double publish_rate = 50.0, bool strip_large_messages = true)
+{
+  if (!node) throw std::invalid_argument("node must not be null");
+  if (!middleware) throw std::invalid_argument("middleware must not be null");
+  if (port < 0 || port > 65535) throw std::invalid_argument("invalid port");
+  if (publish_rate <= 0.0) throw std::invalid_argument("publish_rate must be positive");
+  if (session_timeout <= 0.0) throw std::invalid_argument("session_timeout must be positive");
+  // ...
+}
+```
+
+2. **Document lock ordering:**
+```cpp
+// Lock ordering: cleanup_mutex_ -> last_sent_mutex_ -> stats_mutex_
+```
+
+3. **Extract the callback factory** to eliminate duplication:
+```cpp
+private:
+  MessageCallback make_buffer_callback(const std::string& topic_type);
+```
+
+4. **Change `port_` type to `uint16_t`** to match `MiddlewareInterface::initialize(uint16_t)`.
+
+5. Consider making `initialized_` an `std::atomic<bool>` for formal memory model correctness, even though the current usage is likely safe.
+
+---
+
+## Type: protocol_constants.hpp (namespace-level constants)
+
+**File:** `/home/davide/ws_plotjuggler/src/pj_ros_bridge/include/pj_ros_bridge/protocol_constants.hpp` (lines 25-39)
+
+```cpp
+static constexpr int kProtocolVersion = 1;
+static constexpr uint32_t kBinaryFrameMagic = 0x42524A50;
+static constexpr size_t kBinaryHeaderSize = 16;
+static constexpr const char* kSchemaEncodingRos2Msg = "ros2msg";
+```
+
+### Invariants Identified
+- `kBinaryHeaderSize` must equal the actual header size written in `AggregatedMessageSerializer::finalize()`
+- `kBinaryFrameMagic` must match the magic bytes expected by clients
+- These values are compile-time constants shared across translation units
+
+### Ratings
+- **Encapsulation**: 6/10
+  These are namespace-scope constants, which is the correct pattern for protocol values. However, `static constexpr const char*` for `kSchemaEncodingRos2Msg` creates a separate object in each translation unit (though the compiler will likely merge them). Better to use `inline constexpr` or `constexpr std::string_view`.
+
+- **Invariant Expression**: 7/10
+  The constants are named and documented. The relationship between `kBinaryHeaderSize` and the actual header layout is maintained by convention.
+
+- **Invariant Usefulness**: 8/10
+  These constants prevent magic numbers throughout the codebase.
+
+- **Invariant Enforcement**: 5/10
+  The relationship between `kBinaryHeaderSize = 16` and the four `uint32_t` fields (4 * 4 = 16) is not structurally verified. A `static_assert` could enforce this.
+
+### Recommended Improvements
+1. Use `inline constexpr` for the string constant to avoid ODR issues:
+```cpp
+inline constexpr std::string_view kSchemaEncodingRos2Msg = "ros2msg";
+```
+
+2. Add a static_assert to verify header size consistency:
+```cpp
+// In the header or in message_serializer.cpp:
+static_assert(kBinaryHeaderSize == 4 * sizeof(uint32_t),
+              "Header size must match 4 x uint32_t fields");
+```
+
+---
+
+## Type: `get_current_time_ns()` (time_utils.hpp)
+
+**File:** `/home/davide/ws_plotjuggler/src/pj_ros_bridge/include/pj_ros_bridge/time_utils.hpp` (lines 40-44)
+
+```cpp
+inline uint64_t get_current_time_ns() {
+  auto now = std::chrono::system_clock::now();
+  auto duration = now.time_since_epoch();
+  return std::chrono::duration_cast<std::chrono::nanoseconds>(duration).count();
+}
+```
+
+### Invariants Identified
+- Returns nanoseconds since epoch based on `system_clock`
+- Value is monotonically increasing in practice (though `system_clock` is not guaranteed monotonic)
+
+### Ratings
+- **Encapsulation**: N/A (free function)
+- **Invariant Expression**: 5/10
+  The return type `uint64_t` loses the type safety of `std::chrono::time_point`. A caller could accidentally compare this value with a `steady_clock` timestamp.
+
+- **Invariant Usefulness**: 6/10
+  Centralizing the time source is valuable.
+
+- **Invariant Enforcement**: 3/10
+  No enforcement that the value is used correctly.
+
+### Concerns
+- **`system_clock` vs `steady_clock` inconsistency:** `SessionManager` uses `steady_clock` for heartbeats (correct for timeouts), but `MessageBuffer` uses `get_current_time_ns()` which uses `system_clock` (correct for wall-clock timestamps). This is actually the right choice for each case, but the different clock sources could be confusing.
+- **Non-monotonic clock:** If the system clock jumps backward, `cleanup_old_messages` could delete messages incorrectly or keep stale messages indefinitely. For a ROS2 application this is unlikely to be a practical problem.
+
+### Recommended Improvements
+Add a comment explaining why `system_clock` is used (wall-clock timestamps for message serialization) to prevent future maintainers from "fixing" it to `steady_clock`:
+```cpp
+/// Returns wall-clock time in nanoseconds since epoch.
+/// Uses system_clock intentionally -- these timestamps are sent to clients
+/// and must correspond to real-world time, not monotonic uptime.
+inline uint64_t get_current_time_ns() { /* ... */ }
+```
+
+---
+
+# Cross-Cutting Concerns
+
+## 1. Distributed State Invariants
+
+The most significant type design issue in this project is the **distributed invariant linking `Session::paused`, `GenericSubscriptionManager` reference counts, and `BridgeServer` cleanup logic.** When a session is paused:
+- `BridgeServer::handle_pause` decrements subscription ref counts
+- `BridgeServer::cleanup_session` skips unsubscribe if session was paused
+- `BridgeServer::handle_resume` re-increments ref counts
+
+This three-way coupling is the single most fragile invariant in the codebase. A bug in any one of these three paths (or a race between them) could leak or double-decrement reference counts. Consider documenting this invariant prominently in `BridgeServer`:
+
+```cpp
+// INVARIANT: For each session, the GenericSubscriptionManager holds exactly one
+// reference per subscribed topic when session is NOT paused, and zero references
+// when the session IS paused. This is maintained by:
+// - handle_subscribe: increments ref count, marks topic in session
+// - handle_pause: decrements ref count for all session topics, sets paused=true
+// - handle_resume: increments ref count for all session topics, sets paused=false
+// - cleanup_session: decrements ref count only if session is NOT paused
+// All these paths are serialized by cleanup_mutex_.
+```
+
+## 2. Two-Phase Initialization
+
+`BridgeServer` uses a construct-then-initialize pattern. The `initialized_` flag creates a zombie state between construction and initialization. This is a pragmatic choice given ROS2 constraints, but it means every public method must check `initialized_`. Consider a factory function:
+
+```cpp
+static std::unique_ptr<BridgeServer> create(
+    std::shared_ptr<rclcpp::Node> node,
+    std::shared_ptr<MiddlewareInterface> middleware,
+    /* params */);  // Returns nullptr on failure
+```
+
+## 3. Copy Semantics
+
+`SessionManager`, `GenericSubscriptionManager`, and `MessageBuffer` are all non-trivially copyable but have no explicit copy/move declarations. While they are used via `unique_ptr` in `BridgeServer` (making accidental copies impossible), the types themselves should ideally either be explicitly non-copyable or have their copy semantics clearly defined. `WebSocketMiddleware` correctly deletes copy/move -- the other manager classes should follow suit.
+
+## Summary Table
+
+| Type | Encapsulation | Invariant Expression | Invariant Usefulness | Invariant Enforcement | Overall |
+|------|:---:|:---:|:---:|:---:|:---:|
+| BufferedMessage | 3 | 2 | 5 | 1 | 2.8 |
+| TopicInfo | 3 | 2 | 4 | 1 | 2.5 |
+| Session | 2 | 3 | 6 | 3 | 3.5 |
+| SessionManager | 8 | 6 | 8 | 7 | 7.3 |
+| MessageBuffer | 9 | 7 | 8 | 7 | 7.8 |
+| AggregatedMessageSerializer | 7 | 5 | 7 | 4 | 5.8 |
+| MessageStripper | 8 | 6 | 7 | 5 | 6.5 |
+| MiddlewareInterface | 7 | 4 | 8 | 3 | 5.5 |
+| WebSocketMiddleware | 9 | 7 | 9 | 8 | 8.3 |
+| GenericSubscriptionManager | 8 | 6 | 9 | 7 | 7.5 |
+| SchemaExtractor | 8 | 6 | 7 | 7 | 7.0 |
+| TopicDiscovery | 7 | 5 | 5 | 4 | 5.3 |
+| BridgeServer | 8 | 5 | 8 | 6 | 6.8 |
+
+The strongest types are **WebSocketMiddleware** (careful lifecycle management, explicit non-copyability, deadlock-aware shutdown) and **MessageBuffer** (minimal API, consistent locking, clean move semantics). The weakest are the plain data structs (**BufferedMessage**, **TopicInfo**, **Session**), which is expected for DTOs but worth noting for the null-pointer risk in `BufferedMessage`. The most impactful improvement opportunity is formalizing the distributed pause/resume/cleanup invariant in **BridgeServer** and unifying the callback factory to eliminate the duplicated lambda.</result>
+<usage><total_tokens>81768</total_tokens><tool_uses>21</tool_uses><duration_ms>527837</duration_ms></usage>
+</task-notification>
+Full transcript available at: REDACTED.output
+
+---
+
+fix the P0 and P1 issues
+
+---
+
+Base directory for this skill: /home/davide/.claude/plugins/cache/superpowers-marketplace/superpowers/4.0.3/skills/writing-plans
+
+# Writing Plans
+
+## Overview
+
+Write comprehensive implementation plans assuming the engineer has zero context for our codebase and questionable taste. Document everything they need to know: which files to touch for each task, code, testing, docs they might need to check, how to test it. Give them the whole plan as bite-sized tasks. DRY. YAGNI. TDD. Frequent commits.
+
+Assume they are a skilled developer, but know almost nothing about our toolset or problem domain. Assume they don't know good test design very well.
+
+**Announce at start:** "I'm using the writing-plans skill to create the implementation plan."
+
+**Context:** This should be run in a dedicated worktree (created by brainstorming skill).
+
+**Save plans to:** `docs/plans/YYYY-MM-DD-<feature-name>.md`
+
+## Bite-Sized Task Granularity
+
+**Each step is one action (2-5 minutes):**
+- "Write the failing test" - step
+- "Run it to make sure it fails" - step
+- "Implement the minimal code to make the test pass" - step
+- "Run the tests and make sure they pass" - step
+- "Commit" - step
+
+## Plan Document Header
+
+**Every plan MUST start with this header:**
+
+```markdown
+# [Feature Name] Implementation Plan
+
+> **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
+
+**Goal:** [One sentence describing what this builds]
+
+**Architecture:** [2-3 sentences about approach]
+
+**Tech Stack:** [Key technologies/libraries]
+
+---
+```
+
+## Task Structure
+
+```markdown
+### Task N: [Component Name]
+
+**Files:**
+- Create: `exact/path/to/file.py`
+- Modify: `exact/path/to/existing.py:123-145`
+- Test: `tests/exact/path/to/test.py`
+
+**Step 1: Write the failing test**
+
+```python
+def test_specific_behavior():
+    result = function(input)
+    assert result == expected
+```
+
+**Step 2: Run test to verify it fails**
+
+Run: `pytest tests/path/test.py::test_name -v`
+Expected: FAIL with "function not defined"
+
+**Step 3: Write minimal implementation**
+
+```python
+def function(input):
+    return expected
+```
+
+**Step 4: Run test to verify it passes**
+
+Run: `pytest tests/path/test.py::test_name -v`
+Expected: PASS
+
+**Step 5: Commit**
+
+```bash
+git add tests/path/test.py src/path/file.py
+git commit -m "feat: add specific feature"
+```
+```
+
+## Remember
+- Exact file paths always
+- Complete code in plan (not "add validation")
+- Exact commands with expected output
+- Reference relevant skills with @ syntax
+- DRY, YAGNI, TDD, frequent commits
+
+## Execution Handoff
+
+After saving the plan, offer execution choice:
+
+**"Plan complete and saved to `docs/plans/<filename>.md`. Two execution options:**
+
+**1. Subagent-Driven (this session)** - I dispatch fresh subagent per task, review between tasks, fast iteration
+
+**2. Parallel Session (separate)** - Open new session with executing-plans, batch execution with checkpoints
+
+**Which approach?"**
+
+**If Subagent-Driven chosen:**
+- **REQUIRED SUB-SKILL:** Use superpowers:subagent-driven-development
+- Stay in this session
+- Fresh subagent per task + code review
+
+**If Parallel Session chosen:**
+- Guide them to open new session in worktree
+- **REQUIRED SUB-SKILL:** New session uses superpowers:executing-plans
+
+---
+
+This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.
+
+Analysis:
+Let me chronologically analyze the conversation:
+
+1. **User's first message**: "do a full review of this project" - The user wants a comprehensive code review of the pj_ros_bridge project.
+
+2. **My approach**: I searched episodic memory, invoked the `superpowers:requesting-code-review` skill, then dispatched 5 parallel review agents:
+   - Code quality & architecture (superpowers:code-reviewer)
+   - Test coverage analysis (pr-review-toolkit:pr-test-analyzer)
+   - Silent failure analysis (pr-review-toolkit:silent-failure-hunter)
+   - Type design analysis (pr-review-toolkit:type-design-analyzer)
+   - Comment quality analysis (pr-review-toolkit:comment-analyzer)
+
+3. **User's second message** (while agents were running): Asked me to evaluate findings from another agent:
+   - Finding 1: Null dereference race in WebSocket callback during shutdown
+   - Finding 2: Schema extraction silently returns incomplete schemas
+   - Finding 3: Subscribe can report success with empty/invalid schema
+   - Finding 5: High publish_rate can create 0 ms wall timer
+   - Something about dual license headers (message was truncated)
+
+4. **My consolidated review**: I compiled findings from all 5 agents and my own verification into a prioritized report with:
+   - 4 CRITICAL issues (P0)
+   - 6 HIGH issues (P1)
+   - 4 MEDIUM issues (P2)
+   - Plus evaluation of the other agent's findings
+
+5. **My evaluation of the other agent's findings**:
+   - Finding 1 (null deref race): AGREE - real crash window
+   - Finding 2 (incomplete schemas): AGREE - return value ignored at line 202
+   - Finding 3 (empty schema success): AGREE - no empty() check
+   - Finding 5 (0ms timer): AGREE - truncation issue
+   - License finding: DISAGREE - no Apache headers in source files
+
+6. **User's third message**: "fix the P0 and P1 issues"
+
+7. **My approach for fixes**: I invoked `superpowers:writing-plans` skill, read all relevant source files, and wrote a detailed implementation plan at `docs/plans/2026-02-21-p0-p1-fixes.md` with 6 tasks.
+
+Key files read:
+- `src/middleware/websocket_middleware.cpp` - Full file, the WebSocket callback and shutdown logic
+- `src/schema_extractor.cpp` - Full file, the schema extraction with recursive build
+- `src/bridge_server.cpp` - Full file (~760 lines), the main orchestrator
+- `include/pj_ros_bridge/bridge_server.hpp` - Header with class declaration
+- `include/pj_ros_bridge/schema_extractor.hpp` - Header with class declaration
+- `include/pj_ros_bridge/generic_subscription_manager.hpp` - Header
+- `include/pj_ros_bridge/topic_discovery.hpp` - Header
+- `include/pj_ros_bridge/middleware/websocket_middleware.hpp` - Header
+- `src/generic_subscription_manager.cpp` - Full file
+- `src/topic_discovery.cpp` - Full file
+- `tests/unit/test_bridge_server.cpp` - Full test file (1341 lines)
+
+The 6 tasks in the plan:
+1. P0: Fix WebSocket null deref race during shutdown
+2. P0: Wrap MessageStripper::strip() in try-catch + extract helper
+3. P1: Check for empty schema before reporting success
+4. P1: Propagate nested type resolution failures
+5. P1: Log swallowed exceptions in subscribe() and refresh()
+6. P1: Document lock ordering hierarchy
+
+The plan was just written but NOT yet executed. The user hasn't approved or started execution yet.
+
+Let me also note the errors/issues:
+- TaskOutput calls failed for some agents with "No task found" errors. I worked around this by reading the output files directly using Bash and Python to parse the JSONL format.
+- The output files were very large (200-400KB JSONL), requiring Python scripts to extract the final assistant messages.
+
+Important project context from CLAUDE.md and MEMORY.md:
+- Build: `cd ~/ws_plotjuggler && source /opt/ros/humble/setup.bash && colcon build --packages-select pj_ros_bridge`
+- Test: `./run_and_test.sh` (builds regular + TSAN + ASAN, runs all three)
+- TSAN exits with code 66 due to 30 pre-existing IXWebSocket warnings - this is normal
+- 150 gtest tests; colcon test reports 151 (includes lint check)
+- Pre-commit: `pre-commit run -a` before committing
+
+Summary:
+1. Primary Request and Intent:
+   - The user first requested a **full comprehensive review** of the pj_ros_bridge project (a C++ ROS2 WebSocket bridge server, ~7400 lines across 31 files).
+   - The user then asked me to **critically evaluate 5 specific findings** from another agent regarding null deref races, schema extraction issues, empty schema handling, publish_rate timer issues, and license headers.
+   - Finally, the user requested: **"fix the P0 and P1 issues"** — the 6 highest priority bugs identified during the review.
+
+2. Key Technical Concepts:
+   - C++17 ROS2 Humble package with IXWebSocket for WebSocket communication
+   - Thread safety: `std::mutex`, `std::shared_mutex`, lock ordering, TOCTOU races
+   - WebSocket callback lifecycle (Open/Close/Message handlers) and shutdown races
+   - CDR serialization/deserialization for ROS2 messages
+   - Reference-counted shared subscriptions across multiple WebSocket clients
+   - Two-level caching in SchemaExtractor (definition cache + .msg file cache)
+   - ZSTD compression of aggregated binary message frames
+   - Message stripping (removing large fields from Image, PointCloud2, etc.)
+   - Rate-limiting per client using milli-Hz integer discretization
+   - Session management with heartbeat timeouts and pause/resume
+
+3. Files and Code Sections:
+   - **`src/middleware/websocket_middleware.cpp`** (255 lines)
+     - Contains the P0 null deref race: callback checks `initialized_` under lock (line 44), releases lock, then dereferences `server_->getClients()` at line 57. Shutdown can `std::move(server_)` between these points.
+     - Plan: Restructure callback to hold `state_mutex_` through `server_` access in Open handler
+   
+   - **`src/bridge_server.cpp`** (760 lines)
+     - Contains duplicated `MessageStripper::strip()` lambda at lines 283-293 and 532-542 (P0 crash risk)
+     - Contains empty schema check gap at line 299 (P1)
+     - Contains ignored `send_reply()` return value at line 171
+     - Plan: Extract `make_buffer_callback()` helper with try-catch, add empty schema check
+
+   - **`include/pj_ros_bridge/bridge_server.hpp`** (157 lines)
+     - Class declaration; needs new `make_buffer_callback()` private method declaration
+     - Needs lock ordering documentation near mutex declarations (lines 146-151)
+     - Plan: Add `MessageCallback make_buffer_callback(const std::string& topic_type);` and lock ordering comment
+
+   - **`src/schema_extractor.cpp`** (262 lines)
+     - Line 202: `build_message_definition_recursive()` return value is IGNORED for nested types
+     - Plan: Change to `if (!build_message_definition_recursive(...)) { return false; }`
+
+   - **`src/generic_subscription_manager.cpp`** (108 lines)
+     - Lines 58-60: Swallowed exception with `catch (const std::exception&) { return false; }`
+     - Plan: Add `RCLCPP_ERROR` logging with topic name, type, and exception message
+
+   - **`src/topic_discovery.cpp`** (81 lines)
+     - Lines 57-59: Same swallowed exception pattern
+     - Plan: Add `RCLCPP_ERROR` logging with exception message
+
+   - **`include/pj_ros_bridge/middleware/websocket_middleware.hpp`** (96 lines)
+     - Needs lock ordering comment: `state_mutex_ > clients_mutex_ > queue_mutex_`
+
+   - **`include/pj_ros_bridge/schema_extractor.hpp`** (105 lines)
+     - Read for context on `SchemaExtractor` class structure
+
+   - **`include/pj_ros_bridge/generic_subscription_manager.hpp`** (112 lines)
+     - Read for context; has `node_` member for logging
+
+   - **`include/pj_ros_bridge/topic_discovery.hpp`** (87 lines)
+     - Read for context; has `node_` member for logging
+
+   - **`tests/unit/test_bridge_server.cpp`** (1341 lines, 150 tests)
+     - Full test suite read for context; uses `MockMiddleware` class
+     - Contains regression tests for stats inflation, double-decrement, etc.
+
+   - **`docs/plans/2026-02-21-p0-p1-fixes.md`** (NEWLY CREATED)
+     - The implementation plan with 6 tasks for P0/P1 fixes
+     - Each task has exact code, file paths, build/test commands
+
+4. Errors and fixes:
+   - **TaskOutput API failures**: Several `TaskOutput` calls returned "No task found" errors when trying to collect background agent results. Fixed by reading the raw JSONL output files directly using Python scripts to parse and extract the final assistant messages.
+   - **Large output files**: Agent output files were 200-400KB JSONL. Used `tail` + Python JSON parsing to extract just the final summaries.
+   - **Incorrect findings from review agents**: Two agents (code-reviewer and comment-analyzer) incorrectly flagged "dual AGPL + Apache license headers." I verified by grep that no source files contain Apache headers — only build artifacts and 3rd-party files do. I corrected this in the report.
+
+5. Problem Solving:
+   - Dispatched 5 specialized review agents in parallel for comprehensive coverage
+   - Verified each finding from the "other agent" by reading the actual source code before agreeing/disagreeing
+   - Identified the WebSocket race condition by tracing the lock acquisition sequence through the callback, shutdown, and IO thread interactions
+   - Confirmed the lock ordering safety of the proposed fix (state_mutex_ → clients_mutex_ nesting is safe because shutdown() never holds state_mutex_ when it acquires clients_mutex_)
+
+6. All user messages:
+   - **Message 1**: "do a full review of this project"
+   - **Message 2**: "additionally another agent reported this. Evaluate critically if you agree or not. 1. High: Potential null dereference race in WebSocket callback during shutdown... 2. High: Schema extraction can silently return incomplete schemas... 3. Medium: subscribe can report success with an empty/invalid schema... 5. Medium: High publish_rate can create a 0 ms wall timer period..."
+   - **Message 3**: "fix the P0 and P1 issues"
+
+7. Pending Tasks:
+   - **Execute the 6-task implementation plan** at `docs/plans/2026-02-21-p0-p1-fixes.md`:
+     - Task 1: Fix WebSocket null deref race (restructure callback in `websocket_middleware.cpp`)
+     - Task 2: Extract `make_buffer_callback()` with try-catch for `MessageStripper::strip()`
+     - Task 3: Add empty schema check in `bridge_server.cpp`
+     - Task 4: Propagate nested type failures in `schema_extractor.cpp`
+     - Task 5: Log swallowed exceptions in `generic_subscription_manager.cpp` and `topic_discovery.cpp`
+     - Task 6: Document lock ordering hierarchy in headers
+   - After each task: build and run all tests (regular + TSAN + ASAN via `./run_and_test.sh`)
+   - Commit each task separately with descriptive messages
+
+8. Current Work:
+   The plan file was just created at `docs/plans/2026-02-21-p0-p1-fixes.md` with 6 detailed tasks. The `superpowers:writing-plans` skill was invoked and the plan was written. The plan has NOT been executed yet — no code changes have been made. The plan needs to be executed task by task with builds and tests between each.
+
+9. Optional Next Step:
+   Begin executing the implementation plan, starting with Task 1 (fix WebSocket null deref race in `src/middleware/websocket_middleware.cpp`). The user's explicit request was "fix the P0 and P1 issues" and the plan is complete and ready for execution. The `superpowers:executing-plans` or `superpowers:subagent-driven-development` skill should be used for systematic execution with review checkpoints.
+
+If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /home/davide/.REDACTED.jsonl
+Please continue the conversation from where we left off without asking the user any further questions. Continue with the last task that you were asked to work on.
+
+---
+
+Base directory for this skill: /home/davide/.claude/plugins/cache/superpowers-marketplace/superpowers/4.0.3/skills/executing-plans
+
+# Executing Plans
+
+## Overview
+
+Load plan, review critically, execute tasks in batches, report for review between batches.
+
+**Core principle:** Batch execution with checkpoints for architect review.
+
+**Announce at start:** "I'm using the executing-plans skill to implement this plan."
+
+## The Process
+
+### Step 1: Load and Review Plan
+1. Read plan file
+2. Review critically - identify any questions or concerns about the plan
+3. If concerns: Raise them with your human partner before starting
+4. If no concerns: Create TodoWrite and proceed
+
+### Step 2: Execute Batch
+**Default: First 3 tasks**
+
+For each task:
+1. Mark as in_progress
+2. Follow each step exactly (plan has bite-sized steps)
+3. Run verifications as specified
+4. Mark as completed
+
+### Step 3: Report
+When batch complete:
+- Show what was implemented
+- Show verification output
+- Say: "Ready for feedback."
+
+### Step 4: Continue
+Based on feedback:
+- Apply changes if needed
+- Execute next batch
+- Repeat until complete
+
+### Step 5: Complete Development
+
+After all tasks complete and verified:
+- Announce: "I'm using the finishing-a-development-branch skill to complete this work."
+- **REQUIRED SUB-SKILL:** Use superpowers:finishing-a-development-branch
+- Follow that skill to verify tests, present options, execute choice
+
+## When to Stop and Ask for Help
+
+**STOP executing immediately when:**
+- Hit a blocker mid-batch (missing dependency, test fails, instruction unclear)
+- Plan has critical gaps preventing starting
+- You don't understand an instruction
+- Verification fails repeatedly
+
+**Ask for clarification rather than guessing.**
+
+## When to Revisit Earlier Steps
+
+**Return to Review (Step 1) when:**
+- Partner updates the plan based on your feedback
+- Fundamental approach needs rethinking
+
+**Don't force through blockers** - stop and ask.
+
+## Remember
+- Review plan critically first
+- Follow plan steps exactly
+- Don't skip verifications
+- Reference skills when plan says to
+- Between batches: just report and wait
+- Stop when blocked, don't guess
