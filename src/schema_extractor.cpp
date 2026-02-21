@@ -17,18 +17,6 @@
  * along with pj_ros_bridge. If not, see <https://www.gnu.org/licenses/>.
  */
 
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
 #include "pj_ros_bridge/schema_extractor.hpp"
 
 #include <ament_index_cpp/get_package_share_directory.hpp>
@@ -168,23 +156,24 @@ bool SchemaExtractor::build_message_definition_recursive(
         nested_type = nested_type.substr(0, bracket_pos);
       }
     } else {
+      // Strip array brackets (e.g., "float64[9]" -> "float64") before builtin check
+      std::string base_type = first_word;
+      size_t bracket_pos = base_type.find('[');
+      if (bracket_pos != std::string::npos) {
+        base_type = base_type.substr(0, bracket_pos);
+      }
+
       // Check if it's a built-in type or a local type
       bool is_builtin =
-          (first_word == "bool" || first_word == "byte" || first_word == "char" || first_word == "float32" ||
-           first_word == "float64" || first_word == "int8" || first_word == "uint8" || first_word == "int16" ||
-           first_word == "uint16" || first_word == "int32" || first_word == "uint32" || first_word == "int64" ||
-           first_word == "uint64" || first_word == "string" || first_word == "wstring");
+          (base_type == "bool" || base_type == "byte" || base_type == "char" || base_type == "float32" ||
+           base_type == "float64" || base_type == "int8" || base_type == "uint8" || base_type == "int16" ||
+           base_type == "uint16" || base_type == "int32" || base_type == "uint32" || base_type == "int64" ||
+           base_type == "uint64" || base_type == "string" || base_type == "wstring");
 
       if (!is_builtin) {
         // It's a local type in the same package
         nested_package = package_name;
-        nested_type = first_word;
-
-        // Remove array brackets if present
-        size_t bracket_pos = nested_type.find('[');
-        if (bracket_pos != std::string::npos) {
-          nested_type = nested_type.substr(0, bracket_pos);
-        }
+        nested_type = base_type;
       }
     }
 
@@ -211,7 +200,9 @@ bool SchemaExtractor::build_message_definition_recursive(
     std::string nested_pkg = nested_full_type.substr(0, slash_pos);
     std::string nested_typ = nested_full_type.substr(slash_pos + 1);
 
-    build_message_definition_recursive(nested_pkg, nested_typ, output, processed_types, false);
+    if (!build_message_definition_recursive(nested_pkg, nested_typ, output, processed_types, false)) {
+      return false;
+    }
   }
 
   return true;
