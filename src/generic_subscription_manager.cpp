@@ -17,18 +17,6 @@
  * along with pj_ros_bridge. If not, see <https://www.gnu.org/licenses/>.
  */
 
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
 #include "pj_ros_bridge/generic_subscription_manager.hpp"
 
 #include "pj_ros_bridge/time_utils.hpp"
@@ -67,7 +55,10 @@ bool GenericSubscriptionManager::subscribe(
     subscriptions_[topic_name] = std::move(info);
 
     return true;
-  } catch (const std::exception&) {
+  } catch (const std::exception& e) {
+    RCLCPP_ERROR(
+        node_->get_logger(), "Failed to create subscription for topic '%s' (type '%s'): %s", topic_name.c_str(),
+        topic_type.c_str(), e.what());
     return false;
   }
 }
