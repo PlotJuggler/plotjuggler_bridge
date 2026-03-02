@@ -26,6 +26,7 @@
 #include <nlohmann/json.hpp>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -268,7 +269,7 @@ class MockSubscriptionManager : public SubscriptionManagerInterface {
 
  private:
   MessageCallback callback_;
-  std::set<std::string> known_topics_;
+  std::unordered_set<std::string> known_topics_;
   std::unordered_map<std::string, int> ref_counts_;
   bool underflow_detected_{false};
 };

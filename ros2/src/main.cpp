@@ -100,6 +100,7 @@ int main(int argc, char** argv) {
     // Clear the subscription manager callback before server destruction
     sub_manager->set_message_callback(nullptr);
     sub_manager->unsubscribe_all();
+    middleware->shutdown();
 
     auto [total_messages, total_bytes] = server.get_publish_stats();
     RCLCPP_INFO(

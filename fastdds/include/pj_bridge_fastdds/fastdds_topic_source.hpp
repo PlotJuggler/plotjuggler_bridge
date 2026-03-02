@@ -20,7 +20,9 @@
 #pragma once
 
 #include <cstdint>
-#include <dds/dds.hpp>
+#include <fastdds/dds/domain/DomainParticipant.hpp>
+#include <fastdds/dds/domain/DomainParticipantListener.hpp>
+#include <fastdds/dds/xtypes/dynamic_types/DynamicType.hpp>
 #include <memory>
 #include <optional>
 #include <shared_mutex>
@@ -32,45 +34,46 @@
 
 namespace pj_bridge {
 
-class DdsTopicDiscovery : public TopicSourceInterface {
+// Thread-safe topic discovery + schema provider for eProsima Fast DDS.
+//
+// Creates one DomainParticipant per domain ID, attaches a
+// DomainParticipantListener to discover remote DataWriters, resolves their
+// DynamicType from the TypeObject registry, and caches the OMG IDL schema.
+class FastDdsTopicSource : public TopicSourceInterface {
  public:
-  explicit DdsTopicDiscovery(const std::vector<int32_t>& domain_ids, const std::string& qos_profile_path = "");
-  ~DdsTopicDiscovery() override;
+  explicit FastDdsTopicSource(const std::vector<int32_t>& domain_ids);
+  ~FastDdsTopicSource() override;
 
-  DdsTopicDiscovery(const DdsTopicDiscovery&) = delete;
-  DdsTopicDiscovery& operator=(const DdsTopicDiscovery&) = delete;
+  FastDdsTopicSource(const FastDdsTopicSource&) = delete;
+  FastDdsTopicSource& operator=(const FastDdsTopicSource&) = delete;
 
   // TopicSourceInterface
   std::vector<TopicInfo> get_topics() override;
   std::string get_schema(const std::string& topic_name) override;
   std::string schema_encoding() const override;
 
-  // DDS-specific (used by DdsSubscriptionManager)
-  std::optional<dds::core::xtypes::StructType> get_type(const std::string& topic_name) const;
+  // Used by FastDdsSubscriptionManager
+  eprosima::fastdds::dds::DynamicType::_ref_type get_dynamic_type(const std::string& topic_name) const;
+  eprosima::fastdds::dds::DomainParticipant* get_participant(int32_t domain_id) const;
   std::optional<int32_t> get_domain_id(const std::string& topic_name) const;
-  std::optional<dds::domain::DomainParticipant> get_participant(int32_t domain_id) const;
 
  private:
-  class PublisherListener;
+  class ParticipantListener;
 
   struct DiscoveredTopic {
-    dds::core::xtypes::StructType struct_type;
+    eprosima::fastdds::dds::DynamicType::_ref_type dynamic_type;
     std::string schema_idl;
     int32_t domain_id;
-
-    DiscoveredTopic(const dds::core::xtypes::StructType& st, const std::string& idl, int32_t did)
-        : struct_type(st), schema_idl(idl), domain_id(did) {}
   };
 
   void on_topic_discovered(
-      const std::string& topic_name, const dds::core::xtypes::StructType& struct_type, const std::string& schema_idl,
-      int32_t domain_id);
+      const std::string& topic_name, eprosima::fastdds::dds::DynamicType::_ref_type dynamic_type,
+      const std::string& schema_idl, int32_t domain_id);
 
   mutable std::shared_mutex mutex_;
   std::unordered_map<std::string, DiscoveredTopic> topics_;
-  std::unordered_map<int32_t, dds::domain::DomainParticipant> participants_;
-  std::vector<std::shared_ptr<PublisherListener>> listeners_;
-  std::vector<dds::sub::DataReader<dds::topic::PublicationBuiltinTopicData>> builtin_readers_;
+  std::unordered_map<int32_t, eprosima::fastdds::dds::DomainParticipant*> participants_;
+  std::vector<std::shared_ptr<ParticipantListener>> listeners_;
 };
 
 }  // namespace pj_bridge

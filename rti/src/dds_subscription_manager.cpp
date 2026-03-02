@@ -104,8 +104,14 @@ bool DdsSubscriptionManager::subscribe(const std::string& topic_name, const std:
 
   auto& struct_type = *struct_type_opt;
 
+  auto participant_opt = discovery_.get_participant(*domain_id_opt);
+  if (!participant_opt) {
+    spdlog::error("No participant for domain {}", *domain_id_opt);
+    return false;
+  }
+
   try {
-    auto participant = discovery_.get_participant(*domain_id_opt);
+    auto& participant = *participant_opt;
 
     rti::core::xtypes::DynamicDataTypeSerializationProperty ser_prop;
     ser_prop.skip_deserialization(true);
@@ -162,17 +168,6 @@ bool DdsSubscriptionManager::unsubscribe(const std::string& topic_name) {
   }
 
   return true;
-}
-
-size_t DdsSubscriptionManager::ref_count(const std::string& topic_name) const {
-  std::lock_guard<std::mutex> lock(mutex_);
-
-  auto it = subscriptions_.find(topic_name);
-  if (it != subscriptions_.end()) {
-    return it->second.reference_count;
-  }
-
-  return 0;
 }
 
 void DdsSubscriptionManager::unsubscribe_all() {

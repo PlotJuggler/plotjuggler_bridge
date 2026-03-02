@@ -25,17 +25,16 @@
 
 #include "pj_bridge/middleware/websocket_middleware.hpp"
 #include "pj_bridge/standalone_event_loop.hpp"
-#include "pj_bridge_rti/dds_subscription_manager.hpp"
-#include "pj_bridge_rti/dds_topic_discovery.hpp"
+#include "pj_bridge_fastdds/fastdds_subscription_manager.hpp"
+#include "pj_bridge_fastdds/fastdds_topic_source.hpp"
 
 int main(int argc, char* argv[]) {
-  CLI::App app{"pj_bridge RTI DDS Backend"};
+  CLI::App app{"pj_bridge eProsima FastDDS Backend"};
 
   std::vector<int32_t> domain_ids;
   int port = 8080;
   double publish_rate = 50.0;
   double session_timeout = 10.0;
-  std::string qos_profile;
   std::string log_level = "info";
   bool stats_enabled = false;
 
@@ -43,7 +42,6 @@ int main(int argc, char* argv[]) {
   app.add_option("--port,-p", port, "WebSocket port")->default_val(8080)->check(CLI::Range(1, 65535));
   app.add_option("--publish-rate", publish_rate, "Aggregation publish rate in Hz")->default_val(50.0);
   app.add_option("--session-timeout", session_timeout, "Session timeout in seconds")->default_val(10.0);
-  app.add_option("--qos-profile", qos_profile, "QoS profile XML file path");
   app.add_option("--log-level", log_level, "Log level (trace, debug, info, warn, error)")->default_val("info");
   app.add_flag("--stats", stats_enabled, "Print statistics every 5 seconds");
 
@@ -51,18 +49,15 @@ int main(int argc, char* argv[]) {
 
   spdlog::set_level(spdlog::level::from_str(log_level));
 
-  spdlog::info("pj_bridge (RTI DDS backend) starting...");
+  spdlog::info("pj_bridge (FastDDS backend) starting...");
   spdlog::info("  Domains: {}", fmt::join(domain_ids, ", "));
   spdlog::info("  Port: {}", port);
   spdlog::info("  Publish rate: {:.1f} Hz", publish_rate);
   spdlog::info("  Session timeout: {:.1f} s", session_timeout);
-  if (!qos_profile.empty()) {
-    spdlog::info("  QoS profile: {}", qos_profile);
-  }
 
   try {
-    auto topic_source = std::make_shared<pj_bridge::DdsTopicDiscovery>(domain_ids, qos_profile);
-    auto sub_manager = std::make_shared<pj_bridge::DdsSubscriptionManager>(*topic_source);
+    auto topic_source = std::make_shared<pj_bridge::FastDdsTopicSource>(domain_ids);
+    auto sub_manager = std::make_shared<pj_bridge::FastDdsSubscriptionManager>(*topic_source);
     auto middleware = std::make_shared<pj_bridge::WebSocketMiddleware>();
 
     pj_bridge::BridgeServer server(topic_source, sub_manager, middleware, port, session_timeout, publish_rate);

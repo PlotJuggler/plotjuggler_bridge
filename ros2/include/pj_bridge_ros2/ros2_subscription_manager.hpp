@@ -39,6 +39,9 @@ class Ros2SubscriptionManager : public SubscriptionManagerInterface {
  public:
   explicit Ros2SubscriptionManager(rclcpp::Node::SharedPtr node, bool strip_large_messages = true);
 
+  Ros2SubscriptionManager(const Ros2SubscriptionManager&) = delete;
+  Ros2SubscriptionManager& operator=(const Ros2SubscriptionManager&) = delete;
+
   void set_message_callback(MessageCallback callback) override;
   bool subscribe(const std::string& topic_name, const std::string& topic_type) override;
   bool unsubscribe(const std::string& topic_name) override;

@@ -39,6 +39,9 @@ class Ros2TopicSource : public TopicSourceInterface {
  public:
   explicit Ros2TopicSource(rclcpp::Node::SharedPtr node);
 
+  Ros2TopicSource(const Ros2TopicSource&) = delete;
+  Ros2TopicSource& operator=(const Ros2TopicSource&) = delete;
+
   std::vector<TopicInfo> get_topics() override;
   std::string get_schema(const std::string& topic_name) override;
   std::string schema_encoding() const override;

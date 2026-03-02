@@ -198,12 +198,12 @@ std::optional<int32_t> DdsTopicDiscovery::get_domain_id(const std::string& topic
   return it->second.domain_id;
 }
 
-dds::domain::DomainParticipant DdsTopicDiscovery::get_participant(int32_t domain_id) const {
+std::optional<dds::domain::DomainParticipant> DdsTopicDiscovery::get_participant(int32_t domain_id) const {
   std::shared_lock<std::shared_mutex> lock(mutex_);
 
   auto it = participants_.find(domain_id);
   if (it == participants_.end()) {
-    throw std::runtime_error("No participant for domain " + std::to_string(domain_id));
+    return std::nullopt;
   }
   return it->second;
 }

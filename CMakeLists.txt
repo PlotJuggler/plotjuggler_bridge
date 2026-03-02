@@ -96,6 +96,7 @@ add_library(pj_bridge_app STATIC
   app/src/session_manager.cpp
   app/src/message_serializer.cpp
   app/src/bridge_server.cpp
+  app/src/standalone_event_loop.cpp
 )
 
 target_include_directories(pj_bridge_app PUBLIC
@@ -163,45 +164,52 @@ if(ament_cmake_FOUND)
 endif()
 
 # ============================================================================
-# pj_bridge_rti — RTI DDS backend (only if RTIConnextDDS found)
+# pj_bridge_rti — RTI DDS backend (disabled — replaced by FastDDS backend)
 # ============================================================================
-if(ENABLE_RTI AND RTIConnextDDS_FOUND)
-  # CLI11 for command-line parsing
-  FetchContent_Declare(
-    cli11
-    URL https://github.com/CLIUtils/CLI11/archive/refs/tags/v2.4.2.tar.gz
-  )
-  set(CLI11_PRECOMPILED OFF CACHE BOOL "" FORCE)
-  FetchContent_MakeAvailable(cli11)
+# if(ENABLE_RTI AND RTIConnextDDS_FOUND)
+#   find_package(CLI11 REQUIRED)
+#
+#   add_library(pj_bridge_rti_lib STATIC
+#     rti/src/dds_topic_discovery.cpp
+#     rti/src/dds_subscription_manager.cpp)
+#   target_include_directories(pj_bridge_rti_lib PUBLIC
+#     ${CMAKE_CURRENT_SOURCE_DIR}/rti/include)
+#   target_link_libraries(pj_bridge_rti_lib PUBLIC
+#     pj_bridge_app RTIConnextDDS::cpp2_api)
+#
+#   add_executable(pj_bridge_rti rti/src/main.cpp)
+#   target_link_libraries(pj_bridge_rti pj_bridge_rti_lib CLI11::CLI11)
+#   install(TARGETS pj_bridge_rti DESTINATION lib/${PROJECT_NAME})
+# endif()
 
-  add_library(pj_bridge_rti_lib STATIC
-    rti/src/dds_topic_discovery.cpp
-    rti/src/dds_subscription_manager.cpp
-    rti/src/rti_topic_source.cpp
-    rti/src/rti_subscription_manager.cpp
+# ============================================================================
+# pj_bridge_fastdds — eProsima Fast DDS backend (Conan-managed)
+# ============================================================================
+option(ENABLE_FASTDDS "Build eProsima FastDDS backend" OFF)
+
+if(ENABLE_FASTDDS)
+  find_package(fastcdr REQUIRED)
+  find_package(fastdds REQUIRED)
+  find_package(CLI11 REQUIRED)
+
+  add_library(pj_bridge_fastdds_lib STATIC
+    fastdds/src/fastdds_topic_source.cpp
+    fastdds/src/fastdds_subscription_manager.cpp
   )
 
-  target_include_directories(pj_bridge_rti_lib PUBLIC
-    ${CMAKE_CURRENT_SOURCE_DIR}/rti/include
+  target_include_directories(pj_bridge_fastdds_lib PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/fastdds/include
   )
 
-  target_link_libraries(pj_bridge_rti_lib PUBLIC
+  target_link_libraries(pj_bridge_fastdds_lib PUBLIC
     pj_bridge_app
-    RTIConnextDDS::cpp2_api
+    fastdds
+    fastcdr
   )
 
-  add_executable(pj_bridge_rti
-    rti/src/main.cpp
-  )
-
-  target_link_libraries(pj_bridge_rti
-    pj_bridge_rti_lib
-    CLI11::CLI11
-  )
-
-  install(TARGETS pj_bridge_rti
-    DESTINATION lib/${PROJECT_NAME}
-  )
+  add_executable(pj_bridge_fastdds fastdds/src/main.cpp)
+  target_link_libraries(pj_bridge_fastdds pj_bridge_fastdds_lib CLI11::CLI11)
+  install(TARGETS pj_bridge_fastdds DESTINATION lib/${PROJECT_NAME})
 endif()
 
 # ============================================================================

@@ -3,12 +3,13 @@
 ## Project Overview
 
 **Project Name**: pj_bridge
-**Type**: Multi-backend C++ bridge server (ROS2 / RTI Connext DDS)
+**Type**: Multi-backend C++ bridge server (ROS2 / RTI Connext DDS / eProsima Fast DDS)
 **Purpose**: Forward middleware topic content over WebSocket to PlotJuggler clients
 
-**Main Goal**: Enable clients to subscribe to topics and receive aggregated messages at configurable rates without needing a full middleware installation. Two backends share a common core library:
+**Main Goal**: Enable clients to subscribe to topics and receive aggregated messages at configurable rates without needing a full middleware installation. Three backends share a common core library:
 - **ROS2 backend** (`pj_bridge_ros2`) — ROS2 Humble, uses `rclcpp`
-- **RTI backend** (`pj_bridge_rti`) — RTI Connext DDS, uses `rti::connext`
+- **RTI backend** (`pj_bridge_rti`) — RTI Connext DDS, uses `rti::connext` (build disabled, code preserved)
+- **FastDDS backend** (`pj_bridge_fastdds`) — eProsima Fast DDS 3.4, via Conan
 
 ## Key Documentation Files
 
@@ -25,10 +26,20 @@ colcon build --packages-select pj_bridge --cmake-args -DCMAKE_BUILD_TYPE=Release
 colcon test --packages-select pj_bridge && colcon test-result --verbose
 ```
 
-### RTI Backend (standalone CMake)
+### RTI Backend (standalone CMake — currently disabled)
 ```bash
 mkdir build && cd build
 cmake .. -DCMAKE_BUILD_TYPE=Release -DENABLE_RTI=ON
+make -j$(nproc)
+```
+
+### FastDDS Backend (Conan + standalone CMake)
+```bash
+cd ~/ws_plotjuggler/src/pj_ros_bridge
+conan install . --output-folder=build_fastdds --build=missing -s build_type=Release
+cd build_fastdds
+cmake .. -DCMAKE_BUILD_TYPE=Release -DENABLE_FASTDDS=ON \
+         -DCMAKE_TOOLCHAIN_FILE=conan_toolchain.cmake
 make -j$(nproc)
 ```
 
@@ -38,6 +49,11 @@ make -j$(nproc)
 - **spdlog** — system package preferred (for ROS2 ABI compatibility with `librcl_logging_spdlog`); FetchContent fallback for standalone builds
 - **ZSTD** — system package (`libzstd-dev`)
 - **CLI11** — FetchContent (RTI backend only)
+
+### FastDDS Backend (Conan-managed)
+- **eProsima Fast DDS 3.4.0** — via Conan (`fast-dds/3.4.0`)
+- **eProsima Fast CDR 2.x** — transitive dependency via Conan
+- **CLI11** — FetchContent (for CLI parsing, shared with RTI)
 
 **Important**: Do NOT use FetchContent for spdlog when building with ROS2. The system spdlog must match the version used by `librcl_logging_spdlog.so` to avoid ABI conflicts (symbol collision causes "free(): invalid pointer" crash during `rclcpp::init()`).
 
@@ -70,13 +86,14 @@ make -j$(nproc)
 │               ← MiddlewareInterface              │
 │  + MessageBuffer, SessionManager, Serializer     │
 └────────────────────┬─────────────────────────────┘
-         ┌───────────┴───────────┐
-    ┌────┴────┐            ┌─────┴─────┐
-    │  ros2/  │            │   rti/    │
-    │ Ros2TopicSource      │ RtiTopicSource
-    │ Ros2SubscriptionMgr  │ RtiSubscriptionMgr
-    │ (rclcpp)             │ (RTI Connext)
-    └─────────┘            └───────────┘
+         ┌───────────┼───────────────┐
+    ┌────┴────┐ ┌────┴─────┐  ┌─────┴──────┐
+    │  ros2/  │ │   rti/   │  │  fastdds/  │
+    │ Ros2    │ │ Rti      │  │ FastDds    │
+    │ Topic   │ │ Topic    │  │ Topic      │
+    │ Source  │ │ Source   │  │ Source     │
+    │ (rclcpp)│ │(Connext) │  │(Fast DDS) │
+    └─────────┘ └──────────┘  └────────────┘
 ```
 
 ### Abstract Interfaces (in `app/include/pj_bridge/`)
@@ -90,6 +107,7 @@ make -j$(nproc)
 BridgeServer does NOT own timers. The entry point (`main.cpp`) drives the event loop:
 - **ROS2**: `rclcpp` wall timers call `process_requests()`, `publish_aggregated_messages()`, `check_session_timeouts()`
 - **RTI**: `std::chrono` loop with `std::this_thread::sleep_for()`
+- **FastDDS**: `std::chrono` loop with `std::this_thread::sleep_for()` (same pattern as RTI)
 
 ### Key Components
 
@@ -107,9 +125,13 @@ BridgeServer does NOT own timers. The entry point (`main.cpp`) drives the event 
 
 7. **Ros2SubscriptionManager** (`ros2/`) — Wraps `GenericSubscriptionManager` + optional `MessageStripper`. Converts `rclcpp::SerializedMessage` → `shared_ptr<vector<byte>>` via memcpy.
 
-8. **RtiTopicSource** (`rti/`) — Wraps `DdsTopicDiscovery`. Schema encoding: `"omgidl"`.
+8. **RtiTopicSource** (`rti/`) — Wraps `DdsTopicDiscovery`. Schema encoding: `"omgidl"`. (Build disabled)
 
-9. **RtiSubscriptionManager** (`rti/`) — Wraps `DdsSubscriptionManager`. DDS already produces `shared_ptr<vector<byte>>`.
+9. **RtiSubscriptionManager** (`rti/`) — Wraps `DdsSubscriptionManager`. DDS already produces `shared_ptr<vector<byte>>`. (Build disabled)
+
+10. **FastDdsTopicSource** (`fastdds/`) — Directly implements `TopicSourceInterface`. Discovers topics via `on_data_writer_discovery()`, resolves `DynamicType` from `TypeObjectRegistry`, generates IDL via `idl_serialize()`. Schema encoding: `"omgidl"`.
+
+11. **FastDdsSubscriptionManager** (`fastdds/`) — Directly implements `SubscriptionManagerInterface`. Creates `DataReader`s with `DynamicPubSubType`, deserializes into `DynamicData` and re-serializes to extract CDR bytes.
 
 ### Communication Pattern
 
@@ -128,76 +150,6 @@ For each message (streamed, no header):
   - Message data (N bytes CDR)
 ```
 
-## Project Structure
-
-```
-pj_bridge/
-├── app/
-│   ├── include/pj_bridge/
-│   │   ├── topic_source_interface.hpp
-│   │   ├── subscription_manager_interface.hpp
-│   │   ├── middleware/
-│   │   │   ├── middleware_interface.hpp
-│   │   │   └── websocket_middleware.hpp
-│   │   ├── bridge_server.hpp
-│   │   ├── session_manager.hpp
-│   │   ├── message_buffer.hpp
-│   │   ├── message_serializer.hpp
-│   │   ├── protocol_constants.hpp
-│   │   └── time_utils.hpp
-│   └── src/
-│       ├── middleware/websocket_middleware.cpp
-│       ├── bridge_server.cpp
-│       ├── session_manager.cpp
-│       ├── message_buffer.cpp
-│       └── message_serializer.cpp
-├── ros2/
-│   ├── include/pj_bridge_ros2/
-│   │   ├── ros2_topic_source.hpp
-│   │   ├── ros2_subscription_manager.hpp
-│   │   ├── topic_discovery.hpp
-│   │   ├── schema_extractor.hpp
-│   │   ├── generic_subscription_manager.hpp
-│   │   └── message_stripper.hpp
-│   └── src/
-│       ├── ros2_topic_source.cpp
-│       ├── ros2_subscription_manager.cpp
-│       ├── topic_discovery.cpp
-│       ├── schema_extractor.cpp
-│       ├── generic_subscription_manager.cpp
-│       ├── message_stripper.cpp
-│       └── main.cpp
-├── rti/
-│   ├── include/pj_bridge_rti/
-│   │   ├── rti_topic_source.hpp
-│   │   ├── rti_subscription_manager.hpp
-│   │   ├── dds_topic_discovery.hpp
-│   │   └── dds_subscription_manager.hpp
-│   └── src/
-│       ├── rti_topic_source.cpp
-│       ├── rti_subscription_manager.cpp
-│       ├── dds_topic_discovery.cpp
-│       ├── dds_subscription_manager.cpp
-│       └── main.cpp
-├── tests/unit/
-│   ├── test_bridge_server.cpp       (mock-based, no ROS2 deps)
-│   ├── test_session_manager.cpp
-│   ├── test_message_buffer.cpp
-│   ├── test_message_serializer.cpp
-│   ├── test_websocket_middleware.cpp
-│   ├── test_protocol_constants.cpp
-│   ├── test_topic_discovery.cpp     (ROS2-specific)
-│   ├── test_schema_extractor.cpp    (ROS2-specific)
-│   ├── test_generic_subscription_manager.cpp (ROS2-specific)
-│   └── test_message_stripper.cpp    (ROS2-specific)
-├── 3rdparty/ (nlohmann, tl, ixwebsocket)
-├── DATA/ (test data: sample.mcap, reference schemas)
-├── cmake/FindZSTD.cmake
-├── CMakeLists.txt
-├── package.xml
-└── CLAUDE.md (this file)
-```
-
 ## CMake Targets
 
 | Target | Type | Description |
@@ -205,8 +157,10 @@ pj_bridge/
 | `pj_bridge_app` | STATIC | Core library (no ROS2/DDS deps) |
 | `pj_bridge_ros2_lib` | STATIC | ROS2 adapter library |
 | `pj_bridge_ros2` | EXECUTABLE | ROS2 entry point |
-| `pj_bridge_rti_lib` | STATIC | RTI adapter library (if `ENABLE_RTI=ON`) |
-| `pj_bridge_rti` | EXECUTABLE | RTI entry point |
+| `pj_bridge_rti_lib` | STATIC | RTI adapter library (disabled) |
+| `pj_bridge_rti` | EXECUTABLE | RTI entry point (disabled) |
+| `pj_bridge_fastdds_lib` | STATIC | FastDDS adapter library (if `ENABLE_FASTDDS=ON`) |
+| `pj_bridge_fastdds` | EXECUTABLE | FastDDS entry point |
 | `pj_bridge_tests` | EXECUTABLE | All unit tests |
 
 ## Dependencies
@@ -223,8 +177,13 @@ pj_bridge/
 - `sensor_msgs`, `nav_msgs` (for message stripper)
 - `ament_cmake_gtest` (test only)
 
-### RTI Backend
+### RTI Backend (disabled)
 - RTI Connext DDS (`RTIConnextDDS::cpp2_api`)
+- CLI11 (FetchContent, for CLI parsing)
+
+### FastDDS Backend
+- eProsima Fast DDS 3.4.0 (Conan: `fast-dds/3.4.0`)
+- eProsima Fast CDR 2.x (transitive Conan dependency)
 - CLI11 (FetchContent, for CLI parsing)
 
 ## Testing
@@ -272,6 +231,11 @@ strip_large_messages: true  # Strip Image/PointCloud2/etc data fields
 pj_bridge_rti --domains 0 1 --port 8080 --publish-rate 50 --session-timeout 10
 ```
 
+### FastDDS (via CLI flags):
+```bash
+pj_bridge_fastdds --domains 0 1 --port 8080 --publish-rate 50 --session-timeout 10
+```
+
 ## Important Design Decisions
 
 1. **Backend-agnostic core via interfaces**: `TopicSourceInterface` and `SubscriptionManagerInterface` allow the same `BridgeServer` to work with ROS2 or RTI DDS.
@@ -291,4 +255,4 @@ pj_bridge_rti --domains 0 1 --port 8080 --publish-rate 50 --session-timeout 10
 **Last Updated**: 2026-02-26
 **Project Phase**: Unified multi-backend architecture
 **Test Status**: 154 unit tests passing (all sanitizers clean)
-**Executables**: `pj_bridge_ros2` (ROS2), `pj_bridge_rti` (RTI DDS)
+**Executables**: `pj_bridge_ros2` (ROS2), `pj_bridge_rti` (RTI DDS, disabled), `pj_bridge_fastdds` (FastDDS)

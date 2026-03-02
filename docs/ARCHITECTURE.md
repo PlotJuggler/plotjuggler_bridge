@@ -2,10 +2,11 @@
 
 ## Overview
 
-pj_bridge is a multi-backend bridge server that forwards middleware topic data over WebSocket to PlotJuggler clients. A backend-agnostic core library (`app/`) is shared by two backend-specific adapters:
+pj_bridge is a multi-backend bridge server that forwards middleware topic data over WebSocket to PlotJuggler clients. A backend-agnostic core library (`app/`) is shared by three backend-specific adapters:
 
 - **ROS2 backend** (`ros2/`) — uses `rclcpp`, schema from `.msg` files
-- **RTI backend** (`rti/`) — uses RTI Connext DDS, schema from OMG IDL
+- **RTI backend** (`rti/`) — uses RTI Connext DDS, schema from OMG IDL (build disabled, code preserved)
+- **FastDDS backend** (`fastdds/`) — uses eProsima Fast DDS 3.4 (via Conan), schema from OMG IDL
 
 ```
 ┌──────────────────────────────────────────────────┐
@@ -15,13 +16,14 @@ pj_bridge is a multi-backend bridge server that forwards middleware topic data o
 │               ← MiddlewareInterface              │
 │  + MessageBuffer, SessionManager, Serializer     │
 └────────────────────┬─────────────────────────────┘
-         ┌───────────┴───────────┐
-    ┌────┴────┐            ┌─────┴─────┐
-    │  ros2/  │            │   rti/    │
-    │ Ros2TopicSource      │ RtiTopicSource
-    │ Ros2SubscriptionMgr  │ RtiSubscriptionMgr
-    │ (rclcpp)             │ (RTI Connext)
-    └─────────┘            └───────────┘
+         ┌───────────┼───────────────┐
+    ┌────┴────┐ ┌────┴─────┐  ┌─────┴──────┐
+    │  ros2/  │ │   rti/   │  │  fastdds/  │
+    │ Ros2    │ │ Rti      │  │ FastDds    │
+    │ Topic   │ │ Topic    │  │ Topic      │
+    │ Source  │ │ Source   │  │ Source     │
+    │ (rclcpp)│ │(Connext) │  │(Fast DDS) │
+    └─────────┘ └──────────┘  └────────────┘
 ```
 
 ## Communication Pattern
@@ -39,13 +41,15 @@ Three interfaces decouple the core from any specific middleware:
 
 Discovers available topics and retrieves their schemas. Implementations:
 - `Ros2TopicSource`: wraps `TopicDiscovery` (rclcpp enumeration) + `SchemaExtractor` (.msg file parsing). Schema encoding: `"ros2msg"`.
-- `RtiTopicSource`: wraps `DdsTopicDiscovery` (DDS participant discovery). Schema encoding: `"omgidl"`.
+- `RtiTopicSource`: wraps `DdsTopicDiscovery` (RTI participant discovery). Schema encoding: `"omgidl"`.
+- `FastDdsTopicSource`: directly implements the interface (flattened design). Discovers topics via `on_data_writer_discovery()`, resolves `DynamicType` from TypeObject registry, generates IDL via `idl_serialize()`. Schema encoding: `"omgidl"`.
 
 ### SubscriptionManagerInterface
 
 Manages ref-counted middleware subscriptions. A single global `MessageCallback` delivers all incoming messages as `shared_ptr<vector<byte>>` to the `MessageBuffer`. Implementations:
 - `Ros2SubscriptionManager`: wraps `GenericSubscriptionManager`. Converts `rclcpp::SerializedMessage` to `shared_ptr<vector<byte>>` via memcpy. Optionally strips large message fields (Image, PointCloud2) via `MessageStripper`.
 - `RtiSubscriptionManager`: wraps `DdsSubscriptionManager`. DDS natively produces `shared_ptr<vector<byte>>`, no conversion needed.
+- `FastDdsSubscriptionManager`: directly implements the interface (flattened design). Creates `DataReader`s with `DynamicPubSubType`, deserializes into `DynamicData` and re-serializes to extract CDR bytes.
 
 ### MiddlewareInterface
 
@@ -116,6 +120,8 @@ Spun via `SingleThreadedExecutor::spin_some(100ms)`.
 - Every 1 s → `check_session_timeouts()`
 - Every 5 s (optional) → stats snapshot
 
+**FastDDS** (`fastdds/src/main.cpp`): Same `std::chrono` loop pattern as RTI.
+
 ## ROS2-Specific Components
 
 - **TopicDiscovery**: Discovers topics via `rclcpp::Node::get_topic_names_and_types()`, filtering system topics
@@ -127,6 +133,15 @@ Spun via `SingleThreadedExecutor::spin_some(100ms)`.
 
 - **DdsTopicDiscovery**: Discovers topics via DDS participant discovery across configured domain IDs
 - **DdsSubscriptionManager**: Manages DDS DataReaders, natively produces `shared_ptr<vector<byte>>`
+
+## FastDDS-Specific Components
+
+Unlike the RTI backend's 4-class two-level design (discovery + subscription manager + adapters), the FastDDS backend uses a flattened 2-class design that directly implements the abstract interfaces:
+
+- **FastDdsTopicSource**: Manages `DomainParticipant`s, discovers topics via `DomainParticipantListener::on_data_writer_discovery()`, resolves `DynamicType` from `TypeObjectRegistry`, generates IDL schema via `idl_serialize()`. Also provides `get_dynamic_type()` / `get_participant()` / `get_domain_id()` for use by the subscription manager.
+- **FastDdsSubscriptionManager**: Creates `DataReader`s with `DynamicPubSubType`, ref-counted subscriptions. Extracts CDR bytes by deserializing into `DynamicData` and re-serializing via `DynamicPubSubType::serialize()`.
+
+FastDDS dependencies are managed via Conan (`fast-dds/3.4.0`). The backend is built standalone (not through colcon/ament).
 
 ## Design Decisions
 
