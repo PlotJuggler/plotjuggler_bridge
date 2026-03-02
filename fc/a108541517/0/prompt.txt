@@ -1,0 +1,224 @@
+Implement the following plan:
+
+# Plan: Add Pixi support (Humble/Jazzy) + Remove vendored IXWebSocket
+
+## Context
+
+PR #2 introduced pixi support but only for Jazzy. We want multi-environment pixi support for both Humble and Jazzy ROS2 builds, and we want to remove the vendored IXWebSocket from `3rdparty/` now that it's available on both conda-forge (v11.4.6) and Conan Center (v11.4.6).
+
+## Step 1: Create `pixi.toml` with Humble/Jazzy environments
+
+Create `pixi.toml` in the project root with:
+
+- **Workspace**: `conda-forge` base channel, `linux-64` platform
+- **Shared dependencies**: `cmake`, `compilers`, `pkg-config`, `ninja`, `colcon-common-extensions`, `zstd`, `spdlog`, `ixwebsocket`, `nlohmann_json`
+- **Feature `humble`**: channel `robostack-humble`, dep `ros-humble-desktop`
+- **Feature `jazzy`**: channel `robostack-jazzy`, dep `ros-jazzy-desktop`
+- **Environments**: `humble = ["humble"]`, `jazzy = ["jazzy"]`
+- **Activation**: `scripts = ["install/setup.sh"]` (generated after first build)
+- **Tasks**: `build` (colcon build), `test` (colcon test + test-result), `clean`
+
+Usage: `pixi run -e humble build` or `pixi run -e jazzy build`
+
+## Step 2: Remove vendored IXWebSocket, use find_package only
+
+**File: `CMakeLists.txt`** (lines 53-63)
+
+Replace the entire `USE_VENDORED_IXWEBSOCKET` option block with a simple required find:
+
+```cmake
+# IXWebSocket — provided by pixi (conda-forge) or Conan
+find_package(ixwebsocket REQUIRED)
+```
+
+Remove `include(FetchContent)` (line 67) — no longer needed (spdlog also comes from the dependency manager now; see Step 2b).
+
+Remove the `USE_VENDORED_IXWEBSOCKET` option entirely.
+
+The target `ixwebsocket::ixwebsocket` (line 109) works in both cases:
+- **Pixi**: conda-forge `ixwebsocket` package provides cmake config
+- **Conan**: CMakeDeps generates the target
+
+### Step 2b: Also remove spdlog FetchContent
+
+spdlog is also on both conda-forge and Conan. Replace spdlog block (lines 65-80) with:
+
+```cmake
+find_package(spdlog REQUIRED)
+```
+
+Add `spdlog/1.15.0` to `conanfile.txt` (see Step 3).
+
+### Step 2c: Also remove nlohmann/json from 3rdparty
+
+nlohmann_json is on both conda-forge (3.12.0) and Conan (3.12.0). Add to CMakeLists.txt:
+
+```cmake
+find_package(nlohmann_json REQUIRED)
+```
+
+Add `nlohmann_json::nlohmann_json` to `target_link_libraries(pj_bridge_app ...)` (line 107-111).
+
+Delete `3rdparty/nlohmann/` directory. Keep `3rdparty/tl/` (tl-expected is NOT on conda-forge — single header, fine to vendor).
+
+The `3rdparty` include dir (line 104) stays — still needed for `tl/expected.hpp`.
+
+## Step 3: Add ixwebsocket to `conanfile.txt`
+
+**File: `conanfile.txt`**
+
+Add `ixwebsocket/11.4.6`, `spdlog/1.15.0`, and `nlohmann_json/3.12.0` to `[requires]`:
+
+```
+[requires]
+fast-dds/3.4.0
+cli11/2.6.0
+ixwebsocket/11.4.6
+spdlog/1.15.0
+nlohmann_json/3.12.0
+
+[generators]
+CMakeDeps
+CMakeToolchain
+```
+
+## Step 4: Delete vendored IXWebSocket
+
+Delete `3rdparty/ixwebsocket/` and `3rdparty/nlohmann/` directories. The `3rdparty/` directory stays with only `tl/expected.hpp` (not on conda-forge).
+
+## Step 5: Update `.gitignore`
+
+Add `.pixi/` (pixi environment cache).
+
+## Step 6: Generate `pixi.lock`
+
+Run `pixi install -e humble` to generate the lock file. Commit it for reproducibility.
+
+---
+
+## Files modified
+
+| File | Action |
+|------|--------|
+| `pixi.toml` | Create |
+| `CMakeLists.txt` | Replace ixwebsocket/spdlog/nlohmann blocks with `find_package(... REQUIRED)` |
+| `conanfile.txt` | Add `ixwebsocket/11.4.6`, `spdlog/1.15.0`, `nlohmann_json/3.12.0` |
+| `.gitignore` | Add `.pixi/` |
+| `3rdparty/ixwebsocket/` | Delete directory |
+| `3rdparty/nlohmann/` | Delete directory |
+| `pixi.lock` | Generated |
+
+## Verification
+
+1. **Pixi ROS2 build**: `pixi run -e humble build` — ixwebsocket found from conda-forge, no FetchContent
+2. **Pixi ROS2 test**: `pixi run -e humble test` — all 154 tests pass
+3. **FastDDS Conan build**: `conan install . --output-folder=build_fastdds --build=missing && cd build_fastdds && cmake .. -DENABLE_FASTDDS=ON -DCMAKE_TOOLCHAIN_FILE=conan_toolchain.cmake && make` — ixwebsocket found from Conan
+4. **Bare colcon build** (existing workflow): no longer supported without pixi — deps must come from pixi or Conan
+5. Run `./run_and_test.sh` from within a pixi environment to verify regular + TSAN + ASAN all pass
+
+
+If you need specific details from before exiting plan mode (like exact code snippets, error messages, or content you generated), read the full transcript at: /home/davide/.REDACTED.jsonl
+
+---
+
+Base directory for this skill: /home/davide/.claude/plugins/cache/superpowers-marketplace/superpowers/4.0.3/skills/executing-plans
+
+# Executing Plans
+
+## Overview
+
+Load plan, review critically, execute tasks in batches, report for review between batches.
+
+**Core principle:** Batch execution with checkpoints for architect review.
+
+**Announce at start:** "I'm using the executing-plans skill to implement this plan."
+
+## The Process
+
+### Step 1: Load and Review Plan
+1. Read plan file
+2. Review critically - identify any questions or concerns about the plan
+3. If concerns: Raise them with your human partner before starting
+4. If no concerns: Create TodoWrite and proceed
+
+### Step 2: Execute Batch
+**Default: First 3 tasks**
+
+For each task:
+1. Mark as in_progress
+2. Follow each step exactly (plan has bite-sized steps)
+3. Run verifications as specified
+4. Mark as completed
+
+### Step 3: Report
+When batch complete:
+- Show what was implemented
+- Show verification output
+- Say: "Ready for feedback."
+
+### Step 4: Continue
+Based on feedback:
+- Apply changes if needed
+- Execute next batch
+- Repeat until complete
+
+### Step 5: Complete Development
+
+After all tasks complete and verified:
+- Announce: "I'm using the finishing-a-development-branch skill to complete this work."
+- **REQUIRED SUB-SKILL:** Use superpowers:finishing-a-development-branch
+- Follow that skill to verify tests, present options, execute choice
+
+## When to Stop and Ask for Help
+
+**STOP executing immediately when:**
+- Hit a blocker mid-batch (missing dependency, test fails, instruction unclear)
+- Plan has critical gaps preventing starting
+- You don't understand an instruction
+- Verification fails repeatedly
+
+**Ask for clarification rather than guessing.**
+
+## When to Revisit Earlier Steps
+
+**Return to Review (Step 1) when:**
+- Partner updates the plan based on your feedback
+- Fundamental approach needs rethinking
+
+**Don't force through blockers** - stop and ask.
+
+## Remember
+- Review plan critically first
+- Follow plan steps exactly
+- Don't skip verifications
+- Reference skills when plan says to
+- Between batches: just report and wait
+- Stop when blocked, don't guess
+
+---
+
+[Request interrupted by user for tool use]
+
+---
+
+continueç
+
+---
+
+change the README to add concise instructions for Pixi Humble / Jazzy and conan builds
+
+---
+
+[Request interrupted by user]
+
+---
+
+change the name of the project to pj_bridge (anlso in the README and all other documents
+
+---
+
+modify the gihub workflows to use Pixi. also, can we still generate AppImages from a pixi generated binary?
+
+---
+
+[Request interrupted by user for tool use]
