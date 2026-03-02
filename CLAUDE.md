@@ -12,7 +12,6 @@
 
 ## Key Documentation Files
 
-- `docs/plans/2026-02-26-unify-backends-design.md` — Unified architecture design
 - `docs/API.md` - API protocol documentation
 - `.clang-tidy` - Coding standards and style guide
 
