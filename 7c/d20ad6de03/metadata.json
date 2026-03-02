@@ -1,0 +1,30 @@
+{
+  "cli_version": "0.4.2",
+  "checkpoint_id": "7cd20ad6de03",
+  "strategy": "manual-commit",
+  "branch": "unify-backends",
+  "checkpoints_count": 5,
+  "files_touched": [
+    "app/include/pj_bridge/message_buffer.hpp",
+    "app/include/pj_bridge/middleware/middleware_interface.hpp",
+    "app/include/pj_bridge/subscription_manager_interface.hpp",
+    "app/include/pj_bridge/topic_source_interface.hpp",
+    "docs/ARCHITECTURE.md"
+  ],
+  "sessions": [
+    {
+      "metadata": "/7c/d20ad6de03/0/metadata.json",
+      "transcript": "/7c/d20ad6de03/0/full.jsonl",
+      "context": "/7c/d20ad6de03/0/context.md",
+      "content_hash": "/7c/d20ad6de03/0/content_hash.txt",
+      "prompt": "/7c/d20ad6de03/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 59,
+    "cache_creation_tokens": 141702,
+    "cache_read_tokens": 2613458,
+    "output_tokens": 22336,
+    "api_call_count": 37
+  }
+}

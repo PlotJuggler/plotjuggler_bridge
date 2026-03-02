@@ -1,0 +1,45 @@
+review the current project
+
+---
+
+add documentation to SubscriptionManagerInterface
+
+---
+
+same for TopicSourceInterface
+
+---
+
+document MessageBuffer too
+
+---
+
+now update ARCHITECTURE.md
+
+---
+
+now carefully analyze the code for correctness and to find potential bugs
+
+---
+
+fix 1, 2, 4, 6, 7, 9, 15 make sure that you carefully think about the best solution for each of them
+
+---
+
+[Request interrupted by user for tool use]
+
+---
+
+start creating failing tests, if you can
+
+---
+
+[Request interrupted by user]
+
+---
+
+and fix the tests that in your opinion are not correct
+
+---
+
+[Request interrupted by user for tool use]
