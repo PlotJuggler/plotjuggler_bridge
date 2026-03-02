@@ -44,21 +44,6 @@ jobs:
           # Copy binary (colcon without --merge-install)
           cp install/pj_bridge/lib/pj_bridge/pj_bridge_ros2 AppDir/usr/bin/
 
-          # Bundle shared libraries from the conda environment
-          # (exclude glibc/ld-linux which must come from the host)
-          ldd AppDir/usr/bin/pj_bridge_ros2 | \
-            grep "$CONDA_PREFIX" | \
-            awk '{print $3}' | \
-            xargs -I{} cp --no-dereference {} AppDir/usr/lib/ 2>/dev/null || true
-
-          # Also copy transitive deps from conda lib/
-          for lib in AppDir/usr/lib/*.so*; do
-            ldd "$lib" 2>/dev/null | \
-              grep "$CONDA_PREFIX" | \
-              awk '{print $3}' | \
-              xargs -I{} cp --no-dereference {} AppDir/usr/lib/ 2>/dev/null || true
-          done
-
           # Copy ament index (needed for schema discovery at runtime)
           cp -r "$CONDA_PREFIX"/share/ament_index AppDir/usr/share/ 2>/dev/null || true
 
@@ -97,7 +82,9 @@ jobs:
           APPRUN
           chmod +x AppDir/AppRun
 
-          # Generate AppImage
+          # Let linuxdeploy resolve and bundle all shared libraries
+          # LD_LIBRARY_PATH includes conda env so linuxdeploy can find ROS/spdlog/etc libs
+          export LD_LIBRARY_PATH="$CONDA_PREFIX/lib:${LD_LIBRARY_PATH:-}"
           ARCH=x86_64 ./linuxdeploy-x86_64.AppImage \
             --appdir AppDir \
             --output appimage
