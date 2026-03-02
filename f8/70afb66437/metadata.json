@@ -1,0 +1,45 @@
+{
+  "cli_version": "0.4.2",
+  "checkpoint_id": "f870afb66437",
+  "strategy": "manual-commit",
+  "branch": "unify-backends",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "CMakeLists.txt",
+    "app/include/pj_bridge/standalone_event_loop.hpp",
+    "app/src/bridge_server.cpp",
+    "app/src/standalone_event_loop.cpp",
+    "conanfile.txt",
+    "fastdds/src/fastdds_subscription_manager.cpp",
+    "fastdds/src/fastdds_topic_source.cpp",
+    "fastdds/src/main.cpp",
+    "ros2/include/pj_bridge_ros2/ros2_subscription_manager.hpp",
+    "ros2/include/pj_bridge_ros2/ros2_topic_source.hpp",
+    "ros2/include/pj_bridge_ros2/topic_discovery.hpp",
+    "ros2/src/main.cpp",
+    "ros2/src/ros2_subscription_manager.cpp",
+    "ros2/src/topic_discovery.cpp",
+    "rti/include/pj_bridge_rti/dds_subscription_manager.hpp",
+    "rti/include/pj_bridge_rti/dds_topic_discovery.hpp",
+    "rti/src/dds_subscription_manager.cpp",
+    "rti/src/dds_topic_discovery.cpp",
+    "rti/src/main.cpp",
+    "tests/unit/test_topic_discovery.cpp"
+  ],
+  "sessions": [
+    {
+      "metadata": "/f8/70afb66437/0/metadata.json",
+      "transcript": "/f8/70afb66437/0/full.jsonl",
+      "context": "/f8/70afb66437/0/context.md",
+      "content_hash": "/f8/70afb66437/0/content_hash.txt",
+      "prompt": "/f8/70afb66437/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 67,
+    "cache_creation_tokens": 97846,
+    "cache_read_tokens": 5800067,
+    "output_tokens": 22483,
+    "api_call_count": 61
+  }
+}
