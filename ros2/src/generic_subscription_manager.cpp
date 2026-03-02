@@ -1,0 +1,106 @@
+/*
+ * Copyright (C) 2026 Davide Faconti
+ *
+ * This file is part of pj_bridge.
+ *
+ * pj_bridge is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Affero General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * pj_bridge is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU Affero General Public License for more details.
+ *
+ * You should have received a copy of the GNU Affero General Public License
+ * along with pj_bridge. If not, see <https://www.gnu.org/licenses/>.
+ */
+
+#include "pj_bridge_ros2/generic_subscription_manager.hpp"
+
+#include "pj_bridge/time_utils.hpp"
+
+namespace pj_bridge {
+
+GenericSubscriptionManager::GenericSubscriptionManager(rclcpp::Node::SharedPtr node) : node_(node) {}
+
+bool GenericSubscriptionManager::subscribe(
+    const std::string& topic_name, const std::string& topic_type, Ros2MessageCallback callback) {
+  std::lock_guard<std::mutex> lock(mutex_);
+
+  auto it = subscriptions_.find(topic_name);
+
+  if (it != subscriptions_.end()) {
+    it->second.reference_count++;
+    return true;
+  }
+
+  try {
+    auto sub_callback = [topic_name, callback](std::shared_ptr<rclcpp::SerializedMessage> msg) {
+      uint64_t receive_time = get_current_time_ns();
+      callback(topic_name, msg, receive_time);
+    };
+
+    auto subscription = node_->create_generic_subscription(topic_name, topic_type, rclcpp::QoS(100), sub_callback);
+
+    SubscriptionInfo info;
+    info.subscription = subscription;
+    info.topic_type = topic_type;
+    info.callback = callback;
+    info.reference_count = 1;
+
+    subscriptions_[topic_name] = std::move(info);
+
+    return true;
+  } catch (const std::exception& e) {
+    RCLCPP_ERROR(
+        node_->get_logger(), "Failed to create subscription for topic '%s' (type '%s'): %s", topic_name.c_str(),
+        topic_type.c_str(), e.what());
+    return false;
+  }
+}
+
+bool GenericSubscriptionManager::unsubscribe(const std::string& topic_name) {
+  std::lock_guard<std::mutex> lock(mutex_);
+
+  auto it = subscriptions_.find(topic_name);
+  if (it == subscriptions_.end()) {
+    return false;
+  }
+
+  if (it->second.reference_count == 0) {
+    return false;
+  }
+
+  it->second.reference_count--;
+
+  if (it->second.reference_count == 0) {
+    subscriptions_.erase(it);
+  }
+
+  return true;
+}
+
+bool GenericSubscriptionManager::is_subscribed(const std::string& topic_name) const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return subscriptions_.find(topic_name) != subscriptions_.end();
+}
+
+size_t GenericSubscriptionManager::get_reference_count(const std::string& topic_name) const {
+  std::lock_guard<std::mutex> lock(mutex_);
+
+  auto it = subscriptions_.find(topic_name);
+  if (it != subscriptions_.end()) {
+    return it->second.reference_count;
+  }
+
+  return 0;
+}
+
+void GenericSubscriptionManager::unsubscribe_all() {
+  std::lock_guard<std::mutex> lock(mutex_);
+  subscriptions_.clear();
+}
+
+}  // namespace pj_bridge

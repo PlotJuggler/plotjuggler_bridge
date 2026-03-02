@@ -1,9 +1,9 @@
 <?xml version="1.0"?>
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
-  <name>pj_ros_bridge</name>
-  <version>0.1.0</version>
-  <description>ROS2 bridge server that forwards ROS2 topic content over WebSocket</description>
+  <name>pj_bridge</name>
+  <version>0.2.0</version>
+  <description>Multi-backend bridge server (ROS2 / RTI DDS) that forwards topic content over WebSocket</description>
   <maintainer email="davide.faconti@gmail.com">davide</maintainer>
   <author email="davide.faconti@gmail.com">davide</author>
   <license>AGPL-3.0</license>
@@ -14,15 +14,15 @@
 
   <depend>ament_index_cpp</depend>
   <depend>rclcpp</depend>
+  <depend>sensor_msgs</depend>
+  <depend>nav_msgs</depend>
 
   <exec_depend>ros2launch</exec_depend>
   <exec_depend>launch_ros</exec_depend>
   <exec_depend>geometry_msgs</exec_depend>
 
   <test_depend>ament_cmake_gtest</test_depend>
-  <test_depend>sensor_msgs</test_depend>
   <test_depend>geometry_msgs</test_depend>
-  <test_depend>nav_msgs</test_depend>
 
   <export>
     <build_type>ament_cmake</build_type>
