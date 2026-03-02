@@ -3,13 +3,52 @@
   "checkpoint_id": "7cd20ad6de03",
   "strategy": "manual-commit",
   "branch": "unify-backends",
-  "checkpoints_count": 5,
+  "checkpoints_count": 7,
   "files_touched": [
+    "CLAUDE.md",
+    "CMakeLists.txt",
+    "app/include/pj_bridge/bridge_server.hpp",
     "app/include/pj_bridge/message_buffer.hpp",
+    "app/include/pj_bridge/message_serializer.hpp",
     "app/include/pj_bridge/middleware/middleware_interface.hpp",
+    "app/include/pj_bridge/middleware/websocket_middleware.hpp",
+    "app/include/pj_bridge/protocol_constants.hpp",
+    "app/include/pj_bridge/session_manager.hpp",
     "app/include/pj_bridge/subscription_manager_interface.hpp",
+    "app/include/pj_bridge/time_utils.hpp",
     "app/include/pj_bridge/topic_source_interface.hpp",
-    "docs/ARCHITECTURE.md"
+    "app/src/bridge_server.cpp",
+    "app/src/message_buffer.cpp",
+    "app/src/message_serializer.cpp",
+    "app/src/middleware/websocket_middleware.cpp",
+    "app/src/session_manager.cpp",
+    "docs/ARCHITECTURE.md",
+    "package.xml",
+    "ros2/include/pj_bridge_ros2/generic_subscription_manager.hpp",
+    "ros2/include/pj_bridge_ros2/message_stripper.hpp",
+    "ros2/include/pj_bridge_ros2/ros2_subscription_manager.hpp",
+    "ros2/include/pj_bridge_ros2/ros2_topic_source.hpp",
+    "ros2/include/pj_bridge_ros2/schema_extractor.hpp",
+    "ros2/include/pj_bridge_ros2/topic_discovery.hpp",
+    "ros2/src/generic_subscription_manager.cpp",
+    "ros2/src/main.cpp",
+    "ros2/src/message_stripper.cpp",
+    "ros2/src/ros2_subscription_manager.cpp",
+    "ros2/src/ros2_topic_source.cpp",
+    "ros2/src/schema_extractor.cpp",
+    "ros2/src/topic_discovery.cpp",
+    "rti/include/pj_bridge_rti/dds_subscription_manager.hpp",
+    "rti/include/pj_bridge_rti/dds_topic_discovery.hpp",
+    "rti/include/pj_bridge_rti/rti_subscription_manager.hpp",
+    "rti/include/pj_bridge_rti/rti_topic_source.hpp",
+    "rti/src/dds_subscription_manager.cpp",
+    "rti/src/dds_topic_discovery.cpp",
+    "rti/src/main.cpp",
+    "rti/src/rti_subscription_manager.cpp",
+    "rti/src/rti_topic_source.cpp",
+    "tests/unit/test_bridge_server.cpp",
+    "tests/unit/test_message_buffer.cpp",
+    "tests/unit/test_protocol_constants.cpp"
   ],
   "sessions": [
     {
@@ -18,13 +57,20 @@
       "context": "/7c/d20ad6de03/0/context.md",
       "content_hash": "/7c/d20ad6de03/0/content_hash.txt",
       "prompt": "/7c/d20ad6de03/0/prompt.txt"
+    },
+    {
+      "metadata": "/7c/d20ad6de03/1/metadata.json",
+      "transcript": "/7c/d20ad6de03/1/full.jsonl",
+      "context": "/7c/d20ad6de03/1/context.md",
+      "content_hash": "/7c/d20ad6de03/1/content_hash.txt",
+      "prompt": "/7c/d20ad6de03/1/prompt.txt"
     }
   ],
   "token_usage": {
-    "input_tokens": 59,
-    "cache_creation_tokens": 141702,
-    "cache_read_tokens": 2613458,
-    "output_tokens": 22336,
-    "api_call_count": 37
+    "input_tokens": 227,
+    "cache_creation_tokens": 652330,
+    "cache_read_tokens": 19992667,
+    "output_tokens": 67130,
+    "api_call_count": 188
   }
 }

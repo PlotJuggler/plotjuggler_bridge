@@ -1,0 +1,1029 @@
+Implement the following plan:
+
+# Unify pj_ros_bridge + dds_websocket_bridge into pj_bridge
+
+## Context
+
+Two projects implement identical WebSocket bridge functionality for different backends:
+- **pj_ros_bridge** (`/home/davide/ws_plotjuggler/src/pj_ros_bridge/`) — ROS2 Humble
+- **dds_websocket_bridge** (`~/Asensus/ros_starman_ws/dds_websocket_bridge/`) — RTI Connext DDS
+
+They share identical: API protocol, binary wire format (PJRB + ZSTD), session management, message buffering, serialization, and WebSocket middleware. The only differences are topic discovery, schema extraction, subscription management, logging, and build system.
+
+**Goal**: Unify into a single project `pj_bridge` with a backend-agnostic `app/` core library and two optional plugins (`ros2/`, `rti/`). No client-side changes needed.
+
+## Design Decisions
+
+- **Project name**: `pj_bridge` (rename from `pj_ros_bridge`)
+- **Namespace**: `pj_bridge` (rename from `pj_ros_bridge`)
+- **Event loop**: App-driven (no timers in BridgeServer; main.cpp calls methods)
+- **Executables**: `pj_bridge_ros2` + `pj_bridge_rti` (two separate binaries)
+- **Logging**: spdlog in app layer (FetchContent, like IXWebSocket)
+- **Message stripping**: ROS2-plugin only
+- **RTI detection**: `find_package(RTIConnextDDS QUIET)`
+- **ROS2 detection**: `find_package(ament_cmake QUIET)` (auto-detected by colcon)
+
+## Abstract Interfaces
+
+Two new interfaces in `app/include/pj_bridge/`:
+
+### TopicSourceInterface
+```cpp
+struct TopicInfo { std::string name; std::string type; };
+
+class TopicSourceInterface {
+public:
+  virtual ~TopicSourceInterface() = default;
+  virtual std::vector<TopicInfo> get_topics() = 0;
+  virtual std::string get_schema(const std::string& topic_name) = 0;
+  virtual std::string schema_encoding() const = 0;  // "ros2msg" or "omgidl"
+};
+```
+
+### SubscriptionManagerInterface
+```cpp
+using MessageCallback = std::function<void(
+    const std::string& topic_name,
+    std::shared_ptr<std::vector<std::byte>> cdr_data,
+    uint64_t timestamp_ns)>;
+
+class SubscriptionManagerInterface {
+public:
+  virtual ~SubscriptionManagerInterface() = default;
+  virtual void set_message_callback(MessageCallback callback) = 0;
+  virtual bool subscribe(const std::string& topic_name, const std::string& topic_type) = 0;
+  virtual bool unsubscribe(const std::string& topic_name) = 0;
+  virtual void unsubscribe_all() = 0;
+};
+```
+
+## Target Directory Structure
+
+```
+pj_bridge/
+├── app/
+│   ├── include/pj_bridge/
+│   │   ├── topic_source_interface.hpp       [NEW]
+│   │   ├── subscription_manager_interface.hpp [NEW]
+│   │   ├── middleware/
+│   │   │   ├── middleware_interface.hpp      [from include/pj_ros_bridge/middleware/]
+│   │   │   └── websocket_middleware.hpp      [from include/pj_ros_bridge/middleware/]
+│   │   ├── bridge_server.hpp                [refactored - no ROS2 deps]
+│   │   ├── session_manager.hpp              [from include/pj_ros_bridge/]
+│   │   ├── message_buffer.hpp               [unified - vector<byte>]
+│   │   ├── message_serializer.hpp           [unified - byte*, size_t]
+│   │   ├── protocol_constants.hpp           [merged both encodings]
+│   │   └── time_utils.hpp                   [from include/pj_ros_bridge/]
+│   └── src/
+│       ├── middleware/websocket_middleware.cpp
+│       ├── bridge_server.cpp                [refactored - spdlog, interfaces]
+│       ├── session_manager.cpp
+│       ├── message_buffer.cpp
+│       └── message_serializer.cpp
+├── ros2/
+│   ├── include/pj_bridge_ros2/
+│   │   ├── ros2_topic_source.hpp            [wraps TopicDiscovery + SchemaExtractor]
+│   │   ├── ros2_subscription_manager.hpp    [wraps GenericSubscriptionManager]
+│   │   ├── topic_discovery.hpp              [from include/pj_ros_bridge/]
+│   │   ├── schema_extractor.hpp             [from include/pj_ros_bridge/]
+│   │   ├── generic_subscription_manager.hpp [from include/pj_ros_bridge/]
+│   │   └── message_stripper.hpp             [from include/pj_ros_bridge/]
+│   └── src/
+│       ├── ros2_topic_source.cpp            [NEW adapter]
+│       ├── ros2_subscription_manager.cpp    [NEW adapter]
+│       ├── topic_discovery.cpp              [from src/]
+│       ├── schema_extractor.cpp             [from src/]
+│       ├── generic_subscription_manager.cpp [from src/]
+│       ├── message_stripper.cpp             [from src/]
+│       └── main.cpp                         [ROS2 entry point]
+├── rti/
+│   ├── include/pj_bridge_rti/
+│   │   ├── rti_topic_source.hpp             [wraps DdsTopicDiscovery]
+│   │   ├── rti_subscription_manager.hpp     [wraps DdsSubscriptionManager]
+│   │   ├── dds_topic_discovery.hpp          [from dds_websocket_bridge]
+│   │   └── dds_subscription_manager.hpp     [from dds_websocket_bridge]
+│   └── src/
+│       ├── rti_topic_source.cpp             [NEW adapter]
+│       ├── rti_subscription_manager.cpp     [NEW adapter]
+│       ├── dds_topic_discovery.cpp          [from dds_websocket_bridge]
+│       ├── dds_subscription_manager.cpp     [from dds_websocket_bridge]
+│       └── main.cpp                         [RTI entry point]
+├── 3rdparty/                                [existing: nlohmann, tl, ixwebsocket]
+├── tests/
+│   └── unit/
+│       ├── test_bridge_server.cpp           [rewritten with mocks]
+│       ├── test_session_manager.cpp         [namespace change]
+│       ├── test_message_buffer.cpp          [data type change]
+│       ├── test_message_serializer.cpp      [signature change]
+│       ├── test_websocket_middleware.cpp     [namespace change]
+│       ├── test_protocol_constants.cpp      [namespace change]
+│       ├── test_schema_extractor.cpp        [ROS2-only]
+│       ├── test_topic_discovery.cpp         [ROS2-only]
+│       ├── test_generic_subscription_manager.cpp [ROS2-only]
+│       └── test_message_stripper.cpp        [ROS2-only]
+├── DATA/                                    [unchanged]
+├── cmake/FindZSTD.cmake                     [unchanged]
+├── data_path.hpp.in                         [unchanged]
+├── CMakeLists.txt                           [rewritten]
+├── package.xml                              [renamed to pj_bridge]
+├── .clang-tidy                              [unchanged]
+├── .pre-commit-config.yaml                  [unchanged]
+└── CLAUDE.md                                [updated]
+```
+
+## Implementation Steps
+
+### Step 1: Create branch and directory structure
+
+Create `unify-backends` branch. Create `app/`, `ros2/`, `rti/` directory trees (empty).
+
+### Step 2: Create abstract interface headers
+
+Create the two new files:
+- `app/include/pj_bridge/topic_source_interface.hpp`
+- `app/include/pj_bridge/subscription_manager_interface.hpp`
+
+### Step 3: Move and adapt common components to `app/`
+
+Move these files, changing namespace `pj_ros_bridge` → `pj_bridge` and removing ROS2 includes:
+
+| File | Key Changes |
+|------|-------------|
+| `middleware_interface.hpp` | Namespace only |
+| `websocket_middleware.hpp/.cpp` | Namespace. Adopt DDS version's improved shutdown (shared_ptr server, timeout thread) |
+| `session_manager.hpp/.cpp` | Namespace only |
+| `time_utils.hpp` | Namespace only |
+| `protocol_constants.hpp` | Namespace. Add `kSchemaEncodingOmgIdl = "omgidl"` |
+| `message_buffer.hpp/.cpp` | Namespace. Change `BufferedMessage` to use `shared_ptr<vector<byte>>` + add `received_at_ns` field. Remove `#include <rclcpp/rclcpp.hpp>` |
+| `message_serializer.hpp/.cpp` | Namespace. Change `serialize_message()` to take `const std::byte* data, size_t data_size`. Remove rclcpp include |
+| `bridge_server.hpp/.cpp` | **Major refactor** — see Step 4 |
+
+### Step 4: Refactor BridgeServer
+
+**Header changes** (`app/include/pj_bridge/bridge_server.hpp`):
+- Remove `#include <rclcpp/rclcpp.hpp>` and all ROS2 includes
+- Add `#include <spdlog/spdlog.h>`
+- New constructor: `BridgeServer(shared_ptr<TopicSourceInterface>, shared_ptr<SubscriptionManagerInterface>, shared_ptr<MiddlewareInterface>, int port, double session_timeout, double publish_rate)`
+- Remove: `node_`, `topic_discovery_`, `schema_extractor_`, old `subscription_manager_`, `session_timeout_timer_`, `publish_timer_`, `strip_large_messages_`, `make_buffer_callback()`
+- Add: `topic_source_`, `subscription_manager_` (via interfaces)
+- Make `publish_aggregated_messages()` and `check_session_timeouts()` public (called by main.cpp)
+- Add `StatsSnapshot` struct and `snapshot_and_reset_stats()` from DDS version
+
+**Source changes** (`app/src/bridge_server.cpp`):
+- Replace all `RCLCPP_INFO/WARN/ERROR/DEBUG(node_->get_logger(), fmt, args)` with `spdlog::info/warn/error/debug(fmt, args)` (printf → fmt syntax)
+- `initialize()`: No timers. Set message callback on subscription_manager_: `[this](topic, data, ts) { message_buffer_->add_message(topic, ts, move(data)); }`
+- `handle_get_topics()`: `topic_source_->get_topics()` instead of `topic_discovery_->discover_topics()`
+- `handle_subscribe()`: `topic_source_->get_schema(topic_name)` + `topic_source_->schema_encoding()` instead of `schema_extractor_->get_message_definition(type)`. `subscription_manager_->subscribe(name, type)` instead of `subscribe(name, type, callback)`
+- `handle_resume()`: Same pattern — `subscription_manager_->subscribe(topic, type)` (look up type from topic_source)
+- `publish_aggregated_messages()`: Adopt DDS version's improved lock ordering (build frames under lock, send outside lock). Serializer uses `msg.data->data(), msg.data->size()`
+
+### Step 5: Move ROS2-specific code to `ros2/`
+
+Move these files to `ros2/include/pj_bridge_ros2/` and `ros2/src/`:
+- `topic_discovery.hpp/.cpp` — keep internal, used by Ros2TopicSource
+- `schema_extractor.hpp/.cpp` — keep internal, used by Ros2TopicSource
+- `generic_subscription_manager.hpp/.cpp` — keep internal, used by Ros2SubscriptionManager
+- `message_stripper.hpp/.cpp` — keep internal, used by Ros2SubscriptionManager
+
+### Step 6: Create ROS2 adapters
+
+**`ros2/include/pj_bridge_ros2/ros2_topic_source.hpp`** + `ros2/src/ros2_topic_source.cpp`:
+- Implements `pj_bridge::TopicSourceInterface`
+- Constructor takes `rclcpp::Node::SharedPtr`
+- Internally creates `TopicDiscovery` + `SchemaExtractor`
+- `get_topics()` → delegates to `TopicDiscovery::discover_topics()`, maps to `pj_bridge::TopicInfo`
+- `get_schema(topic_name)` → looks up type from cached topics, calls `SchemaExtractor::get_message_definition(type)`
+- `schema_encoding()` → returns `pj_bridge::kSchemaEncodingRos2Msg`
+
+**`ros2/include/pj_bridge_ros2/ros2_subscription_manager.hpp`** + `ros2/src/ros2_subscription_manager.cpp`:
+- Implements `pj_bridge::SubscriptionManagerInterface`
+- Constructor takes `rclcpp::Node::SharedPtr`, `bool strip_large_messages`
+- Internally creates `GenericSubscriptionManager`
+- `set_message_callback(cb)` → stores callback
+- `subscribe(topic_name, topic_type)` → creates ROS2 GenericSubscription callback that: receives `SerializedMessage` → optionally strips → converts to `shared_ptr<vector<byte>>` (memcpy from rcl buffer) → calls stored callback
+- `unsubscribe(topic_name)` → delegates to inner manager
+- `unsubscribe_all()` → delegates
+
+**`ros2/src/main.cpp`**:
+```cpp
+int main(int argc, char** argv) {
+  rclcpp::init(argc, argv);
+  auto node = std::make_shared<rclcpp::Node>("pj_bridge");
+  // Declare/get ROS2 parameters (port, publish_rate, session_timeout, strip_large_messages)
+  auto topic_source = std::make_shared<Ros2TopicSource>(node);
+  auto sub_manager = std::make_shared<Ros2SubscriptionManager>(node, strip_large_messages);
+  auto middleware = std::make_shared<pj_bridge::WebSocketMiddleware>();
+  pj_bridge::BridgeServer server(topic_source, sub_manager, middleware, port, session_timeout, publish_rate);
+  server.initialize();
+
+  // ROS2 timers drive the event loop
+  auto request_timer = node->create_wall_timer(10ms, [&]() { server.process_requests(); });
+  auto publish_timer = node->create_wall_timer(duration<double>(1.0/publish_rate), [&]() { server.publish_aggregated_messages(); });
+  auto timeout_timer = node->create_wall_timer(1s, [&]() { server.check_session_timeouts(); });
+
+  rclcpp::executors::SingleThreadedExecutor executor;
+  executor.add_node(node);
+  while (rclcpp::ok()) { executor.spin_some(100ms); }
+  // Graceful shutdown...
+}
+```
+
+### Step 7: Port RTI DDS backend to `rti/`
+
+Copy from `~/Asensus/ros_starman_ws/dds_websocket_bridge/src/lib/`:
+- `dds_topic_discovery.hpp/.cpp` → `rti/include/pj_bridge_rti/` + `rti/src/`
+- `dds_subscription_manager.hpp/.cpp` → `rti/include/pj_bridge_rti/` + `rti/src/`
+
+Change namespace from `dds_websocket_bridge` to `pj_bridge::rti` (or keep flat `pj_bridge`).
+
+Create thin adapters:
+
+**`rti/include/pj_bridge_rti/rti_topic_source.hpp`** + `rti/src/rti_topic_source.cpp`:
+- Implements `pj_bridge::TopicSourceInterface`
+- Wraps `DdsTopicDiscovery` (reference, not owned)
+- `get_topics()` → maps `{name, type_name}` to `{name, type}`
+- `get_schema(topic_name)` → `discovery_.get_schema(topic_name)`
+- `schema_encoding()` → returns `kSchemaEncodingOmgIdl`
+
+**`rti/include/pj_bridge_rti/rti_subscription_manager.hpp`** + `rti/src/rti_subscription_manager.cpp`:
+- Implements `pj_bridge::SubscriptionManagerInterface`
+- Wraps `DdsSubscriptionManager` (reference, not owned)
+- `set_message_callback()` → delegates (already same signature)
+- `subscribe(name, type)` → `inner_.subscribe(name)` (DDS ignores type)
+- `unsubscribe()`, `unsubscribe_all()` → delegate
+
+**`rti/src/main.cpp`**:
+- Port from DDS bridge's `main.cpp`
+- CLI parsing with CLI11 (domains, port, publish_rate, session_timeout, qos_profile, log_level)
+- Signal handlers (SIGINT, SIGTERM)
+- Creates DDS components, adapters, BridgeServer
+- std::chrono event loop calling `process_requests()`, `publish_aggregated_messages()`, `check_session_timeouts()`
+
+### Step 8: Rewrite CMakeLists.txt
+
+```cmake
+project(pj_bridge)
+# ... C++17, sanitizers, cmake module path ...
+
+find_package(ZSTD REQUIRED)
+# spdlog via FetchContent (fallback to find_package)
+# IXWebSocket vendored (existing)
+
+# === Core library (always built) ===
+add_library(pj_bridge_app STATIC
+  app/src/middleware/websocket_middleware.cpp
+  app/src/bridge_server.cpp
+  app/src/session_manager.cpp
+  app/src/message_buffer.cpp
+  app/src/message_serializer.cpp)
+target_include_directories(pj_bridge_app PUBLIC app/include 3rdparty/)
+target_link_libraries(pj_bridge_app PUBLIC zstd::libzstd_shared ixwebsocket::ixwebsocket spdlog::spdlog)
+
+# === ROS2 backend (conditional) ===
+find_package(ament_cmake QUIET)
+if(ament_cmake_FOUND)
+  find_package(rclcpp REQUIRED)
+  find_package(ament_index_cpp REQUIRED)
+  find_package(sensor_msgs REQUIRED)
+  find_package(nav_msgs REQUIRED)
+
+  add_library(pj_bridge_ros2_lib STATIC
+    ros2/src/ros2_topic_source.cpp
+    ros2/src/ros2_subscription_manager.cpp
+    ros2/src/topic_discovery.cpp
+    ros2/src/schema_extractor.cpp
+    ros2/src/generic_subscription_manager.cpp
+    ros2/src/message_stripper.cpp)
+  target_include_directories(pj_bridge_ros2_lib PUBLIC ros2/include)
+  target_link_libraries(pj_bridge_ros2_lib PUBLIC pj_bridge_app)
+  ament_target_dependencies(pj_bridge_ros2_lib PUBLIC rclcpp ament_index_cpp sensor_msgs nav_msgs)
+
+  add_executable(pj_bridge_ros2 ros2/src/main.cpp)
+  target_link_libraries(pj_bridge_ros2 pj_bridge_ros2_lib)
+  install(TARGETS pj_bridge_ros2 DESTINATION lib/${PROJECT_NAME})
+endif()
+
+# === RTI backend (conditional) ===
+find_package(RTIConnextDDS QUIET CONFIG)
+if(RTIConnextDDS_FOUND)
+  add_library(pj_bridge_rti_lib STATIC
+    rti/src/rti_topic_source.cpp
+    rti/src/rti_subscription_manager.cpp
+    rti/src/dds_topic_discovery.cpp
+    rti/src/dds_subscription_manager.cpp)
+  target_include_directories(pj_bridge_rti_lib PUBLIC rti/include)
+  target_link_libraries(pj_bridge_rti_lib PUBLIC pj_bridge_app RTIConnextDDS::cpp2_api)
+
+  add_executable(pj_bridge_rti rti/src/main.cpp)
+  target_link_libraries(pj_bridge_rti pj_bridge_rti_lib)
+endif()
+
+# === Tests ===
+if(BUILD_TESTING)
+  # Core tests (always, mock-based, no ROS2/DDS deps)
+  # test_bridge_server, test_session_manager, test_message_buffer,
+  # test_message_serializer, test_websocket_middleware, test_protocol_constants
+
+  # ROS2-specific tests (only if ament_cmake found)
+  # test_schema_extractor, test_topic_discovery,
+  # test_generic_subscription_manager, test_message_stripper
+endif()
+
+if(ament_cmake_FOUND)
+  ament_package()
+endif()
+```
+
+### Step 9: Update tests
+
+**Core tests** (link `pj_bridge_app` + gtest only, no ROS2):
+
+`test_bridge_server.cpp` — the biggest change:
+- Remove `rclcpp::init/shutdown` from fixture
+- Replace `rclcpp::Node` with mock interfaces
+- Create `MockTopicSource : public TopicSourceInterface` — returns configurable topics and schemas
+- Create `MockSubscriptionManager : public SubscriptionManagerInterface` — tracks ref counts, stores callback, provides `inject_message()` helper
+- `MockMiddleware` stays identical (already generic)
+- Fixture: `BridgeServer(mock_topic_source_, mock_sub_manager_, mock_middleware_, port, timeout, rate)`
+- Most test cases only change in fixture setup; the JSON protocol assertions remain identical
+
+`test_message_buffer.cpp` — change `rclcpp::SerializedMessage` → `vector<byte>`
+`test_message_serializer.cpp` — change `serialize_message` calls to `(topic, ts, data, size)`
+`test_session_manager.cpp` — namespace change only
+`test_websocket_middleware.cpp` — namespace change only
+`test_protocol_constants.cpp` — namespace change, add `kSchemaEncodingOmgIdl` test
+
+**ROS2-specific tests** (link `pj_bridge_ros2_lib`, require ament):
+- `test_schema_extractor.cpp`, `test_topic_discovery.cpp`, `test_generic_subscription_manager.cpp`, `test_message_stripper.cpp`
+- Namespace change. Still require `rclcpp::init/shutdown`.
+
+### Step 10: Update package.xml and add conanfile.py
+
+- `package.xml`: rename `<name>pj_bridge</name>`, update exec_depend/build_depend
+- `conanfile.py`: Create for RTI builds (based on DDS bridge's conanfile, referencing pj_bridge)
+
+### Step 11: Update CLAUDE.md
+
+Update all references to reflect new structure, commands, and architecture.
+
+## Key Mapping: How BridgeServer Methods Change
+
+| Method | Current (ROS2) | Unified |
+|--------|---------------|---------|
+| Constructor | `(Node, Middleware, port, timeout, rate, strip)` | `(TopicSource, SubManager, Middleware, port, timeout, rate)` |
+| `initialize()` | Creates TopicDiscovery, SchemaExtractor, GenericSubManager, timers | Creates MessageBuffer, SessionManager. Sets message callback. No timers |
+| `handle_get_topics()` | `topic_discovery_->discover_topics()` | `topic_source_->get_topics()` |
+| `handle_subscribe()` | `schema_extractor_->get_message_definition(type)`, `subscribe(name, type, callback)` | `topic_source_->get_schema(name)`, `subscription_manager_->subscribe(name, type)` |
+| `handle_resume()` | `subscribe(topic, type, make_buffer_callback(type))` | `subscription_manager_->subscribe(topic, type)` |
+| `cleanup_session()` | `subscription_manager_->unsubscribe(topic)` | Same (interface method) |
+| `publish_aggregated_messages()` | ROS2 timer, holds lock across send | Public, called by main.cpp. DDS lock ordering (build frames under lock, send outside) |
+| `check_session_timeouts()` | ROS2 timer | Public, called by main.cpp |
+| Logging | `RCLCPP_INFO(node_->get_logger(), "%s", arg)` | `spdlog::info("{}", arg)` |
+
+## Potential Pitfalls
+
+1. **SerializedMessage → vector\<byte\> memcpy**: Each ROS2 message gets copied once. Negligible vs ZSTD compression cost.
+2. **Schema lookup by topic_name**: `Ros2TopicSource::get_schema()` must maintain name→type mapping from last `get_topics()` call.
+3. **Thread safety of set_message_callback()**: The ROS2 adapter must protect the callback pointer since GenericSubscription callbacks fire on the executor thread.
+4. **spdlog dependency**: Add via FetchContent for ROS2 builds (not always available as system package).
+5. **Test fixture for core tests**: Must NOT depend on rclcpp. Use plain gtest, not ament_cmake_gtest, for core tests.
+
+## Verification
+
+After implementation:
+
+```bash
+# 1. Build with colcon (ROS2 only — verifies ros2 backend)
+cd ~/ws_plotjuggler && source /opt/ros/humble/setup.bash
+colcon build --packages-select pj_bridge --cmake-args -DCMAKE_BUILD_TYPE=Release
+
+# 2. Run core + ROS2 tests
+colcon test --packages-select pj_bridge && colcon test-result --verbose
+
+# 3. TSAN build
+colcon build --packages-select pj_bridge --build-base build_tsan --install-base install_tsan --cmake-args -DCMAKE_BUILD_TYPE=Release -DENABLE_TSAN=ON
+
+# 4. ASAN build
+colcon build --packages-select pj_bridge --build-base build_asan --install-base install_asan --cmake-args -DCMAKE_BUILD_TYPE=Release -DENABLE_ASAN=ON
+
+# 5. Integration test with rosbag
+ros2 bag play DATA/sample.mcap --loop &
+ros2 run pj_bridge pj_bridge_ros2
+python3 tests/integration/test_client.py --subscribe /topic
+
+# 6. RTI build (on machine with Conan + RTI)
+# conan install . && cmake ... && make
+```
+
+## Execution Order (minimizing risk)
+
+| # | Step | Risk | Test Impact |
+|---|------|------|-------------|
+| 1 | Create branch + dirs + interface headers | None | 0 |
+| 2 | Move + adapt `protocol_constants`, `time_utils`, `session_manager` | Low | Namespace fix |
+| 3 | Unify `MessageBuffer` (vector\<byte\>) | Medium | ~11 tests |
+| 4 | Unify `AggregatedMessageSerializer` (byte*, size) | Medium | ~22 tests |
+| 5 | Unify `MiddlewareInterface` + `WebSocketMiddleware` | Low | ~16 tests |
+| 6 | Refactor `BridgeServer` (interfaces + spdlog) | **High** | ~44 tests |
+| 7 | Create mocks + rewrite `test_bridge_server.cpp` | **High** | ~44 tests |
+| 8 | Create `Ros2TopicSource` + `Ros2SubscriptionManager` | Medium | 0 |
+| 9 | Move ROS2-specific code + tests to `ros2/` | Low | Path changes |
+| 10 | Update `ros2/src/main.cpp` | Low | Integration |
+| 11 | Rewrite `CMakeLists.txt` | Medium | All (paths) |
+| 12 | Port RTI backend from dds_websocket_bridge | Low | New tests |
+| 13 | Update `package.xml`, `CLAUDE.md` | None | 0 |
+
+Steps 6-7 are the highest risk and should be done together (BridgeServer + its tests must change in lockstep).
+
+
+If you need specific details from before exiting plan mode (like exact code snippets, error messages, or content you generated), read the full transcript at: /home/davide/.REDACTED.jsonl
+
+---
+
+This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.
+
+Analysis:
+Let me chronologically analyze the conversation:
+
+1. The user provided a detailed plan to unify two projects (pj_ros_bridge and dds_websocket_bridge) into a single project called pj_bridge.
+
+2. I started by searching episodic memory, reading the plan document, and launching two explore agents to read all source files from both codebases.
+
+3. The user sent an interrupting message: "be mindful that we had some difficulties with shitting down the RTI bridge (see latest commits)" - noting shutdown issues with the DDS bridge.
+
+4. I then read the DDS bridge's latest commits (commit 975baff fixed shutdown deadlock), and read all the key source files from both projects:
+   - All pj_ros_bridge headers, sources, and test files
+   - All dds_websocket_bridge headers, sources, and main.cpp
+   - CMakeLists.txt and package.xml from pj_ros_bridge
+
+5. I created a task list with 8 tasks tracking the implementation progress.
+
+6. I completed Task 1 (create branch and directory structure) - created `unify-backends` branch and `app/`, `ros2/`, `rti/` directories.
+
+7. I started Task 2 (create interface headers and move common components to app/) and created several files:
+   - topic_source_interface.hpp
+   - subscription_manager_interface.hpp (had to fix missing `<cstddef>` include for std::byte)
+   - protocol_constants.hpp (added kSchemaEncodingOmgIdl)
+   - time_utils.hpp
+   - session_manager.hpp and session_manager.cpp
+   - middleware_interface.hpp
+   - websocket_middleware.hpp (with shared_ptr server, shutdown timeout constants)
+   - websocket_middleware.cpp (adopted DDS version's improved shutdown)
+   - message_buffer.hpp (changed to use shared_ptr<vector<byte>> + received_at_ns)
+   - message_buffer.cpp (cleanup uses received_at_ns instead of timestamp_ns)
+
+8. The summary was requested while I was still in the middle of Task 2 - I still need to write:
+   - message_serializer.hpp and .cpp for app/
+   - Then Tasks 3-8
+
+Let me catalog all files read and created, and the key decisions made.
+
+Key DDS shutdown fix details (from commit 975baff):
+- shared_ptr<ix::WebSocketServer> instead of unique_ptr
+- server_to_stop = std::move(server_) pattern
+- Clear message callback to no-op before stopping
+- Pre-close all client connections
+- Timeout thread with detach on timeout for server_->stop()
+- Explicit ordered shutdown in main.cpp: clear callback → unsubscribe_all → shutdown middleware
+
+Key architectural decisions from the plan:
+- Project name: pj_bridge, namespace: pj_bridge
+- Event loop: App-driven (no timers in BridgeServer)
+- Two executables: pj_bridge_ros2 + pj_bridge_rti
+- Logging: spdlog in app layer
+- Message stripping: ROS2-plugin only
+- BufferedMessage uses shared_ptr<vector<byte>> + received_at_ns
+- Serializer takes const std::byte* data, size_t data_size
+- BridgeServer takes TopicSourceInterface + SubscriptionManagerInterface
+
+Summary:
+1. Primary Request and Intent:
+   The user requested implementation of a detailed plan to unify two separate projects (`pj_ros_bridge` at `/home/davide/ws_plotjuggler/src/pj_ros_bridge/` and `dds_websocket_bridge` at `~/Asensus/ros_starman_ws/dds_websocket_bridge/`) into a single project called `pj_bridge`. The unified project has a backend-agnostic `app/` core library and two optional plugins (`ros2/`, `rti/`). The full plan is documented in `docs/plans/2026-02-26-unify-backends-design.md`. The user also warned to "be mindful that we had some difficulties with shutting down the RTI bridge (see latest commits)."
+
+2. Key Technical Concepts:
+   - C++17 ROS2 Humble package refactored into multi-backend architecture
+   - Abstract interfaces: `TopicSourceInterface` and `SubscriptionManagerInterface`
+   - Namespace change: `pj_ros_bridge` → `pj_bridge`
+   - Message data type change: `rclcpp::SerializedMessage` → `shared_ptr<vector<std::byte>>`
+   - Logging change: `RCLCPP_*` macros → `spdlog::*`
+   - Event loop change: ROS2 timers → app-driven (main.cpp calls public methods)
+   - WebSocket shutdown fix: shared_ptr server, timeout thread with detach, pre-close clients, no-op callback replacement
+   - spdlog added via FetchContent (like IXWebSocket)
+   - `BufferedMessage` now has `received_at_ns` field for TTL cleanup (DDS pattern)
+   - `AggregatedMessageSerializer::serialize_message()` signature changes to `(topic, ts, const std::byte* data, size_t data_size)`
+   - CMake conditional builds: `find_package(ament_cmake QUIET)` for ROS2, `find_package(RTIConnextDDS QUIET)` for RTI
+   - Core tests must NOT depend on rclcpp (use plain gtest)
+   - DDS bridge's improved lock ordering in `publish_aggregated_messages()`: build frames under lock, send outside lock
+
+3. Files and Code Sections:
+
+   **Files READ from pj_ros_bridge (current project):**
+   - `include/pj_ros_bridge/bridge_server.hpp` - Main orchestrator, needs major refactor to use interfaces
+   - `src/bridge_server.cpp` (770 lines) - All handler methods, publish_aggregated_messages, make_buffer_callback
+   - `include/pj_ros_bridge/message_buffer.hpp` - Uses `shared_ptr<rclcpp::SerializedMessage>`, needs change to `shared_ptr<vector<byte>>`
+   - `src/message_buffer.cpp` - Buffer implementation with TTL cleanup using `timestamp_ns` (changed to `received_at_ns` in unified version)
+   - `include/pj_ros_bridge/message_serializer.hpp` - Takes `rclcpp::SerializedMessage&`, needs change to `const std::byte*, size_t`
+   - `src/message_serializer.cpp` - Wire format serialization + ZSTD compression
+   - `include/pj_ros_bridge/middleware/middleware_interface.hpp` - Abstract interface, namespace change only
+   - `include/pj_ros_bridge/middleware/websocket_middleware.hpp` - Uses `unique_ptr<ix::WebSocketServer>`, changed to `shared_ptr`
+   - `src/middleware/websocket_middleware.cpp` - Missing DDS shutdown improvements
+   - `include/pj_ros_bridge/session_manager.hpp` - Namespace change only
+   - `src/session_manager.cpp` - Namespace change only
+   - `include/pj_ros_bridge/protocol_constants.hpp` - Add `kSchemaEncodingOmgIdl`
+   - `include/pj_ros_bridge/time_utils.hpp` - Namespace change only
+   - `include/pj_ros_bridge/topic_discovery.hpp` - ROS2-specific, moves to ros2/
+   - `src/topic_discovery.cpp` - ROS2-specific, moves to ros2/
+   - `include/pj_ros_bridge/schema_extractor.hpp` - ROS2-specific, moves to ros2/
+   - `include/pj_ros_bridge/generic_subscription_manager.hpp` - ROS2-specific, moves to ros2/
+   - `src/generic_subscription_manager.cpp` - ROS2-specific, moves to ros2/
+   - `include/pj_ros_bridge/message_stripper.hpp` - ROS2-specific, moves to ros2/
+   - `src/message_stripper.cpp` - ROS2-specific, moves to ros2/
+   - `src/main.cpp` - ROS2 entry point, will be rewritten as ros2/src/main.cpp
+   - `CMakeLists.txt` - Current build, will be completely rewritten
+   - `package.xml` - Rename to pj_bridge
+   - `tests/unit/test_bridge_server.cpp` - Biggest test rewrite (uses rclcpp::init, needs MockTopicSource/MockSubscriptionManager)
+   - `tests/unit/test_message_buffer.cpp` - Uses rclcpp::SerializedMessage, needs vector<byte> change
+   - `tests/unit/test_message_serializer.cpp` - Uses rclcpp::SerializedMessage, needs byte*/size change
+   - `tests/unit/test_session_manager.cpp` - Namespace change only
+   - `tests/unit/test_websocket_middleware.cpp` - Namespace change only
+   - `tests/unit/test_protocol_constants.cpp` - Namespace change + add kSchemaEncodingOmgIdl test
+
+   **Files READ from dds_websocket_bridge:**
+   - `src/lib/src/websocket_middleware.cpp` - Has the improved shutdown with shared_ptr server, timeout thread, pre-close clients
+   - `src/lib/src/bridge_server.cpp` (703 lines) - Uses spdlog, interfaces by reference, improved lock ordering in publish_aggregated_messages, StatsSnapshot
+   - `src/app/main.cpp` - CLI11 parsing, std::chrono event loop, explicit ordered shutdown sequence
+   - All headers read via explore agent (protocol_constants, middleware_interface, websocket_middleware, session_manager, message_buffer, message_serializer, dds_topic_discovery, dds_subscription_manager, bridge_server, time_utils)
+
+   **Files CREATED so far (app/ layer):**
+   
+   - `app/include/pj_bridge/topic_source_interface.hpp` - New abstract interface
+     ```cpp
+     struct TopicInfo { std::string name; std::string type; };
+     class TopicSourceInterface {
+      public:
+       virtual ~TopicSourceInterface() = default;
+       virtual std::vector<TopicInfo> get_topics() = 0;
+       virtual std::string get_schema(const std::string& topic_name) = 0;
+       virtual std::string schema_encoding() const = 0;
+     };
+     ```
+
+   - `app/include/pj_bridge/subscription_manager_interface.hpp` - New abstract interface
+     ```cpp
+     using MessageCallback = std::function<void(
+         const std::string& topic_name, std::shared_ptr<std::vector<std::byte>> cdr_data, uint64_t timestamp_ns)>;
+     class SubscriptionManagerInterface {
+      public:
+       virtual ~SubscriptionManagerInterface() = default;
+       virtual void set_message_callback(MessageCallback callback) = 0;
+       virtual bool subscribe(const std::string& topic_name, const std::string& topic_type) = 0;
+       virtual bool unsubscribe(const std::string& topic_name) = 0;
+       virtual void unsubscribe_all() = 0;
+     };
+     ```
+
+   - `app/include/pj_bridge/protocol_constants.hpp` - Merged both encodings (added `kSchemaEncodingOmgIdl = "omgidl"`)
+
+   - `app/include/pj_bridge/time_utils.hpp` - Namespace change only
+
+   - `app/include/pj_bridge/session_manager.hpp` - Identical to original with namespace change
+
+   - `app/src/session_manager.cpp` - Identical to original with namespace change
+
+   - `app/include/pj_bridge/middleware/middleware_interface.hpp` - Namespace change only
+
+   - `app/include/pj_bridge/middleware/websocket_middleware.hpp` - Changed to `shared_ptr<ix::WebSocketServer>`, added `kShutdownTimeoutSeconds = 3`
+
+   - `app/src/middleware/websocket_middleware.cpp` - **Adopted DDS bridge's improved shutdown**: shared_ptr server, no-op callback replacement, pre-close all clients, timeout thread with detach, spdlog logging
+
+   - `app/include/pj_bridge/message_buffer.hpp` - Changed `BufferedMessage` to use `shared_ptr<vector<byte>>` and added `received_at_ns`
+     ```cpp
+     struct BufferedMessage {
+       uint64_t timestamp_ns;
+       uint64_t received_at_ns;
+       std::shared_ptr<std::vector<std::byte>> data;
+     };
+     ```
+
+   - `app/src/message_buffer.cpp` - TTL cleanup now uses `received_at_ns` instead of `timestamp_ns`
+
+4. Errors and fixes:
+   - `subscription_manager_interface.hpp` had `std::byte` not found because `<cstddef>` was missing. Fixed by adding `#include <cstddef>`.
+   - IDE diagnostics about file not found errors (e.g., `'pj_bridge/session_manager.hpp' file not found`) - these are expected since CMakeLists.txt hasn't been rewritten yet. Not actual compilation errors.
+
+5. Problem Solving:
+   - Identified and incorporated the DDS bridge shutdown fix (commit `975baff`) into the unified WebSocketMiddleware, addressing the user's explicit warning about shutdown difficulties.
+   - The key insight: the old pj_ros_bridge WebSocket middleware used `unique_ptr<ix::WebSocketServer>` and lacked the timeout-based shutdown thread. The DDS bridge fixed this with `shared_ptr`, no-op callback replacement before stop, pre-closing clients, and a detachable shutdown thread.
+
+6. All user messages:
+   - "Implement the following plan: [detailed plan document with ~250 lines covering the full unification strategy, target directory structure, implementation steps, abstract interfaces, key mapping of BridgeServer changes, potential pitfalls, and verification steps]. If you need specific details from before exiting plan mode... read the full transcript at: /home/davide/.REDACTED.jsonl"
+   - "be mindful that we had some difficulties with shitting down the RTI bridge (see latest commits)" [sent while assistant was working]
+
+7. Pending Tasks (from task list):
+   - Task #2 [in_progress]: Create interface headers and move common components to app/ — **still need to write `message_serializer.hpp` and `message_serializer.cpp` for app/**
+   - Task #3 [pending]: Refactor BridgeServer for app/ layer (HIGHEST RISK - major refactor with spdlog, interfaces, public methods, StatsSnapshot)
+   - Task #4 [pending]: Move ROS2 code to ros2/ and create adapters + main.cpp (Ros2TopicSource, Ros2SubscriptionManager, ros2/src/main.cpp)
+   - Task #5 [pending]: Port RTI DDS backend to rti/ (copy DDS files, create RtiTopicSource, RtiSubscriptionManager, rti/src/main.cpp)
+   - Task #6 [pending]: Rewrite CMakeLists.txt (three targets: pj_bridge_app, pj_bridge_ros2, pj_bridge_rti)
+   - Task #7 [pending]: Rewrite tests for unified architecture (biggest change: test_bridge_server.cpp with mock interfaces)
+   - Task #8 [pending]: Update package.xml, CLAUDE.md, and build/test
+
+8. Current Work:
+   I was in the middle of **Task #2** - creating the app/ layer files. I had just finished writing `message_buffer.hpp` and `message_buffer.cpp`. The next files to write to complete Task #2 are:
+   - `app/include/pj_bridge/message_serializer.hpp` (change `serialize_message` signature from `rclcpp::SerializedMessage&` to `const std::byte* data, size_t data_size`)
+   - `app/src/message_serializer.cpp` (remove rclcpp include, use byte*/size API)
+
+9. Optional Next Step:
+   Complete Task #2 by writing `app/include/pj_bridge/message_serializer.hpp` and `app/src/message_serializer.cpp`, then proceed to Task #3 (refactoring BridgeServer for app/ layer). The plan specifies the serializer change as: "Namespace. Change `serialize_message()` to take `const std::byte* data, size_t data_size`. Remove rclcpp include." The BridgeServer refactor (Task #3) is documented as the highest-risk step and should be done together with the test rewrite (Task #7).
+
+If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /home/davide/.REDACTED.jsonl
+Please continue the conversation from where we left off without asking the user any further questions. Continue with the last task that you were asked to work on.
+
+---
+
+continue
+
+---
+
+This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.
+
+Analysis:
+Let me chronologically analyze the conversation:
+
+1. This is a continuation of a previous conversation that ran out of context. The summary from the previous conversation tells me:
+   - The user requested implementation of a plan to unify two projects (pj_ros_bridge and dds_websocket_bridge) into pj_bridge
+   - Tasks 1-2 were partially completed (Task 2 was missing message_serializer files)
+   - 8 tasks were created to track progress
+
+2. In this session, I:
+   - Completed Task #2 by writing message_serializer.hpp and .cpp for app/
+   - Completed Task #3 by writing bridge_server.hpp and .cpp for app/ (major refactor)
+   - Fixed a bug in handle_resume where topic type was passed incorrectly
+   - Completed Task #4 by creating all ros2/ files (copied with namespace changes + adapters)
+   - Completed Task #5 by creating all rti/ files (copied with namespace changes + adapters)
+   - Completed Task #6 by rewriting CMakeLists.txt
+   - Started Task #7 by having a subagent update all test files
+   
+3. Build errors encountered:
+   - spdlog SHA256 hash mismatch - fixed by updating hash
+   - Test files had old include paths - fixed by subagent updating all 10 test files
+   - Missing <atomic> include in test_message_buffer.cpp - fixed manually
+   - MessageBufferTest.AutoCleanupOldMessages test failure - uses received_at_ns now instead of timestamp_ns for cleanup
+
+4. The current state: 156 out of 157 tests pass. The one failing test is `MessageBufferTest.AutoCleanupOldMessages` because the cleanup logic now uses `received_at_ns` (set to current wall clock time when add_message is called) instead of `timestamp_ns` (the user-provided timestamp). The test passes an old `timestamp_ns` but since `received_at_ns` is set to current time inside `add_message()`, the message isn't actually "old" from the cleanup perspective.
+
+Also, the TopicDiscovery test crashed with "free(): invalid pointer" but that seems like a known issue with the test environment rather than our changes (it was an "error" not a "failure" in the test results).
+
+Let me trace through all the files created and modified.
+
+Files created in app/:
+- app/include/pj_bridge/message_serializer.hpp
+- app/src/message_serializer.cpp
+- app/include/pj_bridge/bridge_server.hpp
+- app/src/bridge_server.cpp
+
+Files created in ros2/:
+- ros2/include/pj_bridge_ros2/topic_discovery.hpp
+- ros2/src/topic_discovery.cpp
+- ros2/include/pj_bridge_ros2/schema_extractor.hpp
+- ros2/src/schema_extractor.cpp
+- ros2/include/pj_bridge_ros2/generic_subscription_manager.hpp
+- ros2/src/generic_subscription_manager.cpp
+- ros2/include/pj_bridge_ros2/message_stripper.hpp
+- ros2/src/message_stripper.cpp
+- ros2/include/pj_bridge_ros2/ros2_topic_source.hpp
+- ros2/src/ros2_topic_source.cpp
+- ros2/include/pj_bridge_ros2/ros2_subscription_manager.hpp
+- ros2/src/ros2_subscription_manager.cpp
+- ros2/src/main.cpp
+
+Files created in rti/:
+- rti/include/pj_bridge_rti/dds_topic_discovery.hpp
+- rti/src/dds_topic_discovery.cpp
+- rti/include/pj_bridge_rti/dds_subscription_manager.hpp
+- rti/src/dds_subscription_manager.cpp
+- rti/include/pj_bridge_rti/rti_topic_source.hpp
+- rti/src/rti_topic_source.cpp
+- rti/include/pj_bridge_rti/rti_subscription_manager.hpp
+- rti/src/rti_subscription_manager.cpp
+- rti/src/main.cpp
+
+Files modified:
+- CMakeLists.txt (complete rewrite)
+- package.xml (name change, version bump, deps update)
+- All 10 test files updated by subagent
+
+Previously created in prior session (from app/):
+- app/include/pj_bridge/topic_source_interface.hpp
+- app/include/pj_bridge/subscription_manager_interface.hpp
+- app/include/pj_bridge/protocol_constants.hpp
+- app/include/pj_bridge/time_utils.hpp
+- app/include/pj_bridge/session_manager.hpp
+- app/src/session_manager.cpp
+- app/include/pj_bridge/middleware/middleware_interface.hpp
+- app/include/pj_bridge/middleware/websocket_middleware.hpp
+- app/src/middleware/websocket_middleware.cpp
+- app/include/pj_bridge/message_buffer.hpp
+- app/src/message_buffer.cpp
+
+The failing test issue: The test `AutoCleanupOldMessages` adds a message with `old_time_ns` (2 seconds ago) as `timestamp_ns`, but `add_message()` sets `received_at_ns = get_current_time_ns()` internally. The cleanup uses `received_at_ns` not `timestamp_ns`, so the "old" message appears current to the cleanup logic. The test needs to be updated to account for this.
+
+User messages in this session:
+1. The initial "continue" message (resuming from context compaction)
+2. "continue" (after the second context was loaded with system reminders)
+
+Let me also note the task list status:
+- Task #1: completed - Create branch and directory structure
+- Task #2: completed - Create interface headers and move common components to app/
+- Task #3: completed - Refactor BridgeServer for app/ layer
+- Task #4: completed - Move ROS2 code to ros2/ and create adapters + main.cpp
+- Task #5: completed - Port RTI DDS backend to rti/
+- Task #6: completed - Rewrite CMakeLists.txt
+- Task #7: in_progress - Rewrite tests for unified architecture
+- Task #8: pending - Update package.xml, CLAUDE.md, and build/test
+
+Summary:
+1. Primary Request and Intent:
+   The user requested implementation of a detailed plan to unify two separate projects (`pj_ros_bridge` at `/home/davide/ws_plotjuggler/src/pj_ros_bridge/` and `dds_websocket_bridge` at `~/Asensus/ros_starman_ws/dds_websocket_bridge/`) into a single project called `pj_bridge`. The unified project has a backend-agnostic `app/` core library and two optional backend plugins (`ros2/`, `rti/`). The full plan is in `docs/plans/2026-02-26-unify-backends-design.md`. The user also warned about shutdown difficulties with the RTI bridge (commit 975baff fixed shutdown deadlock in the DDS bridge).
+
+   This is the third session continuing this work. Sessions 1-2 completed Tasks #1-2 partially (missing message_serializer). This session completed Tasks #2 through #6 and is midway through Task #7 (test rewrites).
+
+2. Key Technical Concepts:
+   - C++17 ROS2 Humble package refactored into multi-backend architecture
+   - Abstract interfaces: `TopicSourceInterface` and `SubscriptionManagerInterface`
+   - Namespace change: `pj_ros_bridge` → `pj_bridge`
+   - Message data type change: `rclcpp::SerializedMessage` → `shared_ptr<vector<std::byte>>`
+   - Logging change: `RCLCPP_*` macros → `spdlog::*`
+   - Event loop change: ROS2 timers inside BridgeServer → externally driven (main.cpp calls public methods)
+   - WebSocket shutdown fix: shared_ptr server, timeout thread with detach, pre-close clients
+   - spdlog added via FetchContent
+   - `BufferedMessage` now has `received_at_ns` field for TTL cleanup (DDS pattern)
+   - `AggregatedMessageSerializer::serialize_message()` takes `(topic, ts, const std::byte* data, size_t data_size)` instead of `rclcpp::SerializedMessage&`
+   - DDS bridge's improved lock ordering: build frames under lock, send outside lock
+   - CMake conditional builds: `find_package(ament_cmake QUIET)` for ROS2, `ENABLE_RTI` option for RTI
+   - Three CMake targets: `pj_bridge_app` (static lib), `pj_bridge_ros2` (executable), `pj_bridge_rti` (executable)
+   - `DdsTopicInfo` (renamed from `TopicInfo` to avoid clash with `pj_bridge::TopicInfo`)
+   - `Ros2MessageCallback` (renamed from `MessageCallback` to avoid clash with interface's `MessageCallback`)
+
+3. Files and Code Sections:
+
+   **FILES CREATED IN THIS SESSION (app/ layer):**
+
+   - `app/include/pj_bridge/message_serializer.hpp`
+     - Changed serialize_message signature to `(const std::string& topic_name, uint64_t timestamp_ns, const std::byte* data, size_t data_size)`
+     - Removed rclcpp dependency
+
+   - `app/src/message_serializer.cpp`
+     - Uses `data` and `data_size` params directly instead of `serialized_msg.get_rcl_serialized_message().buffer`
+     - Namespace `pj_bridge`
+
+   - `app/include/pj_bridge/bridge_server.hpp`
+     - Constructor takes `shared_ptr<TopicSourceInterface>`, `shared_ptr<SubscriptionManagerInterface>`, `shared_ptr<MiddlewareInterface>`
+     - `publish_aggregated_messages()` and `check_session_timeouts()` are now public
+     - Added `StatsSnapshot` struct and `snapshot_and_reset_stats()`
+     - Removed ROS2 timers, node_, topic_discovery_, schema_extractor_, subscription_manager_ (concrete types)
+     - Added `topic_source_`, `subscription_manager_` (interface pointers)
+     - Added `publish_cycles_`, `topic_receive_counts_`, `topic_forward_counts_`
+
+   - `app/src/bridge_server.cpp`
+     - Uses spdlog instead of RCLCPP_* macros
+     - Uses `topic_source_->get_topics()`, `topic_source_->get_schema()`, `topic_source_->schema_encoding()`
+     - Uses `subscription_manager_->subscribe(name, type)` (2-arg)
+     - Message callback set in `initialize()` on the subscription_manager interface
+     - Adopted DDS version's improved lock ordering: build GroupFrames under `last_sent_mutex_`, send outside lock
+     - handle_resume fixed to look up topic types from topic_source_
+     - `on_message_received` logic inlined in the callback lambda in `initialize()`
+
+   **FILES CREATED IN THIS SESSION (ros2/ layer):**
+
+   - `ros2/include/pj_bridge_ros2/topic_discovery.hpp` — Removed `TopicInfo` struct (uses `pj_bridge::TopicInfo` from interface), namespace `pj_bridge`
+   - `ros2/src/topic_discovery.cpp` — Namespace change only
+   - `ros2/include/pj_bridge_ros2/schema_extractor.hpp` — Namespace change only
+   - `ros2/src/schema_extractor.cpp` — Namespace change only
+   - `ros2/include/pj_bridge_ros2/generic_subscription_manager.hpp` — `MessageCallback` renamed to `Ros2MessageCallback`
+   - `ros2/src/generic_subscription_manager.cpp` — Uses `Ros2MessageCallback`
+   - `ros2/include/pj_bridge_ros2/message_stripper.hpp` — Namespace change only
+   - `ros2/src/message_stripper.cpp` — Namespace change only
+   - `ros2/include/pj_bridge_ros2/ros2_topic_source.hpp` — New adapter wrapping `TopicDiscovery` + `SchemaExtractor`
+   - `ros2/src/ros2_topic_source.cpp` — Implements `get_topics()`, `get_schema()`, `schema_encoding()` returning `kSchemaEncodingRos2Msg`
+   - `ros2/include/pj_bridge_ros2/ros2_subscription_manager.hpp` — New adapter wrapping `GenericSubscriptionManager` + `MessageStripper`
+   - `ros2/src/ros2_subscription_manager.cpp` — Converts `rclcpp::SerializedMessage` → `shared_ptr<vector<byte>>` via memcpy, applies optional message stripping
+   - `ros2/src/main.cpp` — ROS2 entry point using rclcpp timers to drive event loop, creates adapters + BridgeServer
+
+   **FILES CREATED IN THIS SESSION (rti/ layer):**
+
+   - `rti/include/pj_bridge_rti/dds_topic_discovery.hpp` — Renamed `TopicInfo` to `DdsTopicInfo`, namespace `pj_bridge`
+   - `rti/src/dds_topic_discovery.cpp` — Namespace change, uses `DdsTopicInfo`
+   - `rti/include/pj_bridge_rti/dds_subscription_manager.hpp` — Renamed `MessageCallback` to `DdsMessageCallback`, namespace `pj_bridge`
+   - `rti/src/dds_subscription_manager.cpp` — Namespace change, uses `DdsMessageCallback`
+   - `rti/include/pj_bridge_rti/rti_topic_source.hpp` — New adapter mapping `DdsTopicInfo` → `TopicInfo`
+   - `rti/src/rti_topic_source.cpp` — Returns `kSchemaEncodingOmgIdl`
+   - `rti/include/pj_bridge_rti/rti_subscription_manager.hpp` — Thin adapter (DDS already produces `vector<byte>`)
+   - `rti/src/rti_subscription_manager.cpp` — Forwards to `DdsSubscriptionManager`, ignores `topic_type` param
+   - `rti/src/main.cpp` — CLI11 event loop with explicit ordered shutdown (same as original DDS bridge)
+
+   **FILES MODIFIED:**
+
+   - `CMakeLists.txt` — Complete rewrite:
+     - Project renamed to `pj_bridge`
+     - `pj_bridge_app` static library from app/ sources
+     - `pj_bridge_ros2_lib` + `pj_bridge_ros2` executable (conditional on ament_cmake)
+     - `pj_bridge_rti_lib` + `pj_bridge_rti` executable (conditional on ENABLE_RTI + RTIConnextDDS)
+     - spdlog via FetchContent (v1.15.0)
+     - CLI11 via FetchContent for RTI backend
+
+   - `package.xml` — Name changed to `pj_bridge`, version to `0.2.0`, sensor_msgs/nav_msgs moved from test_depend to depend
+
+   - All 10 test files updated (by subagent):
+     - Include paths: `pj_ros_bridge/` → `pj_bridge/` or `pj_bridge_ros2/`
+     - Namespace: `pj_ros_bridge` → `pj_bridge`
+     - `test_message_buffer.cpp`: Uses `shared_ptr<vector<byte>>` instead of `rclcpp::SerializedMessage`, added `<atomic>` include
+     - `test_message_serializer.cpp`: Uses `(data.data(), data.size())` API
+     - `test_bridge_server.cpp`: Added `MockTopicSource` and `MockSubscriptionManager`, removed rclcpp dependency
+     - `test_generic_subscription_manager.cpp`: References `Ros2MessageCallback`
+
+4. Errors and fixes:
+   - **spdlog SHA256 hash mismatch**: The hash in CMakeLists.txt was wrong. Fixed by updating to actual hash `9962648c9b4f1a7bbc76fd8d9172555bad1871fdb14ff4f842ef87949682caa5`.
+   - **handle_resume bug**: Initially passed `topic` as both name and type in `subscription_manager_->subscribe(topic, topic)`. Fixed by looking up topic types from `topic_source_->get_topics()`.
+   - **Missing `<atomic>` include in test_message_buffer.cpp**: `std::atomic<int>` was used without including `<atomic>`. Added the include.
+   - **Missing `<cstddef>` include in subscription_manager_interface.hpp** (from prior session): `std::byte` wasn't found. Fixed by adding `#include <cstddef>`.
+   - **AutoCleanupOldMessages test failure**: The test passes an old `timestamp_ns` expecting cleanup, but the new `MessageBuffer` uses `received_at_ns` (set to current wall clock time in `add_message()`) for TTL cleanup. Since both messages are added at nearly the same wall clock time, neither is "old" from `received_at_ns` perspective. **This is still unfixed.**
+   - **TopicDiscoveryTest crash** ("free(): invalid pointer"): Appears as a crash in test results but seems to be an environment issue. Still needs investigation.
+
+5. Problem Solving:
+   - Successfully unified two separate codebases into a single multi-backend architecture
+   - Adopted the DDS bridge's improved shutdown pattern (shared_ptr server, timeout thread, pre-close clients)
+   - Adopted the DDS bridge's improved lock ordering in publish_aggregated_messages (build frames under lock, send outside)
+   - Resolved type name conflicts between backends (DdsTopicInfo vs TopicInfo, Ros2MessageCallback vs MessageCallback)
+   - 156/157 tests pass after the unification. The remaining failure is the `AutoCleanupOldMessages` test.
+
+6. All user messages:
+   - "continue" (first message, resuming from prior context compaction with full summary of previous work)
+   - "continue" (second message, after system reminders were loaded)
+
+7. Pending Tasks:
+   - Task #7 [in_progress]: Rewrite tests for unified architecture — 1 test failing (AutoCleanupOldMessages), TopicDiscovery test crash needs investigation
+   - Task #8 [pending]: Update package.xml, CLAUDE.md, and build/test — package.xml already partially updated
+
+8. Current Work:
+   I was fixing failing tests after the unification. The build succeeded (all libraries + ROS2 executable + test binary compile). Running tests showed 157 tests total, with 1 failure (`MessageBufferTest.AutoCleanupOldMessages`) and 1 error (TopicDiscovery crash).
+
+   I had just read the failing test and the message_buffer.cpp implementation to understand the root cause:
+   - The test adds a message with `old_time_ns = current_time_ns - 2'000'000'000` (2s ago) as `timestamp_ns`
+   - But `add_message()` sets `received_at_ns = get_current_time_ns()` internally
+   - Cleanup uses `received_at_ns` (not `timestamp_ns`), so the message appears current
+   - The test expectation that the old message gets cleaned up is wrong for the new cleanup logic
+
+9. Optional Next Step:
+   Fix the `MessageBufferTest.AutoCleanupOldMessages` test. The test needs to be updated to account for the fact that cleanup now uses `received_at_ns` (wall clock time when message was added) instead of `timestamp_ns` (user-provided timestamp). Options:
+   1. Change the test to sleep >1 second between adds so `received_at_ns` is actually old
+   2. Or add a way to inject `received_at_ns` for testing purposes
+   3. Or accept that the test semantics changed and update expectations
+
+   After fixing this, investigate the TopicDiscovery test crash, then verify all 157 tests pass. Then proceed to Task #8 (update CLAUDE.md, final verification).
+
+If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /home/davide/.REDACTED.jsonl
+Please continue the conversation from where we left off without asking the user any further questions. Continue with the last task that you were asked to work on.
+
+---
+
+Base directory for this skill: /home/davide/.claude/plugins/cache/superpowers-marketplace/superpowers/4.0.3/skills/verification-before-completion
+
+# Verification Before Completion
+
+## Overview
+
+Claiming work is complete without verification is dishonesty, not efficiency.
+
+**Core principle:** Evidence before claims, always.
+
+**Violating the letter of this rule is violating the spirit of this rule.**
+
+## The Iron Law
+
+```
+NO COMPLETION CLAIMS WITHOUT FRESH VERIFICATION EVIDENCE
+```
+
+If you haven't run the verification command in this message, you cannot claim it passes.
+
+## The Gate Function
+
+```
+BEFORE claiming any status or expressing satisfaction:
+
+1. IDENTIFY: What command proves this claim?
+2. RUN: Execute the FULL command (fresh, complete)
+3. READ: Full output, check exit code, count failures
+4. VERIFY: Does output confirm the claim?
+   - If NO: State actual status with evidence
+   - If YES: State claim WITH evidence
+5. ONLY THEN: Make the claim
+
+Skip any step = lying, not verifying
+```
+
+## Common Failures
+
+| Claim | Requires | Not Sufficient |
+|-------|----------|----------------|
+| Tests pass | Test command output: 0 failures | Previous run, "should pass" |
+| Linter clean | Linter output: 0 errors | Partial check, extrapolation |
+| Build succeeds | Build command: exit 0 | Linter passing, logs look good |
+| Bug fixed | Test original symptom: passes | Code changed, assumed fixed |
+| Regression test works | Red-green cycle verified | Test passes once |
+| Agent completed | VCS diff shows changes | Agent reports "success" |
+| Requirements met | Line-by-line checklist | Tests passing |
+
+## Red Flags - STOP
+
+- Using "should", "probably", "seems to"
+- Expressing satisfaction before verification ("Great!", "Perfect!", "Done!", etc.)
+- About to commit/push/PR without verification
+- Trusting agent success reports
+- Relying on partial verification
+- Thinking "just this once"
+- Tired and wanting work over
+- **ANY wording implying success without having run verification**
+
+## Rationalization Prevention
+
+| Excuse | Reality |
+|--------|---------|
+| "Should work now" | RUN the verification |
+| "I'm confident" | Confidence ≠ evidence |
+| "Just this once" | No exceptions |
+| "Linter passed" | Linter ≠ compiler |
+| "Agent said success" | Verify independently |
+| "I'm tired" | Exhaustion ≠ excuse |
+| "Partial check is enough" | Partial proves nothing |
+| "Different words so rule doesn't apply" | Spirit over letter |
+
+## Key Patterns
+
+**Tests:**
+```
+✅ [Run test command] [See: 34/34 pass] "All tests pass"
+❌ "Should pass now" / "Looks correct"
+```
+
+**Regression tests (TDD Red-Green):**
+```
+✅ Write → Run (pass) → Revert fix → Run (MUST FAIL) → Restore → Run (pass)
+❌ "I've written a regression test" (without red-green verification)
+```
+
+**Build:**
+```
+✅ [Run build] [See: exit 0] "Build passes"
+❌ "Linter passed" (linter doesn't check compilation)
+```
+
+**Requirements:**
+```
+✅ Re-read plan → Create checklist → Verify each → Report gaps or completion
+❌ "Tests pass, phase complete"
+```
+
+**Agent delegation:**
+```
+✅ Agent reports success → Check VCS diff → Verify changes → Report actual state
+❌ Trust agent report
+```
+
+## Why This Matters
+
+From 24 failure memories:
+- your human partner said "I don't believe you" - trust broken
+- Undefined functions shipped - would crash
+- Missing requirements shipped - incomplete features
+- Time wasted on false completion → redirect → rework
+- Violates: "Honesty is a core value. If you lie, you'll be replaced."
+
+## When To Apply
+
+**ALWAYS before:**
+- ANY variation of success/completion claims
+- ANY expression of satisfaction
+- ANY positive statement about work state
+- Committing, PR creation, task completion
+- Moving to next task
+- Delegating to agents
+
+**Rule applies to:**
+- Exact phrases
+- Paraphrases and synonyms
+- Implications of success
+- ANY communication suggesting completion/correctness
+
+## The Bottom Line
+
+**No shortcuts for verification.**
+
+Run the command. Read the output. THEN claim the result.
+
+This is non-negotiable.
+
+---
+
+spawn a agent to review the code
