@@ -103,6 +103,15 @@ IXWebSocket-based implementation of `MiddlewareInterface`:
 - Per-client binary send for aggregated message frames
 - Connect/disconnect callbacks for automatic session lifecycle
 
+### StandaloneEventLoop
+
+Shared event loop utility (`run_standalone_event_loop()`) used by both non-ROS2 backends (RTI and FastDDS). Part of the core library (`pj_bridge_app`). Handles:
+- `process_requests()` every iteration (1 ms sleep)
+- `publish_aggregated_messages()` at the configured publish rate
+- `check_session_timeouts()` every 1 s
+- Optional stats printing every 5 s via `BridgeServer::snapshot_and_reset_stats()`
+- Signal handling (SIGINT/SIGTERM) and ordered shutdown
+
 ## Event Loop
 
 BridgeServer exposes methods; the entry point drives timing:
@@ -114,13 +123,9 @@ BridgeServer exposes methods; the entry point drives timing:
 
 Spun via `SingleThreadedExecutor::spin_some(100ms)`.
 
-**RTI** (`rti/src/main.cpp`): `std::chrono` loop with 1 ms sleep:
-- Every iteration → `process_requests()`
-- At publish_rate → `publish_aggregated_messages()`
-- Every 1 s → `check_session_timeouts()`
-- Every 5 s (optional) → stats snapshot
+**RTI** (`rti/src/main.cpp`): Delegates to `run_standalone_event_loop()` (see StandaloneEventLoop above).
 
-**FastDDS** (`fastdds/src/main.cpp`): Same `std::chrono` loop pattern as RTI.
+**FastDDS** (`fastdds/src/main.cpp`): Same — delegates to `run_standalone_event_loop()`.
 
 ## ROS2-Specific Components
 
@@ -183,7 +188,7 @@ cleanup_mutex_ > last_sent_mutex_ > stats_mutex_
 
 ## Shutdown Sequence
 
-Both entry points follow the same ordered shutdown to avoid use-after-free:
+All entry points follow the same ordered shutdown to avoid use-after-free:
 
 1. Cancel timers / exit event loop
 2. Clear the subscription manager's message callback (`set_message_callback(nullptr)`)

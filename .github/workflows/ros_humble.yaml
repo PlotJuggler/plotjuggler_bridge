@@ -1,0 +1,20 @@
+name: "ROS: Humble"
+
+on:
+  push:
+    branches: [development, main]
+  pull_request:
+    branches: [development, main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    uses: ./.github/workflows/_ros.yaml
+    with:
+      ros_distro: humble
+      container: rostooling/setup-ros-docker:ubuntu-jammy-ros-humble-ros-base-latest
+      runner: ubuntu-22.04

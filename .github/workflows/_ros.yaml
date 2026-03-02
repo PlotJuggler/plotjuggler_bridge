@@ -1,0 +1,61 @@
+name: ROS Build & Test
+
+on:
+  workflow_call:
+    inputs:
+      ros_distro:
+        required: true
+        type: string
+      container:
+        required: true
+        type: string
+      runner:
+        required: true
+        type: string
+
+jobs:
+  build-and-test:
+    runs-on: ${{ inputs.runner }}
+    container:
+      image: ${{ inputs.container }}
+    env:
+      HOME: /root
+      ROS_HOME: /root/.ros
+    name: ${{ inputs.ros_distro }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup ccache
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: ${{ github.job }}-${{ inputs.ros_distro }}
+          max-size: 500M
+
+      - name: Configure ccache
+        run: echo "/usr/lib/ccache" >> $GITHUB_PATH
+
+      - name: Install dependencies
+        shell: bash
+        run: |
+          source /opt/ros/${{ inputs.ros_distro }}/setup.bash
+          apt-get update
+          rosdep update --rosdistro ${{ inputs.ros_distro }}
+          rosdep install --from-paths . --ignore-src -y --rosdistro ${{ inputs.ros_distro }}
+
+      - name: Build
+        shell: bash
+        run: |
+          source /opt/ros/${{ inputs.ros_distro }}/setup.bash
+          colcon build --packages-select pj_bridge \
+            --cmake-args -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+
+      - name: Test
+        shell: bash
+        run: |
+          source /opt/ros/${{ inputs.ros_distro }}/setup.bash
+          source install/setup.bash
+          colcon test --packages-select pj_bridge
+          colcon test-result --verbose

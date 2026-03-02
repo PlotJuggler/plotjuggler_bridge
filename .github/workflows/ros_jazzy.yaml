@@ -1,0 +1,20 @@
+name: "ROS: Jazzy"
+
+on:
+  push:
+    branches: [development, main]
+  pull_request:
+    branches: [development, main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    uses: ./.github/workflows/_ros.yaml
+    with:
+      ros_distro: jazzy
+      container: rostooling/setup-ros-docker:ubuntu-noble-ros-jazzy-ros-base-latest
+      runner: ubuntu-24.04
