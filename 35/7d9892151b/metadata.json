@@ -1,0 +1,34 @@
+{
+  "cli_version": "0.4.2",
+  "checkpoint_id": "357d9892151b",
+  "strategy": "manual-commit",
+  "branch": "unify-backends",
+  "checkpoints_count": 0,
+  "files_touched": [
+    "CLAUDE.md",
+    "CMakeLists.txt",
+    "conanfile.txt",
+    "docs/ARCHITECTURE.md",
+    "fastdds/include/pj_bridge_fastdds/fastdds_subscription_manager.hpp",
+    "fastdds/include/pj_bridge_fastdds/fastdds_topic_source.hpp",
+    "fastdds/src/fastdds_subscription_manager.cpp",
+    "fastdds/src/fastdds_topic_source.cpp",
+    "fastdds/src/main.cpp"
+  ],
+  "sessions": [
+    {
+      "metadata": "/35/7d9892151b/0/metadata.json",
+      "transcript": "/35/7d9892151b/0/full.jsonl",
+      "context": "/35/7d9892151b/0/context.md",
+      "content_hash": "/35/7d9892151b/0/content_hash.txt",
+      "prompt": "/35/7d9892151b/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 3717,
+    "cache_creation_tokens": 212619,
+    "cache_read_tokens": 9227987,
+    "output_tokens": 39726,
+    "api_call_count": 96
+  }
+}

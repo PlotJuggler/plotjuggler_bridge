@@ -1,0 +1,37 @@
+{
+  "cli_version": "0.4.2",
+  "checkpoint_id": "357d9892151b",
+  "session_id": "2ad97c11-66c2-4dcd-a7e4-2fe60cc79a6c",
+  "strategy": "manual-commit",
+  "created_at": "2026-03-02T14:12:11.245391319Z",
+  "branch": "unify-backends",
+  "checkpoints_count": 0,
+  "files_touched": [
+    "CLAUDE.md",
+    "CMakeLists.txt",
+    "conanfile.txt",
+    "docs/ARCHITECTURE.md",
+    "fastdds/include/pj_bridge_fastdds/fastdds_subscription_manager.hpp",
+    "fastdds/include/pj_bridge_fastdds/fastdds_topic_source.hpp",
+    "fastdds/src/fastdds_subscription_manager.cpp",
+    "fastdds/src/fastdds_topic_source.cpp",
+    "fastdds/src/main.cpp"
+  ],
+  "agent": "Claude Code",
+  "token_usage": {
+    "input_tokens": 3717,
+    "cache_creation_tokens": 212619,
+    "cache_read_tokens": 9227987,
+    "output_tokens": 39726,
+    "api_call_count": 96
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-03-02T14:12:11.131194397Z",
+    "agent_lines": 821,
+    "human_added": 211,
+    "human_modified": 24,
+    "human_removed": 0,
+    "total_committed": 1056,
+    "agent_percentage": 77.74621212121212
+  }
+}
