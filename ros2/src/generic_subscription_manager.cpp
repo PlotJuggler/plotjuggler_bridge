@@ -44,13 +44,7 @@ bool GenericSubscriptionManager::subscribe(
 
     auto subscription = node_->create_generic_subscription(topic_name, topic_type, rclcpp::QoS(100), sub_callback);
 
-    SubscriptionInfo info;
-    info.subscription = subscription;
-    info.topic_type = topic_type;
-    info.callback = callback;
-    info.reference_count = 1;
-
-    subscriptions_[topic_name] = std::move(info);
+    subscriptions_[topic_name] = SubscriptionInfo{subscription, 1};
 
     return true;
   } catch (const std::exception& e) {

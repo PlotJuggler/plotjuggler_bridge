@@ -22,6 +22,7 @@
 #include <spdlog/spdlog.h>
 
 #include <cstring>
+#include <optional>
 
 namespace pj_bridge {
 
@@ -34,29 +35,27 @@ void Ros2SubscriptionManager::set_message_callback(MessageCallback callback) {
 }
 
 bool Ros2SubscriptionManager::subscribe(const std::string& topic_name, const std::string& topic_type) {
-  // Create a ROS2 callback that converts SerializedMessage → vector<byte> and calls the stored callback
-  Ros2MessageCallback ros2_callback =
-      [this, topic_type](
-          const std::string& topic, const std::shared_ptr<rclcpp::SerializedMessage>& msg, uint64_t receive_time_ns) {
-        // Optionally strip large fields
-        const rclcpp::SerializedMessage* msg_to_use = msg.get();
-        std::unique_ptr<rclcpp::SerializedMessage> stripped_msg;
+  bool needs_stripping = strip_large_messages_ && MessageStripper::should_strip(topic_type);
 
-        if (strip_large_messages_ && MessageStripper::should_strip(topic_type)) {
+  Ros2MessageCallback ros2_callback =
+      [this, topic_type, needs_stripping](
+          const std::string& topic, const std::shared_ptr<rclcpp::SerializedMessage>& msg, uint64_t receive_time_ns) {
+        const rclcpp::SerializedMessage* msg_to_use = msg.get();
+        std::optional<rclcpp::SerializedMessage> stripped_msg;
+
+        if (needs_stripping) {
           try {
-            stripped_msg = std::make_unique<rclcpp::SerializedMessage>(MessageStripper::strip(topic_type, *msg));
-            msg_to_use = stripped_msg.get();
+            stripped_msg.emplace(MessageStripper::strip(topic_type, *msg));
+            msg_to_use = &*stripped_msg;
           } catch (const std::exception& e) {
             spdlog::warn("Failed to strip message on topic '{}': {}. Forwarding original.", topic, e.what());
           }
         }
 
-        // Convert rclcpp::SerializedMessage to shared_ptr<vector<byte>>
         const auto& rcl_msg = msg_to_use->get_rcl_serialized_message();
         auto data = std::make_shared<std::vector<std::byte>>(rcl_msg.buffer_length);
         std::memcpy(data->data(), rcl_msg.buffer, rcl_msg.buffer_length);
 
-        // Invoke the stored callback
         MessageCallback cb;
         {
           std::lock_guard<std::mutex> lock(callback_mutex_);

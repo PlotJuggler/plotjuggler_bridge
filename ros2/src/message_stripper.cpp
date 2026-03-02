@@ -37,52 +37,12 @@ const std::unordered_set<std::string> kStrippableTypes = {
     "sensor_msgs/msg/LaserScan", "nav_msgs/msg/OccupancyGrid",
 };
 
-rclcpp::SerializedMessage strip_image(const rclcpp::SerializedMessage& input) {
-  rclcpp::Serialization<sensor_msgs::msg::Image> serializer;
-  sensor_msgs::msg::Image msg;
+template <typename MsgT, typename StripFn>
+rclcpp::SerializedMessage strip_and_reserialize(const rclcpp::SerializedMessage& input, StripFn strip_fn) {
+  rclcpp::Serialization<MsgT> serializer;
+  MsgT msg;
   serializer.deserialize_message(&input, &msg);
-  msg.data = {0};
-  rclcpp::SerializedMessage output;
-  serializer.serialize_message(&msg, &output);
-  return output;
-}
-
-rclcpp::SerializedMessage strip_compressed_image(const rclcpp::SerializedMessage& input) {
-  rclcpp::Serialization<sensor_msgs::msg::CompressedImage> serializer;
-  sensor_msgs::msg::CompressedImage msg;
-  serializer.deserialize_message(&input, &msg);
-  msg.data = {0};
-  rclcpp::SerializedMessage output;
-  serializer.serialize_message(&msg, &output);
-  return output;
-}
-
-rclcpp::SerializedMessage strip_pointcloud2(const rclcpp::SerializedMessage& input) {
-  rclcpp::Serialization<sensor_msgs::msg::PointCloud2> serializer;
-  sensor_msgs::msg::PointCloud2 msg;
-  serializer.deserialize_message(&input, &msg);
-  msg.data = {0};
-  rclcpp::SerializedMessage output;
-  serializer.serialize_message(&msg, &output);
-  return output;
-}
-
-rclcpp::SerializedMessage strip_laser_scan(const rclcpp::SerializedMessage& input) {
-  rclcpp::Serialization<sensor_msgs::msg::LaserScan> serializer;
-  sensor_msgs::msg::LaserScan msg;
-  serializer.deserialize_message(&input, &msg);
-  msg.ranges = {0.0f};
-  msg.intensities = {0.0f};
-  rclcpp::SerializedMessage output;
-  serializer.serialize_message(&msg, &output);
-  return output;
-}
-
-rclcpp::SerializedMessage strip_occupancy_grid(const rclcpp::SerializedMessage& input) {
-  rclcpp::Serialization<nav_msgs::msg::OccupancyGrid> serializer;
-  nav_msgs::msg::OccupancyGrid msg;
-  serializer.deserialize_message(&input, &msg);
-  msg.data = {0};
+  strip_fn(msg);
   rclcpp::SerializedMessage output;
   serializer.serialize_message(&msg, &output);
   return output;
@@ -97,19 +57,22 @@ bool MessageStripper::should_strip(const std::string& message_type) {
 rclcpp::SerializedMessage MessageStripper::strip(
     const std::string& message_type, const rclcpp::SerializedMessage& input) {
   if (message_type == "sensor_msgs/msg/Image") {
-    return strip_image(input);
+    return strip_and_reserialize<sensor_msgs::msg::Image>(input, [](auto& m) { m.data = {0}; });
   }
   if (message_type == "sensor_msgs/msg/CompressedImage") {
-    return strip_compressed_image(input);
+    return strip_and_reserialize<sensor_msgs::msg::CompressedImage>(input, [](auto& m) { m.data = {0}; });
   }
   if (message_type == "sensor_msgs/msg/PointCloud2") {
-    return strip_pointcloud2(input);
+    return strip_and_reserialize<sensor_msgs::msg::PointCloud2>(input, [](auto& m) { m.data = {0}; });
   }
   if (message_type == "sensor_msgs/msg/LaserScan") {
-    return strip_laser_scan(input);
+    return strip_and_reserialize<sensor_msgs::msg::LaserScan>(input, [](auto& m) {
+      m.ranges = {0.0f};
+      m.intensities = {0.0f};
+    });
   }
   if (message_type == "nav_msgs/msg/OccupancyGrid") {
-    return strip_occupancy_grid(input);
+    return strip_and_reserialize<nav_msgs::msg::OccupancyGrid>(input, [](auto& m) { m.data = {0}; });
   }
 
   throw std::runtime_error("strip() not implemented for type: " + message_type);

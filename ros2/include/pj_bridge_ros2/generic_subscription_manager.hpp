@@ -58,8 +58,6 @@ class GenericSubscriptionManager {
  private:
   struct SubscriptionInfo {
     std::shared_ptr<rclcpp::GenericSubscription> subscription;
-    std::string topic_type;
-    Ros2MessageCallback callback;
     size_t reference_count;
   };
 

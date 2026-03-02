@@ -22,9 +22,9 @@
 #include <ament_index_cpp/get_package_share_directory.hpp>
 #include <fstream>
 #include <mutex>
-#include <set>
 #include <shared_mutex>
 #include <sstream>
+#include <unordered_set>
 #include <vector>
 
 namespace pj_bridge {
@@ -46,7 +46,7 @@ std::string SchemaExtractor::get_message_definition(const std::string& message_t
   }
 
   std::ostringstream result;
-  std::set<std::string> processed_types;
+  std::unordered_set<std::string> processed_types;
 
   if (!build_message_definition_recursive(package_name, type_name, result, processed_types, true)) {
     return "";
@@ -64,7 +64,7 @@ std::string SchemaExtractor::get_message_definition(const std::string& message_t
 
 bool SchemaExtractor::build_message_definition_recursive(
     const std::string& package_name, const std::string& type_name, std::ostringstream& output,
-    std::set<std::string>& processed_types, bool is_root) const {
+    std::unordered_set<std::string>& processed_types, bool is_root) const {
   const std::string full_type = package_name + "/" + type_name;
 
   std::string msg_content;
@@ -143,11 +143,10 @@ bool SchemaExtractor::build_message_definition_recursive(
         base_type = base_type.substr(0, bracket_pos);
       }
 
-      bool is_builtin =
-          (base_type == "bool" || base_type == "byte" || base_type == "char" || base_type == "float32" ||
-           base_type == "float64" || base_type == "int8" || base_type == "uint8" || base_type == "int16" ||
-           base_type == "uint16" || base_type == "int32" || base_type == "uint32" || base_type == "int64" ||
-           base_type == "uint64" || base_type == "string" || base_type == "wstring");
+      static const std::unordered_set<std::string> kBuiltinTypes = {"bool",   "byte",  "char",   "float32", "float64",
+                                                                    "int8",   "uint8", "int16",  "uint16",  "int32",
+                                                                    "uint32", "int64", "uint64", "string",  "wstring"};
+      bool is_builtin = kBuiltinTypes.count(base_type) > 0;
 
       if (!is_builtin) {
         nested_package = package_name;

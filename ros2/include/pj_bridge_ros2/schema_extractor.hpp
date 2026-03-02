@@ -20,11 +20,11 @@
 #pragma once
 
 #include <memory>
-#include <set>
 #include <shared_mutex>
 #include <sstream>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace pj_bridge {
 
@@ -53,7 +53,7 @@ class SchemaExtractor {
 
   bool build_message_definition_recursive(
       const std::string& package_name, const std::string& type_name, std::ostringstream& output,
-      std::set<std::string>& processed_types, bool is_root) const;
+      std::unordered_set<std::string>& processed_types, bool is_root) const;
 
   mutable std::unordered_map<std::string, std::string> definition_cache_;
   mutable std::unordered_map<std::string, std::string> msg_file_cache_;
