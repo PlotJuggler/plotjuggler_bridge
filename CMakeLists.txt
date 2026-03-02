@@ -50,34 +50,30 @@ endif()
 # ============================================================================
 find_package(ZSTD REQUIRED)
 
-# IXWebSocket (vendored in 3rdparty/)
-option(USE_VENDORED_IXWEBSOCKET "Use vendored IXWebSocket library" ON)
-if(USE_VENDORED_IXWEBSOCKET)
-  message(STATUS "Using vendored IXWebSocket (3rdparty/ixwebsocket)")
+include(FetchContent)
+
+# IXWebSocket — try system/conda first, fall back to FetchContent
+find_package(ixwebsocket QUIET)
+if(NOT ixwebsocket_FOUND)
+  message(STATUS "IXWebSocket not found — fetching via FetchContent")
+  FetchContent_Declare(
+    ixwebsocket
+    URL https://github.com/machinezone/IXWebSocket/archive/refs/tags/v11.4.6.tar.gz
+    URL_HASH SHA256=571b4e88063747ea27f07c58964a4a3c24e27e6bd55dad2c542e3cc41e2f1e16
+  )
   set(USE_TLS OFF CACHE BOOL "" FORCE)
   set(USE_ZLIB ON CACHE BOOL "" FORCE)
   set(IXWEBSOCKET_INSTALL OFF CACHE BOOL "" FORCE)
-  add_subdirectory(3rdparty/ixwebsocket)
+  FetchContent_MakeAvailable(ixwebsocket)
 else()
-  find_package(ixwebsocket REQUIRED)
+  message(STATUS "Using system IXWebSocket")
 endif()
 
-# spdlog — prefer system package (required for ROS2 ABI compatibility with
-# librcl_logging_spdlog), fall back to FetchContent for standalone builds.
-include(FetchContent)
-find_package(spdlog QUIET)
-if(NOT spdlog_FOUND)
-  message(STATUS "System spdlog not found — fetching via FetchContent")
-  FetchContent_Declare(
-    spdlog
-    URL https://github.com/gabime/spdlog/archive/refs/tags/v1.15.0.tar.gz
-    URL_HASH SHA256=9962648c9b4f1a7bbc76fd8d9172555bad1871fdb14ff4f842ef87949682caa5
-  )
-  set(SPDLOG_INSTALL OFF CACHE BOOL "" FORCE)
-  FetchContent_MakeAvailable(spdlog)
-else()
-  message(STATUS "Using system spdlog ${spdlog_VERSION}")
-endif()
+# spdlog — available via rosdep (libspdlog-dev) or pixi (conda-forge)
+find_package(spdlog REQUIRED)
+
+# nlohmann/json — available via rosdep (nlohmann-json-dev) or pixi (conda-forge)
+find_package(nlohmann_json REQUIRED)
 
 # ============================================================================
 # Data path for tests
@@ -108,6 +104,7 @@ target_link_libraries(pj_bridge_app PUBLIC
   zstd::libzstd_shared
   ixwebsocket::ixwebsocket
   spdlog::spdlog
+  nlohmann_json::nlohmann_json
 )
 
 # ============================================================================

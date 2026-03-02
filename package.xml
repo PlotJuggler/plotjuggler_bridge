@@ -7,8 +7,8 @@
   <maintainer email="davide.faconti@gmail.com">davide</maintainer>
   <author email="davide.faconti@gmail.com">davide</author>
   <license>AGPL-3.0</license>
-  <url type="repository">https://github.com/PlotJuggler/plotjuggler_ros_bridge</url>
-  <url type="bugtracker">https://github.com/PlotJuggler/plotjuggler_ros_bridge/issues</url>
+  <url type="repository">https://github.com/PlotJuggler/plotjuggler_bridge</url>
+  <url type="bugtracker">https://github.com/PlotJuggler/plotjuggler_bridge/issues</url>
 
   <buildtool_depend>ament_cmake</buildtool_depend>
 
@@ -16,6 +16,10 @@
   <depend>rclcpp</depend>
   <depend>sensor_msgs</depend>
   <depend>nav_msgs</depend>
+
+  <build_depend>libspdlog-dev</build_depend>
+  <build_depend>nlohmann-json-dev</build_depend>
+  <build_depend>zstd-dev</build_depend>
 
   <exec_depend>ros2launch</exec_depend>
   <exec_depend>launch_ros</exec_depend>
