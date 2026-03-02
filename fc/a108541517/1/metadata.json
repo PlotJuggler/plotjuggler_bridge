@@ -1,0 +1,30 @@
+{
+  "cli_version": "0.4.2",
+  "checkpoint_id": "fca108541517",
+  "session_id": "919a13f0-13fd-4936-9826-cc406d32caa1",
+  "strategy": "manual-commit",
+  "created_at": "2026-03-02T15:51:41.771431124Z",
+  "branch": "unify-backends",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmake/FindZSTD.cmake"
+  ],
+  "agent": "Claude Code",
+  "transcript_identifier_at_start": "2a6f5e0c-0fde-4015-a6a7-55f5c492bd26",
+  "token_usage": {
+    "input_tokens": 1579,
+    "cache_creation_tokens": 90291,
+    "cache_read_tokens": 3094751,
+    "output_tokens": 21231,
+    "api_call_count": 38
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-03-02T15:51:41.5572737Z",
+    "agent_lines": 0,
+    "human_added": 22098,
+    "human_modified": 6,
+    "human_removed": 0,
+    "total_committed": 22104,
+    "agent_percentage": 0
+  }
+}

@@ -1,0 +1,17 @@
+check https://github.com/PlotJuggler/plotjuggler_bridge/pull/2 and decide which change to incorporate in the current branch and if we can use pixi with both ros2 and fastdds backends
+
+---
+
+it is ok to use robostack
+
+---
+
+let's start with 1
+
+---
+
+now, I want to be able to generate either the bridge for Humble or Jazzy using pixi
+
+---
+
+[Request interrupted by user for tool use]

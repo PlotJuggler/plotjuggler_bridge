@@ -3,7 +3,7 @@
   "checkpoint_id": "fca108541517",
   "strategy": "manual-commit",
   "branch": "unify-backends",
-  "checkpoints_count": 2,
+  "checkpoints_count": 3,
   "files_touched": [
     ".github/workflows/release-debs.yaml",
     ".github/workflows/ros-humble.yaml",
@@ -113,6 +113,7 @@
     "CLAUDE.md",
     "CMakeLists.txt",
     "README.md",
+    "cmake/FindZSTD.cmake",
     "conanfile.txt",
     "docs/API.md",
     "launch/test_topics.launch.py",
@@ -127,13 +128,20 @@
       "context": "/fc/a108541517/0/context.md",
       "content_hash": "/fc/a108541517/0/content_hash.txt",
       "prompt": "/fc/a108541517/0/prompt.txt"
+    },
+    {
+      "metadata": "/fc/a108541517/1/metadata.json",
+      "transcript": "/fc/a108541517/1/full.jsonl",
+      "context": "/fc/a108541517/1/context.md",
+      "content_hash": "/fc/a108541517/1/content_hash.txt",
+      "prompt": "/fc/a108541517/1/prompt.txt"
     }
   ],
   "token_usage": {
-    "input_tokens": 79,
-    "cache_creation_tokens": 80455,
-    "cache_read_tokens": 4116957,
-    "output_tokens": 22995,
-    "api_call_count": 66
+    "input_tokens": 1658,
+    "cache_creation_tokens": 170746,
+    "cache_read_tokens": 7211708,
+    "output_tokens": 44226,
+    "api_call_count": 104
   }
 }
