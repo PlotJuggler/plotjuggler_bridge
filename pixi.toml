@@ -26,17 +26,16 @@ channels = ["robostack-jazzy", "conda-forge"]
 [feature.jazzy.dependencies]
 ros-jazzy-desktop = "*"
 
-# Uncomment when robostack-kilted channel is available and regenerate pixi.lock:
-# [feature.kilted]
-# channels = ["robostack-kilted", "conda-forge"]
-#
-# [feature.kilted.dependencies]
-# ros-kilted-desktop = "*"
+[feature.kilted]
+channels = ["robostack-kilted", "conda-forge"]
+
+[feature.kilted.dependencies]
+ros-kilted-desktop = "*"
 
 [environments]
 humble = ["humble"]
 jazzy = ["jazzy"]
-# kilted = ["kilted"]
+kilted = ["kilted"]
 
 [activation]
 scripts = ["install/setup.sh"]
