@@ -1,0 +1,451 @@
+Implement the following plan:
+
+# Fix 7 Bugs Found in Code Review
+
+## Context
+
+Code review revealed 7 bugs of varying severity. Two high-severity ref-counting issues (#1, #2) share a root cause: the session's subscription list can be out of sync with the subscription manager's ref counts. The plan fixes all 7, enhances the mock to detect ref-count bugs, and fixes two existing tests that test the wrong thing.
+
+## Step 0: Enhance MockSubscriptionManager with ref counting
+
+The current mock uses `std::set` — it can't detect ref-count leaks or underflows. Replace with `std::unordered_map<std::string, int>` ref counting.
+
+**File**: `tests/unit/test_bridge_server.cpp` (lines 206-247)
+
+```cpp
+// Replace std::set<std::string> subscribed_topics_ with:
+std::unordered_map<std::string, int> ref_counts_;
+bool underflow_detected_{false};
+```
+
+- `subscribe()`: `ref_counts_[topic]++`
+- `unsubscribe()`: decrement; if already 0, set `underflow_detected_ = true` and return false
+- `unsubscribe_all()`: clear `ref_counts_`
+- Add helpers: `int ref_count(topic)`, `bool has_underflow()`, `bool is_subscribed(topic)` (returns `ref_counts_[topic] > 0`)
+
+Also enhance `MockTopicSource` — add topics to both `topics_` AND `MockSubscriptionManager::known_topics_` via a test helper so subscribe actually succeeds. Currently most subscribe tests fail because topics aren't in `known_topics_`.
+
+## Step 1: Fix two incorrect existing tests
+
+**File**: `tests/unit/test_bridge_server.cpp`
+
+### Fix `UnsubscribeRemovesTopics` (line 855)
+
+Currently subscribes to `/topic_a` and `/topic_b` which don't exist in the mock, so subscribe fails. The unsubscribe then has nothing to remove. The test is functionally identical to `UnsubscribeIgnoresUnsubscribedTopics`.
+
+**Fix**: Add real topics to the mock before subscribing:
+```cpp
+mock_topic_source_->set_topics({{"/topic_a", "std_msgs/msg/String"}, {"/topic_b", "std_msgs/msg/String"}});
+mock_sub_manager_->add_known_topic("/topic_a");
+mock_sub_manager_->add_known_topic("/topic_b");
+```
+Then verify the subscribe succeeds, and the unsubscribe of `/topic_a` actually removes it (the `removed` array should contain `/topic_a`). Verify `/topic_b` remains subscribed.
+
+### Fix `SubscribeIsAdditive` (line 897)
+
+Same problem — topics don't exist so subscribes fail. Cannot verify additivity.
+
+**Fix**: Add topics to mock, verify that after subscribing to `/topic_a` then `/topic_b`, both appear in the session's subscriptions (verify via a get_topics or subscribe response that shows schemas for both).
+
+## Step 2: Write failing tests for each bug
+
+All tests go in `tests/unit/test_bridge_server.cpp` unless noted.
+
+### Bug #1 — Ref-count leak on disconnect during subscribe
+Test `DisconnectDuringSubscribeCleansUpRefCounts`:
+- Add topics `/t1`, `/t2`, `/t3` to mock
+- Subscribe to all three
+- Immediately simulate disconnect
+- Verify `ref_count("/t1") == 0`, etc. (all zero)
+- Verify `has_underflow() == false`
+
+This test will **fail** with current code if disconnect races between subscribe and update_subscriptions. In the single-threaded test it may pass, but the structural fix (incremental session update) prevents the race.
+
+### Bug #2 — Ref-count underflow on partial resume
+Test `ResumePartialFailureRemovesTopicsFromSession`:
+- Add `/topic_a`, `/topic_b` to mock, subscribe, then pause
+- Remove `/topic_b` from `MockTopicSource::topics_` (simulate topic disappearance)
+- Resume — `/topic_b` subscribe should fail
+- Verify `/topic_b` is no longer in session subscriptions
+- Disconnect — verify `has_underflow() == false`
+
+This test will **fail** with current code (underflow on cleanup).
+
+### Bug #4 — Unsubscribe ignores object format
+Test `UnsubscribeAcceptsObjectFormat`:
+- Add `/topic_a` to mock, subscribe successfully
+- Unsubscribe with `[{"name": "/topic_a"}]`
+- Verify `/topic_a` is in `removed` array
+- Verify `ref_count("/topic_a") == 0`
+
+This test will **fail** with current code (object entry silently skipped).
+
+### Bug #6 — Unbounded queue
+Test goes in `tests/unit/test_websocket_middleware.cpp`:
+Test `IncomingQueueBounded`:
+- After initialize, push more than `kMaxIncomingQueueSize` messages via the IXWebSocket callback
+- Verify only `kMaxIncomingQueueSize` are dequeued via `receive_request()`
+
+This test will **fail** with current code (all messages enqueued).
+
+### Bug #9 — Division by zero
+Test `InitializeRejectsZeroPublishRate`:
+- Create BridgeServer with `publish_rate = 0.0`
+- Call `initialize()` — should return false
+
+This test should already **pass** (the validation exists). But add it for documentation and verify entry points don't compute `1.0/rate` before calling initialize.
+
+### Bug #15 — Dead code
+No test needed. Just remove the field.
+
+## Step 3: Implement fixes
+
+### Bug #15 (simplest) — Remove dead code
+**Files**: `app/include/pj_bridge/message_buffer.hpp`, `app/src/message_buffer.cpp`
+- Remove `uint64_t last_read_timestamp_ns_` from header
+- Remove all assignments in constructor, `move_messages()`, `clear()`
+
+### Bug #4 — Fix unsubscribe parsing
+**File**: `app/src/bridge_server.cpp`, `handle_unsubscribe()` (line 378-384)
+- Add `else if (topic_item.is_object() && topic_item.contains("name") && topic_item["name"].is_string())` branch mirroring subscribe's parsing
+
+### Bug #9 — Move interval computation after initialize()
+**Files**: `ros2/src/main.cpp`, `rti/src/main.cpp`
+- Move `publish_period`/`publish_interval` computation and timer creation to after `server.initialize()` returns true
+
+### Bug #6 — Bound the incoming queue
+**Files**: `app/src/middleware/websocket_middleware.cpp`, `app/include/pj_bridge/middleware/websocket_middleware.hpp`
+- Add `static constexpr size_t kMaxIncomingQueueSize = 1024;`
+- In message callback: check `incoming_queue_.size() >= kMaxIncomingQueueSize`, if so log warning and return (drop message)
+
+### Bug #7 — Release clients_mutex_ before sending
+**File**: `app/src/middleware/websocket_middleware.cpp`
+- `send_reply()`: copy `shared_ptr<ix::WebSocket>` under lock, release lock, then `ws->send()`
+- `send_binary()`: same pattern
+- `publish_data()`: copy all `shared_ptr`s into a local vector under lock, release, then iterate and send
+
+### Bug #1 — Incremental session update during subscribe
+**Files**: `app/include/pj_bridge/session_manager.hpp`, `app/src/session_manager.cpp`, `app/src/bridge_server.cpp`
+
+Add to `SessionManager`:
+```cpp
+bool add_subscription(const std::string& client_id, const std::string& topic, double rate);
+bool remove_subscription(const std::string& client_id, const std::string& topic);
+```
+
+In `handle_subscribe()`: after each successful `subscription_manager_->subscribe()`, immediately call `session_manager_->add_subscription()`. If `add_subscription` returns false (session gone), roll back with `subscription_manager_->unsubscribe()`.
+
+Remove the batch `update_subscriptions()` call at end. Keep a separate loop for rate-only updates on pre-existing topics.
+
+### Bug #2 — Remove failed topics from session on resume
+**File**: `app/src/bridge_server.cpp`, `handle_resume()` (lines 483-497)
+
+Collect topics that fail to re-subscribe into `failed_topics`. After the loop, remove them from the session via `session_manager_->remove_subscription()` (or batch `update_subscriptions()`).
+
+## Step 4: Fix existing tests that break due to mock changes
+
+After enhancing MockSubscriptionManager, review all tests that call `is_subscribed()` — the semantics change from set-based to ref-count-based but `is_subscribed()` should still return the same boolean result (`ref_count > 0`).
+
+## Verification
+
+```bash
+cd ~/ws_plotjuggler && source /opt/ros/humble/setup.bash
+# Regular build + test
+colcon build --packages-select pj_bridge --cmake-args -DCMAKE_BUILD_TYPE=Release
+colcon test --packages-select pj_bridge && colcon test-result --verbose
+# TSAN
+colcon build --packages-select pj_bridge --build-base build_tsan --install-base install_tsan --cmake-args -DCMAKE_BUILD_TYPE=Release -DENABLE_TSAN=ON
+source install_tsan/setup.bash
+TSAN_OPTIONS="suppressions=src/pj_ros_bridge/tsan_suppressions.txt" setarch $(uname -m) -R build_tsan/pj_bridge/pj_bridge_tests
+# ASAN
+colcon build --packages-select pj_bridge --build-base build_asan --install-base install_asan --cmake-args -DCMAKE_BUILD_TYPE=Release -DENABLE_ASAN=ON
+source install_asan/setup.bash
+ASAN_OPTIONS="new_delete_type_mismatch=0" LSAN_OPTIONS="suppressions=src/pj_ros_bridge/asan_suppressions.txt" build_asan/pj_bridge/pj_bridge_tests
+```
+
+
+If you need specific details from before exiting plan mode (like exact code snippets, error messages, or content you generated), read the full transcript at: /home/davide/.REDACTED.jsonl
+
+---
+
+double check all your changes with a reviewer agent before the commit
+
+---
+
+commit
+
+---
+
+now, how much coupling do we have between the app and the backends? for instance, if I delete the RTI folder, what will I need to modify in the rest of the repository?
+
+---
+
+if the plans are completed, delete the
+
+---
+
+commit
+
+---
+
+This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.
+
+Analysis:
+Let me chronologically analyze the conversation:
+
+1. The user provided a detailed plan to fix 7 bugs found in a code review. The plan had steps 0-4 with specific file changes.
+
+2. I read all the relevant files to understand the codebase:
+   - test_bridge_server.cpp (the main test file with mocks)
+   - bridge_server.cpp (main orchestrator)
+   - bridge_server.hpp
+   - session_manager.hpp and .cpp
+   - message_buffer.hpp and .cpp
+   - websocket_middleware.hpp and .cpp
+   - ros2/src/main.cpp
+   - rti/src/main.cpp
+   - subscription_manager_interface.hpp
+
+3. I created tasks to track progress and implemented changes:
+
+   **Step 0**: Enhanced MockSubscriptionManager
+   - Replaced `std::set<std::string> subscribed_topics_` with `std::unordered_map<std::string, int> ref_counts_`
+   - Added `bool underflow_detected_`
+   - subscribe() increments ref count
+   - unsubscribe() decrements, detects underflow
+   - Added helpers: ref_count(), has_underflow(), reset_underflow()
+   - Added remove_topic() to MockTopicSource
+   - Added `<algorithm>` and `<unordered_map>` includes
+
+   **Step 1**: Fixed two broken tests
+   - UnsubscribeRemovesTopics: Added real topics to mock, verified subscribe succeeds, verified unsubscribe removes /topic_a while /topic_b remains
+   - SubscribeIsAdditive: Added real topics, verified both subscriptions succeed and both remain active
+
+   **Step 2**: Added new tests for each bug
+   - DisconnectDuringSubscribeCleansUpRefCounts (Bug #1)
+   - ResumePartialFailureRemovesTopicsFromSession (Bug #2)
+   - UnsubscribeAcceptsObjectFormat (Bug #4)
+   - IncomingQueueBounded (Bug #6) - in test_websocket_middleware.cpp
+   - InitializeRejectsZeroPublishRate and InitializeRejectsNegativePublishRate (Bug #9)
+
+   **Step 3**: Implemented bug fixes
+   - Bug #15: Removed `last_read_timestamp_ns_` from message_buffer.hpp and .cpp
+   - Bug #4: Added `else if (topic_item.is_object() && ...)` branch in handle_unsubscribe
+   - Bug #9: Already validated in initialize() - no change needed for entry points
+   - Bug #6: Added kMaxIncomingQueueSize = 1024 and queue bound check
+   - Bug #7: Changed send_reply, send_binary, publish_data to copy shared_ptr under lock, release, then send
+   - Bug #1: Added add_subscription/remove_subscription to SessionManager, used incremental updates in handle_subscribe with rollback
+   - Bug #2: Collect failed topics during resume, remove from session via remove_subscription
+
+4. Errors encountered:
+   - `final_subscriptions` was not declared after refactoring handle_subscribe - fixed by replacing with `session_manager_->get_subscriptions(client_id)`
+   - clang-format pre-commit hook reformatted files on first commit attempt - fixed by re-staging and recommitting
+
+5. After implementation, I ran tests:
+   - Regular build: 317 tests pass
+   - TSAN: 161 gtest cases pass (29 pre-existing IXWebSocket warnings)
+   - ASAN: 161 gtest cases pass, clean
+
+6. User asked for code review before commit - I used the code-reviewer agent which found:
+   - 0 critical, 0 important issues
+   - S2 suggestion: publish_rate validation happens after middleware init - I fixed this by moving the check before middleware initialization
+
+7. User said "commit" - I committed with detailed message, commit 83a70db
+
+8. User asked about coupling between app and backends - I used Explore agent to analyze. Finding: RTI is cleanly decoupled, only CMakeLists.txt needs code changes if rti/ is deleted, plus documentation updates.
+
+9. User said "if the plans are completed, delete the" (sentence cut off) - I asked for clarification, user chose to delete entire docs/plans/ directory. I removed it and the reference in CLAUDE.md. Commit 9c8b9f9.
+
+10. User said "commit" again - working tree was already clean from the previous commit.
+
+Now the user asks for a summary of the conversation.
+
+Summary:
+1. Primary Request and Intent:
+   The user asked me to implement a detailed plan to fix 7 bugs found in a code review for the `pj_bridge` project. The plan had 5 steps (Step 0-4): enhance the mock subscription manager with ref counting, fix two incorrect existing tests, write failing tests for each bug, implement all 7 bug fixes, and verify all tests pass. After implementation, the user asked me to run a code review agent before committing, then to commit. The user then asked about coupling between app/ and rti/ backends, and finally asked to delete the completed plan documents from docs/plans/.
+
+2. Key Technical Concepts:
+   - **Multi-backend architecture**: `app/` (core), `ros2/` (ROS2 adapter), `rti/` (RTI Connext DDS adapter) with abstract interfaces
+   - **Reference-counted subscriptions**: `SubscriptionManagerInterface` with subscribe/unsubscribe ref counting
+   - **Incremental session updates**: `add_subscription()`/`remove_subscription()` replacing batch `update_subscriptions()` to prevent races
+   - **Thread safety**: Lock ordering (`cleanup_mutex_ > last_sent_mutex_ > stats_mutex_`), copying shared_ptrs under lock then releasing before I/O
+   - **Bounded queues**: `kMaxIncomingQueueSize = 1024` to prevent unbounded memory growth
+   - **Mock-based testing**: MockSubscriptionManager with ref-count tracking and underflow detection
+   - **Build verification**: Regular build + TSAN + ASAN sanitizer passes required
+   - **Pre-commit hooks**: clang-format enforced via pre-commit
+
+3. Files and Code Sections:
+
+   - **`tests/unit/test_bridge_server.cpp`**
+     - Central test file containing MockMiddleware, MockTopicSource, MockSubscriptionManager, BridgeServerTest fixture, and all bridge server tests
+     - **MockSubscriptionManager rewritten** from set-based to ref-count-based:
+       ```cpp
+       class MockSubscriptionManager : public SubscriptionManagerInterface {
+        public:
+         bool subscribe(const std::string& topic_name, const std::string& /*topic_type*/) override {
+           if (known_topics_.find(topic_name) == known_topics_.end()) return false;
+           ref_counts_[topic_name]++;
+           return true;
+         }
+         bool unsubscribe(const std::string& topic_name) override {
+           auto it = ref_counts_.find(topic_name);
+           if (it == ref_counts_.end() || it->second <= 0) { underflow_detected_ = true; return false; }
+           it->second--;
+           if (it->second == 0) ref_counts_.erase(it);
+           return true;
+         }
+         // helpers: ref_count(), has_underflow(), reset_underflow(), is_subscribed(), add_known_topic()
+        private:
+         std::unordered_map<std::string, int> ref_counts_;
+         bool underflow_detected_{false};
+       };
+       ```
+     - **MockTopicSource** got `remove_topic()` helper for Bug #2 test
+     - **Fixed UnsubscribeRemovesTopics**: Added real topics via `set_topics()` and `add_known_topic()`, verified subscribe succeeds, then verified unsubscribe removes /topic_a while /topic_b remains
+     - **Fixed SubscribeIsAdditive**: Added real topics, verified both subscriptions succeed independently
+     - **Added 5 new tests**: DisconnectDuringSubscribeCleansUpRefCounts, ResumePartialFailureRemovesTopicsFromSession, UnsubscribeAcceptsObjectFormat, InitializeRejectsZeroPublishRate, InitializeRejectsNegativePublishRate
+
+   - **`tests/unit/test_websocket_middleware.cpp`**
+     - Added `IncomingQueueBounded` test: sends 2000 messages, verifies at most 1024 received
+
+   - **`app/src/bridge_server.cpp`**
+     - **Bug #4 fix** in `handle_unsubscribe()`: Added object format parsing:
+       ```cpp
+       } else if (topic_item.is_object() && topic_item.contains("name") && topic_item["name"].is_string()) {
+         topic_name = topic_item["name"].get<std::string>();
+       }
+       ```
+     - **Bug #1 fix** in `handle_subscribe()`: Replaced batch `update_subscriptions()` with incremental `add_subscription()` after each successful subscribe, with rollback if session is gone:
+       ```cpp
+       if (!session_manager_->add_subscription(client_id, topic_name, requested_topics[topic_name])) {
+         spdlog::warn("Session gone for client '{}', rolling back subscribe for '{}'", client_id, topic_name);
+         subscription_manager_->unsubscribe(topic_name);
+         continue;
+       }
+       ```
+     - **Bug #2 fix** in `handle_resume()`: Collect failed topics and remove from session:
+       ```cpp
+       std::vector<std::string> failed_topics;
+       // ... in loop: failed_topics.push_back(topic);
+       for (const auto& topic : failed_topics) {
+         session_manager_->remove_subscription(client_id, topic);
+       }
+       ```
+     - **Bug #9 fix**: Moved `publish_rate_ <= 0.0` validation before middleware initialization
+     - Removed `#include <unordered_set>` (no longer needed after removing `successfully_subscribed` set)
+
+   - **`app/include/pj_bridge/session_manager.hpp`** and **`app/src/session_manager.cpp`**
+     - Added two new methods for incremental subscription management:
+       ```cpp
+       bool add_subscription(const std::string& client_id, const std::string& topic, double rate);
+       bool remove_subscription(const std::string& client_id, const std::string& topic);
+       ```
+
+   - **`app/include/pj_bridge/message_buffer.hpp`** and **`app/src/message_buffer.cpp`**
+     - **Bug #15**: Removed `uint64_t last_read_timestamp_ns_` field and all assignments in constructor, `move_messages()`, and `clear()`
+
+   - **`app/include/pj_bridge/middleware/websocket_middleware.hpp`**
+     - **Bug #6**: Added `static constexpr size_t kMaxIncomingQueueSize = 1024;`
+
+   - **`app/src/middleware/websocket_middleware.cpp`**
+     - **Bug #6**: Added queue bound check before push:
+       ```cpp
+       if (incoming_queue_.size() >= kMaxIncomingQueueSize) {
+         spdlog::warn("Incoming queue full ({} messages), dropping message from client '{}'",
+                      kMaxIncomingQueueSize, client_id);
+         return;
+       }
+       ```
+     - **Bug #7**: Changed `send_reply()`, `send_binary()`, `publish_data()` to copy shared_ptr under lock, release lock, then send. Example for send_reply:
+       ```cpp
+       std::shared_ptr<ix::WebSocket> ws;
+       {
+         std::lock_guard<std::mutex> lock(clients_mutex_);
+         auto it = clients_.find(client_identity);
+         if (it == clients_.end() || !it->second) return false;
+         ws = it->second;
+       }
+       std::string text_data(data.begin(), data.end());
+       auto send_info = ws->send(text_data);
+       return send_info.success;
+       ```
+
+   - **`CLAUDE.md`**
+     - Removed reference to `docs/plans/2026-02-26-unify-backends-design.md` after plans directory deletion
+
+   - **`docs/plans/`** — Entire directory deleted (5 completed plan files)
+
+4. Errors and Fixes:
+   - **`final_subscriptions` not declared**: After refactoring `handle_subscribe()` to use incremental `add_subscription()`, the response-building section still referenced the removed `final_subscriptions` variable. Fixed by replacing with `session_manager_->get_subscriptions(client_id)`.
+   - **clang-format pre-commit hook failure**: First commit attempt failed because clang-format reformatted some files. Fixed by re-staging the auto-formatted changes with `git add -u` and recommitting.
+   - **Code review suggestion S2**: The reviewer agent noted that `publish_rate_` validation happened after middleware initialization, meaning middleware could start accepting connections before discovering an invalid rate. Fixed by moving the validation before `middleware_->initialize()`.
+
+5. Problem Solving:
+   - All 7 bugs were implemented and verified with tests
+   - 317 tests pass in regular build, 161 gtest cases pass under both TSAN and ASAN
+   - Code review found no critical or important issues
+   - Backend coupling analysis confirmed clean decoupling (only CMakeLists.txt + docs need changes if rti/ is removed)
+   - Completed plans directory was cleaned up
+
+6. All User Messages:
+   - "Implement the following plan: [detailed 7-bug fix plan with steps 0-4]"
+   - "double check all your changes with a reviewer agent before the commit"
+   - "commit"
+   - "now, how much coupling do we have between the app and the backends? for instance, if I delete the RTI folder, what will I need to modify in the rest of the repository?"
+   - "if the plans are completed, delete the" (sentence cut off, clarified via question — user chose "Entire docs/plans/ directory")
+   - "commit" (working tree was already clean)
+
+7. Pending Tasks:
+   - None. All requested work is complete.
+
+8. Current Work:
+   The user's last message was "commit" but the working tree was already clean from the previous commit (9c8b9f9 which deleted docs/plans/). I confirmed with `git status --short` showing no changes. All tasks from the bug fix plan are complete, the code review was done, two commits were made (83a70db for the bug fixes + architecture, 9c8b9f9 for plans cleanup), and the coupling analysis was answered.
+
+9. Optional Next Step:
+   No pending tasks. The user's branch `unify-backends` has all work committed with a clean working tree. The user may want to create a PR to merge `unify-backends` into `main`, but this was not explicitly requested.
+
+If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /home/davide/.REDACTED.jsonl
+
+---
+
+If I wanted to use FastDDS instead of RTI, would it be 100% compatible? for instance, would DdsTopicDiscovery be the same, including schema_idl discovery?
+
+---
+
+[Request interrupted by user]
+
+---
+
+I am talking about running the FastDDS bridge in a RTI DDS network
+
+---
+
+let's suppose that given a dynamic type, we could implement the equivalent of to_string() do we actually have the dynamic type in FastDDS (double check searching the internet for the latest version)
+
+---
+
+latest versiopn is 3.5.0
+
+---
+
+[Request interrupted by user]
+
+---
+
+using conan we can acquire fast-dds/3.4.0
+
+---
+
+check the release note if there is anything useful for us https://github.com/eProsima/Fast-DDS/releases/tag/v3.5.0.0
+
+---
+
+plan the implementation of the fastDDS backend. do not delete RTI folder yet, but stop compiling it
+
+---
+
+what do you suggest? what is the advantage of the two levels, in terms of maintenability and testability?
+
+---
+
+[Request interrupted by user for tool use]
