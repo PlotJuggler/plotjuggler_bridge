@@ -1,0 +1,253 @@
+Implement the following plan:
+
+# Cross-Backend Consistency Review: ROS2 / RTI / FastDDS
+
+## Context
+
+The three backends (ROS2, RTI, FastDDS) were developed at different times and the FastDDS backend was modeled after RTI. This review identifies inconsistencies in patterns, architecture, and code duplication that can be harmonized.
+
+## Finding 1: RTI and FastDDS main.cpp are ~95% identical (MAJOR)
+
+**Files**: `rti/src/main.cpp`, `fastdds/src/main.cpp`
+
+The only differences are:
+- Line 44: App description string
+- RTI has `--qos-profile` CLI option (FastDDS doesn't)
+- Lines 74-76: Component creation (different types)
+- A couple of startup log strings
+
+The **entire event loop** (~40 lines), **stats printing** (~20 lines), **shutdown sequence** (~10 lines), and **signal handling** are copy-pasted verbatim.
+
+### Proposed fix: Extract shared standalone event loop into `app/`
+
+Create `app/include/pj_bridge/standalone_event_loop.hpp` and `app/src/standalone_event_loop.cpp`:
+
+```cpp
+namespace pj_bridge {
+
+struct StandaloneConfig {
+  int port;
+  double publish_rate;
+  double session_timeout;
+  bool stats_enabled;
+};
+
+// Runs the event loop until SIGINT/SIGTERM. Handles:
+// - process_requests() every iteration
+// - publish_aggregated_messages() at publish_rate
+// - check_session_timeouts() every 1s
+// - optional stats printing every 5s
+// - ordered shutdown: clear callback → unsubscribe_all → middleware shutdown
+void run_standalone_event_loop(
+    BridgeServer& server,
+    std::shared_ptr<SubscriptionManagerInterface> sub_manager,
+    std::shared_ptr<WebSocketMiddleware> middleware,
+    const StandaloneConfig& config);
+}
+```
+
+Each backend's main.cpp becomes ~30 lines: CLI parsing + component creation + one function call.
+
+**Files to create:**
+- `app/include/pj_bridge/standalone_event_loop.hpp`
+- `app/src/standalone_event_loop.cpp`
+
+**Files to modify:**
+- `rti/src/main.cpp` — simplify to CLI + component creation + `run_standalone_event_loop()`
+- `fastdds/src/main.cpp` — same simplification
+- `CMakeLists.txt` — add `standalone_event_loop.cpp` to `pj_bridge_app` sources
+
+## Finding 2: Inconsistent `get_participant()` error handling (MINOR)
+
+- **RTI** `DdsTopicDiscovery::get_participant()`: **throws** `std::runtime_error` if domain not found
+- **FastDDS** `FastDdsTopicSource::get_participant()`: returns **nullptr** if not found
+
+The FastDDS approach is better — the caller checks explicitly. RTI's `subscribe()` wraps everything in try-catch so the throw is caught, but returning nullptr/optional is more consistent with the rest of the API (`get_type()` and `get_domain_id()` both return optionals).
+
+### Proposed fix
+
+Change RTI's `get_participant()` to return `std::optional<dds::domain::DomainParticipant>` instead of throwing. Update `DdsSubscriptionManager::subscribe()` to check the optional (same pattern as the `get_domain_id()` check above it).
+
+**Files to modify:**
+- `rti/include/pj_bridge_rti/dds_topic_discovery.hpp` — change return type
+- `rti/src/dds_topic_discovery.cpp` — return nullopt instead of throw
+- `rti/src/dds_subscription_manager.cpp` — add nullptr check in `subscribe()`
+
+## Finding 3: Inconsistent `unsubscribe()` to_close pattern (MINOR)
+
+- **RTI**: Uses `std::optional<SubscriptionInfo> to_close;` + `if (to_close) { ... }`
+- **FastDDS**: Uses `SubscriptionInfo to_close{}; bool should_close = false;` + `if (should_close) { ... }`
+
+The RTI approach using `optional` is cleaner and more idiomatic.
+
+### Proposed fix
+
+Change FastDDS's `unsubscribe()` to use `std::optional` like RTI.
+
+Note: FastDDS's `SubscriptionInfo` has raw pointers as members, so default construction followed by `std::move` works fine. But `std::optional` with `emplace(std::move(...))` is cleaner and avoids a default-constructed zombie state.
+
+**Files to modify:**
+- `fastdds/src/fastdds_subscription_manager.cpp` — change `to_close` + `should_close` to `std::optional<SubscriptionInfo>`
+
+## Finding 4: RTI has `ref_count()`, FastDDS doesn't (MINOR)
+
+RTI's `DdsSubscriptionManager` has a public `ref_count(topic_name)` method. FastDDS doesn't.
+
+This method doesn't appear to be used by the core or tests — it was likely added for debugging.
+
+### Proposed fix
+
+Remove `ref_count()` from RTI (dead code). Or if desired for debugging, add it to both. I lean toward removing it since it's unused.
+
+**Files to modify:**
+- `rti/include/pj_bridge_rti/dds_subscription_manager.hpp` — remove declaration
+- `rti/src/dds_subscription_manager.cpp` — remove implementation
+
+## Finding 5: ROS2 subscription manager missing explicit copy-delete and destructor (MINOR)
+
+- RTI and FastDDS both `= delete` copy/move constructors
+- ROS2's `Ros2SubscriptionManager` and `GenericSubscriptionManager` don't (implicitly non-copyable due to mutex, but not explicit)
+
+RTI and FastDDS subscription manager destructors explicitly call `unsubscribe_all()`. ROS2 doesn't — it relies on RAII (shared_ptr<GenericSubscription> destruction). This is fine but inconsistent.
+
+### Proposed fix
+
+Add `= delete` for copy/move to `Ros2SubscriptionManager` and `Ros2TopicSource` for consistency. Leave the destructor as-is since ROS2's RAII approach is correct.
+
+**Files to modify:**
+- `ros2/include/pj_bridge_ros2/ros2_subscription_manager.hpp` — add `= delete`
+- `ros2/include/pj_bridge_ros2/ros2_topic_source.hpp` — add `= delete`
+
+## Finding 6: ROS2 shutdown doesn't explicitly call middleware->shutdown() (MINOR)
+
+- RTI and FastDDS both call `middleware->shutdown()` explicitly in the shutdown sequence
+- ROS2 relies on BridgeServer destructor to handle WebSocket shutdown
+
+### Proposed fix
+
+Add `middleware->shutdown()` after `sub_manager->unsubscribe_all()` in ROS2's main.cpp shutdown sequence for consistency.
+
+**Files to modify:**
+- `ros2/src/main.cpp` — add `middleware->shutdown()` in shutdown sequence
+
+## Summary of changes
+
+| Priority | Finding | Files |
+|----------|---------|-------|
+| MAJOR | Extract shared event loop from RTI/FastDDS main.cpp | New: `app/src/standalone_event_loop.cpp`, `app/include/pj_bridge/standalone_event_loop.hpp`. Modify: `rti/src/main.cpp`, `fastdds/src/main.cpp`, `CMakeLists.txt` |
+| MINOR | RTI `get_participant()` should return optional, not throw | `rti/` headers + sources |
+| MINOR | FastDDS `unsubscribe()` should use `std::optional` like RTI | `fastdds/src/fastdds_subscription_manager.cpp` |
+| MINOR | Remove unused `ref_count()` from RTI | `rti/` header + source |
+| MINOR | Add `= delete` copy/move to ROS2 classes | `ros2/` headers |
+| MINOR | ROS2 shutdown should call `middleware->shutdown()` explicitly | `ros2/src/main.cpp` |
+
+## Implementation order
+
+1. Extract shared event loop (Finding 1) — biggest impact, reduces duplication by ~80 lines
+2. Fix RTI `get_participant()` (Finding 2)
+3. Fix FastDDS `unsubscribe()` optional pattern (Finding 3)
+4. Remove RTI `ref_count()` (Finding 4)
+5. Add `= delete` to ROS2 classes (Finding 5)
+6. Fix ROS2 shutdown (Finding 6)
+
+## Verification
+
+```bash
+# FastDDS backend still compiles
+cd ~/ws_plotjuggler/src/pj_ros_bridge/build_fastdds
+cmake .. -DCMAKE_BUILD_TYPE=Release -DENABLE_FASTDDS=ON \
+         -DCMAKE_TOOLCHAIN_FILE=conan_toolchain.cmake
+make -j$(nproc)
+./pj_bridge_fastdds --help
+
+# ROS2 tests still pass
+cd ~/ws_plotjuggler && source /opt/ros/humble/setup.bash
+colcon build --packages-select pj_bridge --cmake-args -DCMAKE_BUILD_TYPE=Release
+colcon test --packages-select pj_bridge && colcon test-result --verbose
+
+# pre-commit formatting
+cd ~/ws_plotjuggler/src/pj_ros_bridge && pre-commit run -a
+```
+
+
+If you need specific details from before exiting plan mode (like exact code snippets, error messages, or content you generated), read the full transcript at: /home/davide/.claude/projects/-home-davide-ws-plotjuggler-src-pj-ros-bridge/2ad97c11-66c2-4dcd-a7e4-2fe60cc79a6c.jsonl
+
+---
+
+Base directory for this skill: /home/davide/.claude/plugins/cache/superpowers-marketplace/superpowers/4.0.3/skills/executing-plans
+
+# Executing Plans
+
+## Overview
+
+Load plan, review critically, execute tasks in batches, report for review between batches.
+
+**Core principle:** Batch execution with checkpoints for architect review.
+
+**Announce at start:** "I'm using the executing-plans skill to implement this plan."
+
+## The Process
+
+### Step 1: Load and Review Plan
+1. Read plan file
+2. Review critically - identify any questions or concerns about the plan
+3. If concerns: Raise them with your human partner before starting
+4. If no concerns: Create TodoWrite and proceed
+
+### Step 2: Execute Batch
+**Default: First 3 tasks**
+
+For each task:
+1. Mark as in_progress
+2. Follow each step exactly (plan has bite-sized steps)
+3. Run verifications as specified
+4. Mark as completed
+
+### Step 3: Report
+When batch complete:
+- Show what was implemented
+- Show verification output
+- Say: "Ready for feedback."
+
+### Step 4: Continue
+Based on feedback:
+- Apply changes if needed
+- Execute next batch
+- Repeat until complete
+
+### Step 5: Complete Development
+
+After all tasks complete and verified:
+- Announce: "I'm using the finishing-a-development-branch skill to complete this work."
+- **REQUIRED SUB-SKILL:** Use superpowers:finishing-a-development-branch
+- Follow that skill to verify tests, present options, execute choice
+
+## When to Stop and Ask for Help
+
+**STOP executing immediately when:**
+- Hit a blocker mid-batch (missing dependency, test fails, instruction unclear)
+- Plan has critical gaps preventing starting
+- You don't understand an instruction
+- Verification fails repeatedly
+
+**Ask for clarification rather than guessing.**
+
+## When to Revisit Earlier Steps
+
+**Return to Review (Step 1) when:**
+- Partner updates the plan based on your feedback
+- Fundamental approach needs rethinking
+
+**Don't force through blockers** - stop and ask.
+
+## Remember
+- Review plan critically first
+- Follow plan steps exactly
+- Don't skip verifications
+- Reference skills when plan says to
+- Between batches: just report and wait
+- Stop when blocked, don't guess
+
+---
+
+commit
