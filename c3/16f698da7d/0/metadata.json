@@ -1,0 +1,32 @@
+{
+  "cli_version": "0.4.2",
+  "checkpoint_id": "c316f698da7d",
+  "session_id": "7cbb8255-0de9-42c4-bdf9-5ad80c75bf3f",
+  "strategy": "manual-commit",
+  "created_at": "2026-03-02T19:35:24.348986539Z",
+  "branch": "fix/granular-ci-badges",
+  "checkpoints_count": 2,
+  "files_touched": [
+    ".github/workflows/appimage.yaml"
+  ],
+  "agent": "Claude Code",
+  "transcript_identifier_at_start": "bd94d292-4471-485b-bb33-fc6d74351aaa",
+  "checkpoint_transcript_start": 79,
+  "transcript_lines_at_start": 79,
+  "token_usage": {
+    "input_tokens": 40,
+    "cache_creation_tokens": 53771,
+    "cache_read_tokens": 2700189,
+    "output_tokens": 8667,
+    "api_call_count": 34
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-03-02T19:35:24.314039429Z",
+    "agent_lines": 38,
+    "human_added": 117,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 155,
+    "agent_percentage": 24.516129032258064
+  }
+}

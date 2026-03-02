@@ -1,0 +1,26 @@
+{
+  "cli_version": "0.4.2",
+  "checkpoint_id": "c316f698da7d",
+  "strategy": "manual-commit",
+  "branch": "fix/granular-ci-badges",
+  "checkpoints_count": 2,
+  "files_touched": [
+    ".github/workflows/appimage.yaml"
+  ],
+  "sessions": [
+    {
+      "metadata": "/c3/16f698da7d/0/metadata.json",
+      "transcript": "/c3/16f698da7d/0/full.jsonl",
+      "context": "/c3/16f698da7d/0/context.md",
+      "content_hash": "/c3/16f698da7d/0/content_hash.txt",
+      "prompt": "/c3/16f698da7d/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 40,
+    "cache_creation_tokens": 53771,
+    "cache_read_tokens": 2700189,
+    "output_tokens": 8667,
+    "api_call_count": 34
+  }
+}

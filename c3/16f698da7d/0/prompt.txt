@@ -1,0 +1,21 @@
+check the README. can I have a ore granular badge, where I see the status of each item in the matrix (2x3=6 badges) in total?
+
+---
+
+instead of "ROS" in the table, use "colcon"
+
+---
+
+check CI. apparently there are issues with the appimage creation
+
+---
+
+push this on a new branch. can you run the workflow manually to check if the change work?
+
+---
+
+[Request interrupted by user]
+
+---
+
+continue
