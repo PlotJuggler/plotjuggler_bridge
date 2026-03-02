@@ -1,4 +1,4 @@
-name: CI
+name: Pixi CI
 
 on:
   push:
