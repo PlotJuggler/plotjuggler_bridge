@@ -24,8 +24,7 @@ namespace pj_bridge {
 TopicDiscovery::TopicDiscovery(rclcpp::Node::SharedPtr node) : node_(node) {}
 
 std::vector<TopicInfo> TopicDiscovery::discover_topics() {
-  topics_.clear();
-
+  std::vector<TopicInfo> topics;
   auto topic_names_and_types = node_->get_topic_names_and_types();
 
   for (const auto& [topic_name, topic_types] : topic_names_and_types) {
@@ -37,25 +36,11 @@ std::vector<TopicInfo> TopicDiscovery::discover_topics() {
       TopicInfo info;
       info.name = topic_name;
       info.type = topic_types[0];
-      topics_.push_back(info);
+      topics.push_back(info);
     }
   }
 
-  return topics_;
-}
-
-std::vector<TopicInfo> TopicDiscovery::get_topics() const {
-  return topics_;
-}
-
-bool TopicDiscovery::refresh() {
-  try {
-    discover_topics();
-    return true;
-  } catch (const std::exception& e) {
-    RCLCPP_ERROR(node_->get_logger(), "Topic discovery refresh failed: %s", e.what());
-    return false;
-  }
+  return topics;
 }
 
 bool TopicDiscovery::should_filter_topic(const std::string& topic_name) const {

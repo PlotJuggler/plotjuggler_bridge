@@ -48,7 +48,6 @@ class Ros2SubscriptionManager : public SubscriptionManagerInterface {
   void unsubscribe_all() override;
 
  private:
-  rclcpp::Node::SharedPtr node_;
   GenericSubscriptionManager inner_manager_;
   bool strip_large_messages_;
 

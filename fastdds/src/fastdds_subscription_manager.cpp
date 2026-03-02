@@ -43,7 +43,11 @@ class FastDdsSubscriptionManager::InternalReaderListener : public DataReaderList
  public:
   InternalReaderListener(
       const std::string& topic_name, FastDdsSubscriptionManager& manager, DynamicType::_ref_type dynamic_type)
-      : topic_name_(topic_name), manager_(manager), dynamic_type_(dynamic_type), pub_sub_type_(dynamic_type) {}
+      : topic_name_(topic_name),
+        manager_(manager),
+        dynamic_type_(dynamic_type),
+        pub_sub_type_(dynamic_type),
+        data_(DynamicDataFactory::get_instance()->create_data(dynamic_type)) {}
 
   void on_data_available(DataReader* reader) override {
     try {
@@ -57,25 +61,27 @@ class FastDdsSubscriptionManager::InternalReaderListener : public DataReaderList
         return;
       }
 
-      DynamicData::_ref_type data = DynamicDataFactory::get_instance()->create_data(dynamic_type_);
       SampleInfo info;
 
-      while (RETCODE_OK == reader->take_next_sample(&data, &info)) {
+      while (RETCODE_OK == reader->take_next_sample(&data_, &info)) {
         if (!info.valid_data) {
           continue;
         }
 
         // Re-serialize DynamicData to get raw CDR bytes
         uint32_t size =
-            pub_sub_type_.calculate_serialized_size(&data, DataRepresentationId_t::XCDR2_DATA_REPRESENTATION);
-        SerializedPayload_t payload(size);
-        if (!pub_sub_type_.serialize(&data, payload, DataRepresentationId_t::XCDR2_DATA_REPRESENTATION)) {
+            pub_sub_type_.calculate_serialized_size(&data_, DataRepresentationId_t::XCDR2_DATA_REPRESENTATION);
+        if (payload_.max_size < size) {
+          payload_.reserve(size);
+        }
+        payload_.length = 0;
+        if (!pub_sub_type_.serialize(&data_, payload_, DataRepresentationId_t::XCDR2_DATA_REPRESENTATION)) {
           spdlog::warn("Failed to serialize DynamicData for '{}'", topic_name_);
           continue;
         }
 
-        auto cdr_data = std::make_shared<std::vector<std::byte>>(payload.length);
-        std::memcpy(cdr_data->data(), payload.data, payload.length);
+        auto cdr_data = std::make_shared<std::vector<std::byte>>(payload_.length);
+        std::memcpy(cdr_data->data(), payload_.data, payload_.length);
 
         uint64_t timestamp_ns =
             static_cast<uint64_t>(info.source_timestamp.seconds()) * 1'000'000'000ULL + info.source_timestamp.nanosec();
@@ -92,6 +98,8 @@ class FastDdsSubscriptionManager::InternalReaderListener : public DataReaderList
   FastDdsSubscriptionManager& manager_;
   DynamicType::_ref_type dynamic_type_;
   DynamicPubSubType pub_sub_type_;
+  DynamicData::_ref_type data_;
+  SerializedPayload_t payload_;
 };
 
 // ---------------------------------------------------------------------------
@@ -110,15 +118,18 @@ void FastDdsSubscriptionManager::set_message_callback(MessageCallback callback) 
 }
 
 bool FastDdsSubscriptionManager::subscribe(const std::string& topic_name, const std::string& /*topic_type*/) {
-  std::lock_guard<std::mutex> lock(mutex_);
-
-  auto it = subscriptions_.find(topic_name);
-  if (it != subscriptions_.end()) {
-    it->second.reference_count++;
-    spdlog::debug("Incremented ref count for '{}' to {}", topic_name, it->second.reference_count);
-    return true;
+  // Phase 1: Check for existing subscription (under lock)
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = subscriptions_.find(topic_name);
+    if (it != subscriptions_.end()) {
+      it->second.reference_count++;
+      spdlog::debug("Incremented ref count for '{}' to {}", topic_name, it->second.reference_count);
+      return true;
+    }
   }
 
+  // Phase 2: Lookup and DDS entity creation (unlocked, avoids blocking on_data_available)
   auto dynamic_type = topic_source_.get_dynamic_type(topic_name);
   if (!dynamic_type) {
     spdlog::error("Topic '{}' not found in discovery", topic_name);
@@ -137,37 +148,52 @@ bool FastDdsSubscriptionManager::subscribe(const std::string& topic_name, const 
     return false;
   }
 
+  SubscriptionInfo new_sub{};
+  new_sub.participant = participant;
+
   try {
-    // Register the DynamicType with the participant
     TypeSupport type_support(new DynamicPubSubType(dynamic_type));
     type_support.register_type(participant);
 
-    // Create Topic
-    Topic* topic = participant->create_topic(topic_name, type_support.get_type_name(), TOPIC_QOS_DEFAULT);
-    if (!topic) {
+    new_sub.topic = participant->create_topic(topic_name, type_support.get_type_name(), TOPIC_QOS_DEFAULT);
+    if (!new_sub.topic) {
       spdlog::error("Failed to create topic for '{}'", topic_name);
       return false;
     }
 
-    // Create Subscriber
-    Subscriber* subscriber = participant->create_subscriber(SUBSCRIBER_QOS_DEFAULT);
-    if (!subscriber) {
-      participant->delete_topic(topic);
+    new_sub.subscriber = participant->create_subscriber(SUBSCRIBER_QOS_DEFAULT);
+    if (!new_sub.subscriber) {
+      participant->delete_topic(new_sub.topic);
       spdlog::error("Failed to create subscriber for '{}'", topic_name);
       return false;
     }
 
-    // Create DataReader with listener
-    auto listener = std::make_shared<InternalReaderListener>(topic_name, *this, dynamic_type);
-    DataReader* reader = subscriber->create_datareader(topic, DATAREADER_QOS_DEFAULT, listener.get());
-    if (!reader) {
-      participant->delete_subscriber(subscriber);
-      participant->delete_topic(topic);
+    new_sub.listener = std::make_shared<InternalReaderListener>(topic_name, *this, dynamic_type);
+    new_sub.reader =
+        new_sub.subscriber->create_datareader(new_sub.topic, DATAREADER_QOS_DEFAULT, new_sub.listener.get());
+    if (!new_sub.reader) {
+      participant->delete_subscriber(new_sub.subscriber);
+      participant->delete_topic(new_sub.topic);
       spdlog::error("Failed to create datareader for '{}'", topic_name);
       return false;
     }
 
-    subscriptions_.emplace(topic_name, SubscriptionInfo{participant, subscriber, topic, reader, listener, 1});
+    new_sub.reference_count = 1;
+
+    // Phase 3: Insert into map (re-acquire lock, double-check for concurrent subscribe)
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      auto it = subscriptions_.find(topic_name);
+      if (it != subscriptions_.end()) {
+        // Another thread subscribed while we were creating DDS entities
+        it->second.reference_count++;
+        spdlog::debug("Incremented ref count for '{}' to {} (concurrent)", topic_name, it->second.reference_count);
+        // Clean up the entities we just created (outside lock below)
+        close_subscription(topic_name, new_sub);
+        return true;
+      }
+      subscriptions_.emplace(topic_name, std::move(new_sub));
+    }
 
     spdlog::info(
         "Subscribed to '{}' (type: '{}', domain: {})", topic_name, type_support.get_type_name(), *domain_id_opt);

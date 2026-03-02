@@ -595,6 +595,7 @@ BridgeServer::StatsSnapshot BridgeServer::snapshot_and_reset_stats() {
   snapshot.publish_cycles = publish_cycles_;
   publish_cycles_ = 0;
   snapshot.total_bytes_published = total_bytes_published_;
+  total_bytes_published_ = 0;
   return snapshot;
 }
 

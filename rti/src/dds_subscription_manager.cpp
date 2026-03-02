@@ -81,15 +81,18 @@ void DdsSubscriptionManager::set_message_callback(MessageCallback callback) {
 }
 
 bool DdsSubscriptionManager::subscribe(const std::string& topic_name, const std::string& /*topic_type*/) {
-  std::lock_guard<std::mutex> lock(mutex_);
-
-  auto it = subscriptions_.find(topic_name);
-  if (it != subscriptions_.end()) {
-    it->second.reference_count++;
-    spdlog::debug("Incremented ref count for '{}' to {}", topic_name, it->second.reference_count);
-    return true;
+  // Phase 1: Check for existing subscription (under lock)
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = subscriptions_.find(topic_name);
+    if (it != subscriptions_.end()) {
+      it->second.reference_count++;
+      spdlog::debug("Incremented ref count for '{}' to {}", topic_name, it->second.reference_count);
+      return true;
+    }
   }
 
+  // Phase 2: Lookup and DDS entity creation (unlocked, avoids blocking on_data_available)
   auto struct_type_opt = discovery_.get_type(topic_name);
   if (!struct_type_opt) {
     spdlog::error("Topic '{}' not found in discovery", topic_name);
@@ -126,9 +129,24 @@ bool DdsSubscriptionManager::subscribe(const std::string& topic_name, const std:
     auto listener = std::make_shared<InternalReaderListener>(topic_name, *this);
     reader.set_listener(listener);
 
-    subscriptions_.emplace(
-        std::piecewise_construct, std::forward_as_tuple(topic_name),
-        std::forward_as_tuple(subscriber, reader, listener, 1));
+    // Phase 3: Insert into map (re-acquire lock, double-check for concurrent subscribe)
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      auto it = subscriptions_.find(topic_name);
+      if (it != subscriptions_.end()) {
+        // Another thread subscribed while we were creating DDS entities
+        it->second.reference_count++;
+        spdlog::debug("Incremented ref count for '{}' to {} (concurrent)", topic_name, it->second.reference_count);
+        // Clean up the entities we just created
+        reader.set_listener(nullptr);
+        reader.close();
+        subscriber.close();
+        return true;
+      }
+      subscriptions_.emplace(
+          std::piecewise_construct, std::forward_as_tuple(topic_name),
+          std::forward_as_tuple(subscriber, reader, listener, 1));
+    }
 
     spdlog::info("Subscribed to '{}' (type: '{}', domain: {})", topic_name, struct_type.name(), *domain_id_opt);
     return true;

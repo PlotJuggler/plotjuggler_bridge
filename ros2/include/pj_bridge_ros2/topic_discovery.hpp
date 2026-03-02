@@ -19,7 +19,6 @@
 
 #pragma once
 
-#include <map>
 #include <rclcpp/rclcpp.hpp>
 #include <string>
 #include <vector>
@@ -46,21 +45,8 @@ class TopicDiscovery {
    */
   std::vector<TopicInfo> discover_topics();
 
-  /**
-   * @brief Get cached topic information
-   * @return Vector of previously discovered topics
-   */
-  std::vector<TopicInfo> get_topics() const;
-
-  /**
-   * @brief Refresh the topic list
-   * @return true if successful, false otherwise
-   */
-  bool refresh();
-
  private:
   rclcpp::Node::SharedPtr node_;
-  std::vector<TopicInfo> topics_;
 
   bool should_filter_topic(const std::string& topic_name) const;
 };

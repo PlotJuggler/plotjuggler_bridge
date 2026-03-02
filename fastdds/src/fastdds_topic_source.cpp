@@ -153,6 +153,7 @@ FastDdsTopicSource::~FastDdsTopicSource() {
       spdlog::debug("[shutdown] Deleting DomainParticipant for domain {}...", domain_id);
       // Remove listener before deletion to prevent callbacks during teardown
       participant->set_listener(nullptr);
+      participant->delete_contained_entities();
       factory->delete_participant(participant);
       spdlog::debug("[shutdown] DomainParticipant for domain {} deleted", domain_id);
     } catch (const std::exception& e) {
@@ -170,7 +171,13 @@ void FastDdsTopicSource::on_topic_discovered(
     int32_t domain_id) {
   std::unique_lock<std::shared_mutex> lock(mutex_);
 
-  if (topics_.find(topic_name) != topics_.end()) {
+  auto it = topics_.find(topic_name);
+  if (it != topics_.end()) {
+    if (it->second.domain_id != domain_id) {
+      spdlog::warn(
+          "Topic '{}' already discovered on domain {}, ignoring duplicate from domain {}", topic_name,
+          it->second.domain_id, domain_id);
+    }
     return;
   }
 

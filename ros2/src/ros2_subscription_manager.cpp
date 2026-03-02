@@ -27,7 +27,7 @@
 namespace pj_bridge {
 
 Ros2SubscriptionManager::Ros2SubscriptionManager(rclcpp::Node::SharedPtr node, bool strip_large_messages)
-    : node_(node), inner_manager_(node), strip_large_messages_(strip_large_messages) {}
+    : inner_manager_(node), strip_large_messages_(strip_large_messages) {}
 
 void Ros2SubscriptionManager::set_message_callback(MessageCallback callback) {
   std::lock_guard<std::mutex> lock(callback_mutex_);

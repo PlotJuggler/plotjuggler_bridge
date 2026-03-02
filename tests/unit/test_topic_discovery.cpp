@@ -54,21 +54,6 @@ TEST_F(TopicDiscoveryTest, DiscoverTopicsReturnsVector) {
   }
 }
 
-TEST_F(TopicDiscoveryTest, GetTopicsAfterDiscovery) {
-  auto discovered = discovery_->discover_topics();
-  auto cached = discovery_->get_topics();
-  // Cached result must match the last discovery call
-  ASSERT_EQ(cached.size(), discovered.size());
-  for (size_t i = 0; i < cached.size(); ++i) {
-    EXPECT_EQ(cached[i].name, discovered[i].name);
-    EXPECT_EQ(cached[i].type, discovered[i].type);
-  }
-}
-
-TEST_F(TopicDiscoveryTest, RefreshSucceeds) {
-  EXPECT_TRUE(discovery_->refresh());
-}
-
 TEST_F(TopicDiscoveryTest, FilteredTopicsNotIncluded) {
   // The discovery should filter out system topics like /rosout
   auto topics = discovery_->discover_topics();

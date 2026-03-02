@@ -55,7 +55,6 @@ void run_standalone_event_loop(
   auto last_publish = clock::now();
   auto last_timeout_check = clock::now();
   auto last_stats_print = clock::now();
-  uint64_t prev_bytes_published = 0;
 
   while (!g_shutdown.load()) {
     server.process_requests();
@@ -87,9 +86,8 @@ void run_standalone_event_loop(
 
       stats_msg +=
           fmt::format("\n  Publish frequency: {:.1f} Hz", static_cast<double>(snapshot.publish_cycles) / elapsed);
-      uint64_t delta_bytes = snapshot.total_bytes_published - prev_bytes_published;
-      prev_bytes_published = snapshot.total_bytes_published;
-      stats_msg += fmt::format("\n  Sent: {:.2f} MB/s", static_cast<double>(delta_bytes) / elapsed / (1024.0 * 1024.0));
+      stats_msg += fmt::format(
+          "\n  Sent: {:.2f} MB/s", static_cast<double>(snapshot.total_bytes_published) / elapsed / (1024.0 * 1024.0));
 
       spdlog::info(stats_msg);
       last_stats_print = now;

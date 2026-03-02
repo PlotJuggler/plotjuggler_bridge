@@ -140,7 +140,13 @@ void DdsTopicDiscovery::on_topic_discovered(
     int32_t domain_id) {
   std::unique_lock<std::shared_mutex> lock(mutex_);
 
-  if (topics_.find(topic_name) != topics_.end()) {
+  auto it = topics_.find(topic_name);
+  if (it != topics_.end()) {
+    if (it->second.domain_id != domain_id) {
+      spdlog::warn(
+          "Topic '{}' already discovered on domain {}, ignoring duplicate from domain {}", topic_name,
+          it->second.domain_id, domain_id);
+    }
     return;
   }
 
