@@ -1,0 +1,41 @@
+{
+  "cli_version": "0.4.2",
+  "checkpoint_id": "cf822bdbcca1",
+  "session_id": "7cbb8255-0de9-42c4-bdf9-5ad80c75bf3f",
+  "strategy": "manual-commit",
+  "created_at": "2026-03-02T17:58:46.430098758Z",
+  "branch": "main",
+  "checkpoints_count": 2,
+  "files_touched": [
+    ".github/workflows/_pixi.yaml",
+    ".github/workflows/_ros.yaml",
+    ".github/workflows/appimage.yaml",
+    ".github/workflows/pixi_ci.yaml",
+    ".github/workflows/pixi_humble.yaml",
+    ".github/workflows/pixi_jazzy.yaml",
+    ".github/workflows/pixi_kilted.yaml",
+    ".github/workflows/ros_ci.yaml",
+    ".github/workflows/ros_humble.yaml",
+    ".github/workflows/ros_jazzy.yaml",
+    ".github/workflows/ros_kilted.yaml",
+    "README.md"
+  ],
+  "agent": "Claude Code",
+  "transcript_identifier_at_start": "1cd5564d-3ae6-4d5d-91e2-f103127e9cb3",
+  "token_usage": {
+    "input_tokens": 12,
+    "cache_creation_tokens": 54393,
+    "cache_read_tokens": 321146,
+    "output_tokens": 10542,
+    "api_call_count": 8
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-03-02T17:58:46.422225521Z",
+    "agent_lines": 311,
+    "human_added": 116,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 427,
+    "agent_percentage": 72.8337236533958
+  }
+}
