@@ -21,34 +21,32 @@
 
 #include <cstdint>
 #include <dds/dds.hpp>
-#include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
 #include <unordered_map>
 #include <vector>
 
+#include "pj_bridge/subscription_manager_interface.hpp"
 #include "pj_bridge_rti/dds_topic_discovery.hpp"
 
 namespace pj_bridge {
 
-class DdsSubscriptionManager {
+class DdsSubscriptionManager : public SubscriptionManagerInterface {
  public:
-  using DdsMessageCallback = std::function<void(
-      const std::string& topic_name, std::shared_ptr<std::vector<std::byte>> cdr_data, uint64_t timestamp_ns)>;
-
   explicit DdsSubscriptionManager(DdsTopicDiscovery& discovery);
-  ~DdsSubscriptionManager();
+  ~DdsSubscriptionManager() override;
 
   DdsSubscriptionManager(const DdsSubscriptionManager&) = delete;
   DdsSubscriptionManager& operator=(const DdsSubscriptionManager&) = delete;
 
-  void set_message_callback(DdsMessageCallback callback);
+  // SubscriptionManagerInterface
+  void set_message_callback(MessageCallback callback) override;
+  bool subscribe(const std::string& topic_name, const std::string& topic_type) override;
+  bool unsubscribe(const std::string& topic_name) override;
+  void unsubscribe_all() override;
 
-  bool subscribe(const std::string& topic_name);
-  bool unsubscribe(const std::string& topic_name);
   size_t ref_count(const std::string& topic_name) const;
-  void unsubscribe_all();
 
  private:
   class InternalReaderListener;
@@ -65,8 +63,10 @@ class DdsSubscriptionManager {
         : subscriber(std::move(sub)), reader(std::move(rdr)), listener(std::move(lst)), reference_count(rc) {}
   };
 
+  void close_reader(const std::string& topic_name, SubscriptionInfo& info);
+
   DdsTopicDiscovery& discovery_;
-  DdsMessageCallback callback_;
+  MessageCallback callback_;
   mutable std::mutex mutex_;
   std::unordered_map<std::string, SubscriptionInfo> subscriptions_;
 };

@@ -31,8 +31,6 @@
 #include "pj_bridge/middleware/websocket_middleware.hpp"
 #include "pj_bridge_rti/dds_subscription_manager.hpp"
 #include "pj_bridge_rti/dds_topic_discovery.hpp"
-#include "pj_bridge_rti/rti_subscription_manager.hpp"
-#include "pj_bridge_rti/rti_topic_source.hpp"
 
 namespace {
 std::atomic<bool> g_shutdown{false};
@@ -78,13 +76,9 @@ int main(int argc, char* argv[]) {
   std::signal(SIGTERM, signal_handler);
 
   try {
-    // Create DDS components
-    pj_bridge::DdsTopicDiscovery discovery(domain_ids, qos_profile);
-    pj_bridge::DdsSubscriptionManager subscriptions(discovery);
-
-    // Create adapters
-    auto topic_source = std::make_shared<pj_bridge::RtiTopicSource>(discovery);
-    auto sub_manager = std::make_shared<pj_bridge::RtiSubscriptionManager>(subscriptions);
+    // Create DDS components (implement TopicSourceInterface and SubscriptionManagerInterface directly)
+    auto topic_source = std::make_shared<pj_bridge::DdsTopicDiscovery>(domain_ids, qos_profile);
+    auto sub_manager = std::make_shared<pj_bridge::DdsSubscriptionManager>(*topic_source);
 
     // Create WebSocket middleware
     auto middleware = std::make_shared<pj_bridge::WebSocketMiddleware>();
@@ -155,10 +149,10 @@ int main(int argc, char* argv[]) {
     // Explicit ordered shutdown to avoid use-after-free:
     // 1. Clear DDS message callback
     spdlog::debug("[shutdown] Clearing DDS message callback...");
-    subscriptions.set_message_callback(nullptr);
+    sub_manager->set_message_callback(nullptr);
     // 2. Unsubscribe all DDS readers
     spdlog::debug("[shutdown] Unsubscribing all DDS readers...");
-    subscriptions.unsubscribe_all();
+    sub_manager->unsubscribe_all();
     // 3. Shutdown WebSocket server
     spdlog::debug("[shutdown] Shutting down WebSocket middleware...");
     middleware->shutdown();

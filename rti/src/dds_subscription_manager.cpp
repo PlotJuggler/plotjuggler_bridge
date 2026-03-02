@@ -33,7 +33,7 @@ class DdsSubscriptionManager::InternalReaderListener
     try {
       auto samples = reader.take();
 
-      DdsMessageCallback cb;
+      MessageCallback cb;
       {
         std::lock_guard<std::mutex> lock(manager_.mutex_);
         cb = manager_.callback_;
@@ -75,12 +75,12 @@ DdsSubscriptionManager::~DdsSubscriptionManager() {
   unsubscribe_all();
 }
 
-void DdsSubscriptionManager::set_message_callback(DdsMessageCallback callback) {
+void DdsSubscriptionManager::set_message_callback(MessageCallback callback) {
   std::lock_guard<std::mutex> lock(mutex_);
   callback_ = std::move(callback);
 }
 
-bool DdsSubscriptionManager::subscribe(const std::string& topic_name) {
+bool DdsSubscriptionManager::subscribe(const std::string& topic_name, const std::string& /*topic_type*/) {
   std::lock_guard<std::mutex> lock(mutex_);
 
   auto it = subscriptions_.find(topic_name);
@@ -157,15 +157,7 @@ bool DdsSubscriptionManager::unsubscribe(const std::string& topic_name) {
   }
 
   if (to_close) {
-    try {
-      to_close->reader.set_listener(nullptr);
-      to_close->reader.close();
-      to_close->subscriber.close();
-    } catch (const std::exception& e) {
-      spdlog::warn("Error cleaning up reader for '{}': {}", topic_name, e.what());
-    } catch (...) {
-      spdlog::warn("Unknown error cleaning up reader for '{}'", topic_name);
-    }
+    close_reader(topic_name, *to_close);
     spdlog::info("Unsubscribed from '{}' (reader destroyed)", topic_name);
   }
 
@@ -193,19 +185,23 @@ void DdsSubscriptionManager::unsubscribe_all() {
 
   spdlog::debug("[shutdown] unsubscribe_all: {} subscriptions to close", to_close.size());
   for (auto& [name, info] : to_close) {
-    try {
-      spdlog::debug("[shutdown] Closing reader for '{}'...", name);
-      info.reader.set_listener(nullptr);
-      info.reader.close();
-      info.subscriber.close();
-      spdlog::debug("[shutdown] Closed '{}'", name);
-    } catch (const std::exception& e) {
-      spdlog::warn("Error cleaning up reader for '{}': {}", name, e.what());
-    } catch (...) {
-      spdlog::warn("Unknown error cleaning up reader for '{}'", name);
-    }
+    spdlog::debug("[shutdown] Closing reader for '{}'...", name);
+    close_reader(name, info);
+    spdlog::debug("[shutdown] Closed '{}'", name);
   }
   spdlog::debug("[shutdown] unsubscribe_all complete");
+}
+
+void DdsSubscriptionManager::close_reader(const std::string& topic_name, SubscriptionInfo& info) {
+  try {
+    info.reader.set_listener(nullptr);
+    info.reader.close();
+    info.subscriber.close();
+  } catch (const std::exception& e) {
+    spdlog::warn("Error cleaning up reader for '{}': {}", topic_name, e.what());
+  } catch (...) {
+    spdlog::warn("Unknown error cleaning up reader for '{}'", topic_name);
+  }
 }
 
 }  // namespace pj_bridge

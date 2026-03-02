@@ -21,6 +21,8 @@
 
 #include <spdlog/spdlog.h>
 
+#include "pj_bridge/protocol_constants.hpp"
+
 namespace pj_bridge {
 
 class DdsTopicDiscovery::PublisherListener
@@ -37,18 +39,16 @@ class DdsTopicDiscovery::PublisherListener
           continue;
         }
 
-        const auto& topic_name = sample.data().topic_name();
+        std::string name_str = sample.data().topic_name().to_std_string();
         const auto& type = sample.data().extensions().type();
 
         if (!type) {
-          spdlog::debug("Topic '{}' discovered without type info in domain {}", topic_name.to_std_string(), domain_id_);
+          spdlog::debug("Topic '{}' discovered without type info in domain {}", name_str, domain_id_);
           continue;
         }
 
-        const auto& type_name = type->name();
-
         if (type->kind() != dds::core::xtypes::TypeKind::STRUCTURE_TYPE) {
-          spdlog::debug("Topic '{}' has non-struct type '{}', skipping", topic_name.to_std_string(), type_name);
+          spdlog::debug("Topic '{}' has non-struct type '{}', skipping", name_str, type->name());
           continue;
         }
 
@@ -58,10 +58,9 @@ class DdsTopicDiscovery::PublisherListener
             0, false, rti::core::xtypes::DynamicTypePrintKind::idl, true};
         std::string schema_idl = rti::core::xtypes::to_string(type.get(), print_format);
 
-        spdlog::info(
-            "Discovered topic '{}' (type: '{}') in domain {}", topic_name.to_std_string(), type_name, domain_id_);
+        spdlog::info("Discovered topic '{}' (type: '{}') in domain {}", name_str, struct_type.name(), domain_id_);
 
-        discovery_.on_topic_discovered(topic_name.to_std_string(), type_name, struct_type, schema_idl, domain_id_);
+        discovery_.on_topic_discovered(name_str, struct_type, schema_idl, domain_id_);
       }
     } catch (const std::exception& e) {
       spdlog::error("Exception in PublisherListener on domain {}: {}", domain_id_, e.what());
@@ -137,32 +136,32 @@ DdsTopicDiscovery::~DdsTopicDiscovery() {
 }
 
 void DdsTopicDiscovery::on_topic_discovered(
-    const std::string& topic_name, const std::string& type_name, const dds::core::xtypes::StructType& struct_type,
-    const std::string& schema_idl, int32_t domain_id) {
+    const std::string& topic_name, const dds::core::xtypes::StructType& struct_type, const std::string& schema_idl,
+    int32_t domain_id) {
   std::unique_lock<std::shared_mutex> lock(mutex_);
 
   if (topics_.find(topic_name) != topics_.end()) {
     return;
   }
 
-  topics_.emplace(topic_name, DiscoveredTopic{type_name, struct_type, schema_idl, domain_id});
-  spdlog::info("Cached topic '{}' (type: '{}', domain: {})", topic_name, type_name, domain_id);
+  topics_.emplace(topic_name, DiscoveredTopic{struct_type, schema_idl, domain_id});
+  spdlog::info("Cached topic '{}' (type: '{}', domain: {})", topic_name, struct_type.name(), domain_id);
 }
 
-std::vector<DdsTopicInfo> DdsTopicDiscovery::get_topics() const {
+std::vector<TopicInfo> DdsTopicDiscovery::get_topics() {
   std::shared_lock<std::shared_mutex> lock(mutex_);
 
-  std::vector<DdsTopicInfo> result;
+  std::vector<TopicInfo> result;
   result.reserve(topics_.size());
 
   for (const auto& [name, topic] : topics_) {
-    result.push_back({name, topic.type_name});
+    result.push_back({name, topic.struct_type.name()});
   }
 
   return result;
 }
 
-std::string DdsTopicDiscovery::get_schema(const std::string& topic_name) const {
+std::string DdsTopicDiscovery::get_schema(const std::string& topic_name) {
   std::shared_lock<std::shared_mutex> lock(mutex_);
 
   auto it = topics_.find(topic_name);
@@ -171,6 +170,10 @@ std::string DdsTopicDiscovery::get_schema(const std::string& topic_name) const {
   }
 
   return it->second.schema_idl;
+}
+
+std::string DdsTopicDiscovery::schema_encoding() const {
+  return kSchemaEncodingOmgIdl;
 }
 
 std::optional<dds::core::xtypes::StructType> DdsTopicDiscovery::get_type(const std::string& topic_name) const {
