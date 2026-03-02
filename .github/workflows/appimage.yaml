@@ -41,8 +41,8 @@ jobs:
           # Create AppDir structure
           mkdir -p AppDir/usr/{bin,lib,share}
 
-          # Copy binary
-          cp install/lib/pj_bridge/pj_bridge_ros2 AppDir/usr/bin/
+          # Copy binary (colcon without --merge-install)
+          cp install/pj_bridge/lib/pj_bridge/pj_bridge_ros2 AppDir/usr/bin/
 
           # Bundle shared libraries from the conda environment
           # (exclude glibc/ld-linux which must come from the host)
@@ -64,7 +64,12 @@ jobs:
 
           # Copy message definitions (.msg/.srv/.idl files)
           for pkg_dir in "$CONDA_PREFIX"/share/*/msg "$CONDA_PREFIX"/share/*/srv; do
-            [ -d "$pkg_dir" ] && cp -r --parents "$pkg_dir" AppDir/usr/share/ 2>/dev/null || true
+            if [ -d "$pkg_dir" ]; then
+              pkg_name="$(basename "$(dirname "$pkg_dir")")"
+              sub_dir="$(basename "$pkg_dir")"
+              mkdir -p "AppDir/usr/share/$pkg_name/$sub_dir"
+              cp -r "$pkg_dir"/* "AppDir/usr/share/$pkg_name/$sub_dir/" 2>/dev/null || true
+            fi
           done
 
           # Create .desktop file
@@ -97,7 +102,34 @@ jobs:
             --appdir AppDir \
             --output appimage
 
+      - name: Rename AppImage
+        run: mv pj_bridge*.AppImage pj_bridge_ros2-${{ matrix.environment }}-x86_64.AppImage
+
       - uses: actions/upload-artifact@v4
         with:
           name: appimage-${{ matrix.environment }}
           path: "*.AppImage"
+
+  release:
+    needs: appimage
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download all AppImage artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: appimages
+          pattern: appimage-*
+          merge-multiple: true
+
+      - name: List artifacts
+        run: ls -lh appimages/
+
+      - name: Upload to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          files: appimages/*.AppImage
