@@ -3,7 +3,7 @@
   "checkpoint_id": "7cd20ad6de03",
   "strategy": "manual-commit",
   "branch": "unify-backends",
-  "checkpoints_count": 7,
+  "checkpoints_count": 9,
   "files_touched": [
     "CLAUDE.md",
     "CMakeLists.txt",
@@ -48,7 +48,8 @@
     "rti/src/rti_topic_source.cpp",
     "tests/unit/test_bridge_server.cpp",
     "tests/unit/test_message_buffer.cpp",
-    "tests/unit/test_protocol_constants.cpp"
+    "tests/unit/test_protocol_constants.cpp",
+    "tests/unit/test_websocket_middleware.cpp"
   ],
   "sessions": [
     {
@@ -64,13 +65,20 @@
       "context": "/7c/d20ad6de03/1/context.md",
       "content_hash": "/7c/d20ad6de03/1/content_hash.txt",
       "prompt": "/7c/d20ad6de03/1/prompt.txt"
+    },
+    {
+      "metadata": "/7c/d20ad6de03/2/metadata.json",
+      "transcript": "/7c/d20ad6de03/2/full.jsonl",
+      "context": "/7c/d20ad6de03/2/context.md",
+      "content_hash": "/7c/d20ad6de03/2/content_hash.txt",
+      "prompt": "/7c/d20ad6de03/2/prompt.txt"
     }
   ],
   "token_usage": {
-    "input_tokens": 227,
-    "cache_creation_tokens": 652330,
-    "cache_read_tokens": 19992667,
-    "output_tokens": 67130,
-    "api_call_count": 188
+    "input_tokens": 13645,
+    "cache_creation_tokens": 798726,
+    "cache_read_tokens": 26398083,
+    "output_tokens": 91362,
+    "api_call_count": 246
   }
 }

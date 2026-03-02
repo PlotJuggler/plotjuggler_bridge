@@ -1,0 +1,37 @@
+{
+  "cli_version": "0.4.2",
+  "checkpoint_id": "7cd20ad6de03",
+  "session_id": "5f60fe34-9fbf-4b6f-97f9-146d1d2d40e8",
+  "strategy": "manual-commit",
+  "created_at": "2026-03-02T13:07:09.806269814Z",
+  "branch": "unify-backends",
+  "checkpoints_count": 2,
+  "files_touched": [
+    "app/include/pj_bridge/message_buffer.hpp",
+    "app/include/pj_bridge/middleware/websocket_middleware.hpp",
+    "app/include/pj_bridge/session_manager.hpp",
+    "app/src/bridge_server.cpp",
+    "app/src/message_buffer.cpp",
+    "app/src/middleware/websocket_middleware.cpp",
+    "app/src/session_manager.cpp",
+    "tests/unit/test_bridge_server.cpp",
+    "tests/unit/test_websocket_middleware.cpp"
+  ],
+  "agent": "Claude Code",
+  "token_usage": {
+    "input_tokens": 13418,
+    "cache_creation_tokens": 146396,
+    "cache_read_tokens": 6405416,
+    "output_tokens": 24232,
+    "api_call_count": 58
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-03-02T13:07:09.686271677Z",
+    "agent_lines": 1919,
+    "human_added": 3829,
+    "human_modified": 10,
+    "human_removed": 0,
+    "total_committed": 5758,
+    "agent_percentage": 33.32754428621049
+  }
+}
