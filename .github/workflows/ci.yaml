@@ -16,7 +16,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        environment: [humble, jazzy, kilted]
+        environment: [humble, jazzy]  # Add kilted once pixi.lock is regenerated
     runs-on: ubuntu-latest
     name: ${{ matrix.environment }}
 
@@ -43,7 +43,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        environment: [humble, jazzy, kilted]
+        environment: [humble, jazzy]  # Add kilted once pixi.lock is regenerated
     name: appimage-${{ matrix.environment }}
 
     steps:
