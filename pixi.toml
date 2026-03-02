@@ -1,0 +1,46 @@
+[workspace]
+name = "pj_bridge"
+channels = ["conda-forge"]
+platforms = ["linux-64"]
+
+[dependencies]
+cmake = ">=3.14"
+compilers = "*"
+pkg-config = "*"
+ninja = "*"
+colcon-common-extensions = "*"
+zstd = "*"
+spdlog = "*"
+ixwebsocket = "*"
+nlohmann_json = "*"
+
+[feature.humble]
+channels = ["robostack-humble", "conda-forge"]
+
+[feature.humble.dependencies]
+ros-humble-desktop = "*"
+
+[feature.jazzy]
+channels = ["robostack-jazzy", "conda-forge"]
+
+[feature.jazzy.dependencies]
+ros-jazzy-desktop = "*"
+
+[feature.kilted]
+channels = ["robostack-kilted", "conda-forge"]
+
+[feature.kilted.dependencies]
+ros-kilted-desktop = "*"
+
+[environments]
+humble = ["humble"]
+jazzy = ["jazzy"]
+kilted = ["kilted"]
+
+[activation]
+scripts = ["install/setup.sh"]
+
+[tasks]
+build = "colcon build --packages-select pj_bridge --cmake-args -DCMAKE_BUILD_TYPE=Release"
+test = "colcon test --packages-select pj_bridge && colcon test-result --verbose"
+clean = "rm -rf build install log"

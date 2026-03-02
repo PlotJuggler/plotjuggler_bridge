@@ -1,41 +1,41 @@
 /*
  * Copyright (C) 2026 Davide Faconti
  *
- * This file is part of pj_ros_bridge.
+ * This file is part of pj_bridge.
  *
- * pj_ros_bridge is free software: you can redistribute it and/or modify
+ * pj_bridge is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as published by
  * the Free Software Foundation, either version 3 of the License, or
  * (at your option) any later version.
  *
- * pj_ros_bridge is distributed in the hope that it will be useful,
+ * pj_bridge is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
  * GNU Affero General Public License for more details.
  *
  * You should have received a copy of the GNU Affero General Public License
- * along with pj_ros_bridge. If not, see <https://www.gnu.org/licenses/>.
+ * along with pj_bridge. If not, see <https://www.gnu.org/licenses/>.
  */
 
 #include <gtest/gtest.h>
 
 #include <cstring>
 
-#include "pj_ros_bridge/message_serializer.hpp"
+#include "pj_bridge/message_serializer.hpp"
 
-using namespace pj_ros_bridge;
+using namespace pj_bridge;
 
 class MessageSerializerTest : public ::testing::Test {
  protected:
   AggregatedMessageSerializer serializer_;
 
-  // Helper to create a serialized message with test data
-  rclcpp::SerializedMessage create_test_message(const std::vector<uint8_t>& data) {
-    rclcpp::SerializedMessage msg(data.size());
-    auto& rcl_msg = msg.get_rcl_serialized_message();
-    std::memcpy(rcl_msg.buffer, data.data(), data.size());
-    rcl_msg.buffer_length = data.size();
-    return msg;
+  // Helper to create test data as a vector of bytes
+  std::vector<std::byte> create_test_data(const std::vector<uint8_t>& data) {
+    std::vector<std::byte> result(data.size());
+    for (size_t i = 0; i < data.size(); ++i) {
+      result[i] = static_cast<std::byte>(data[i]);
+    }
+    return result;
   }
 
   // Helper to read little-endian values from buffer
@@ -58,10 +58,10 @@ TEST_F(MessageSerializerTest, InitialState) {
 TEST_F(MessageSerializerTest, SerializeSingleMessage) {
   std::string topic = "/test_topic";
   uint64_t timestamp = 1234567890123456789ULL;
-  std::vector<uint8_t> data = {0xAA, 0xBB, 0xCC};
+  std::vector<uint8_t> raw_data = {0xAA, 0xBB, 0xCC};
 
-  auto msg = create_test_message(data);
-  serializer_.serialize_message(topic, timestamp, msg);
+  auto data = create_test_data(raw_data);
+  serializer_.serialize_message(topic, timestamp, data.data(), data.size());
 
   const auto& serialized = serializer_.get_serialized_data();
 
@@ -83,22 +83,22 @@ TEST_F(MessageSerializerTest, SerializeSingleMessage) {
 
   // Data length (uint32_t)
   uint32_t data_len = read_le<uint32_t>(serialized, offset);
-  EXPECT_EQ(data_len, data.size());
+  EXPECT_EQ(data_len, raw_data.size());
 
   // Data
   std::vector<uint8_t> parsed_data(serialized.begin() + offset, serialized.begin() + offset + data_len);
-  EXPECT_EQ(parsed_data, data);
+  EXPECT_EQ(parsed_data, raw_data);
 }
 
 TEST_F(MessageSerializerTest, SerializeMultipleMessages) {
   // Add 3 messages with different data
-  auto msg1 = create_test_message({0x01, 0x02});
-  auto msg2 = create_test_message({0x03, 0x04, 0x05});
-  auto msg3 = create_test_message({0x06});
+  auto data1 = create_test_data({0x01, 0x02});
+  auto data2 = create_test_data({0x03, 0x04, 0x05});
+  auto data3 = create_test_data({0x06});
 
-  serializer_.serialize_message("/topic1", 100, msg1);
-  serializer_.serialize_message("/topic2", 200, msg2);
-  serializer_.serialize_message("/topic3", 300, msg3);
+  serializer_.serialize_message("/topic1", 100, data1.data(), data1.size());
+  serializer_.serialize_message("/topic2", 200, data2.data(), data2.size());
+  serializer_.serialize_message("/topic3", 300, data3.data(), data3.size());
 
   const auto& serialized = serializer_.get_serialized_data();
 
@@ -123,8 +123,8 @@ TEST_F(MessageSerializerTest, SerializeMultipleMessages) {
 }
 
 TEST_F(MessageSerializerTest, Clear) {
-  auto msg = create_test_message({1, 2, 3});
-  serializer_.serialize_message("/topic", 100, msg);
+  auto data = create_test_data({1, 2, 3});
+  serializer_.serialize_message("/topic", 100, data.data(), data.size());
 
   EXPECT_GT(serializer_.get_serialized_data().size(), 0);
 
@@ -137,13 +137,13 @@ TEST_F(MessageSerializerTest, StreamingAPI) {
   auto initial_size = serializer_.get_serialized_data().size();
   EXPECT_EQ(initial_size, 0);  // Empty
 
-  auto msg1 = create_test_message({1, 2, 3});
-  serializer_.serialize_message("/topic1", 100, msg1);
+  auto data1 = create_test_data({1, 2, 3});
+  serializer_.serialize_message("/topic1", 100, data1.data(), data1.size());
   auto size_after_1 = serializer_.get_serialized_data().size();
   EXPECT_GT(size_after_1, initial_size);
 
-  auto msg2 = create_test_message({4, 5, 6, 7});
-  serializer_.serialize_message("/topic2", 200, msg2);
+  auto data2 = create_test_data({4, 5, 6, 7});
+  serializer_.serialize_message("/topic2", 200, data2.data(), data2.size());
   auto size_after_2 = serializer_.get_serialized_data().size();
   EXPECT_GT(size_after_2, size_after_1);
 }
@@ -225,13 +225,13 @@ TEST_F(MessageSerializerTest, DecompressZstdOutParameter) {
 
 TEST_F(MessageSerializerTest, LargeMessage) {
   // Test with a large message (10 KB)
-  std::vector<uint8_t> large_data(10240);
-  for (size_t i = 0; i < large_data.size(); ++i) {
-    large_data[i] = static_cast<uint8_t>(i & 0xFF);
+  std::vector<uint8_t> large_raw(10240);
+  for (size_t i = 0; i < large_raw.size(); ++i) {
+    large_raw[i] = static_cast<uint8_t>(i & 0xFF);
   }
 
-  auto msg = create_test_message(large_data);
-  serializer_.serialize_message("/large_topic", 999999, msg);
+  auto large_data = create_test_data(large_raw);
+  serializer_.serialize_message("/large_topic", 999999, large_data.data(), large_data.size());
 
   const auto& serialized = serializer_.get_serialized_data();
 
@@ -244,19 +244,19 @@ TEST_F(MessageSerializerTest, LargeMessage) {
   offset += topic_len + 8;  // Skip topic and timestamp
 
   uint32_t data_len = read_le<uint32_t>(serialized, offset);
-  EXPECT_EQ(data_len, large_data.size());
+  EXPECT_EQ(data_len, large_raw.size());
 }
 
 TEST_F(MessageSerializerTest, MultipleTopicsSameTimestamp) {
   uint64_t timestamp = 123456789;
 
-  auto msg1 = create_test_message({1, 2});
-  auto msg2 = create_test_message({3, 4});
-  auto msg3 = create_test_message({5, 6, 7});
+  auto data1 = create_test_data({1, 2});
+  auto data2 = create_test_data({3, 4});
+  auto data3 = create_test_data({5, 6, 7});
 
-  serializer_.serialize_message("/topicA", timestamp, msg1);
-  serializer_.serialize_message("/topicB", timestamp, msg2);
-  serializer_.serialize_message("/topicC", timestamp, msg3);
+  serializer_.serialize_message("/topicA", timestamp, data1.data(), data1.size());
+  serializer_.serialize_message("/topicB", timestamp, data2.data(), data2.size());
+  serializer_.serialize_message("/topicC", timestamp, data3.data(), data3.size());
 
   // - Topic length: 2 bytes
   // - Topic string: 7 bytes
@@ -275,9 +275,10 @@ TEST_F(MessageSerializerTest, LargeMessageForcesReallocation) {
   // with large payloads. Before the fix, this would crash with a dangling
   // pointer because dest_ptr was captured before resize().
   for (int i = 0; i < 100; ++i) {
-    std::vector<uint8_t> payload(1024, static_cast<uint8_t>(i & 0xFF));
-    auto msg = create_test_message(payload);
-    serializer_.serialize_message("/realloc_topic_" + std::to_string(i), static_cast<uint64_t>(i), msg);
+    std::vector<uint8_t> payload_raw(1024, static_cast<uint8_t>(i & 0xFF));
+    auto payload = create_test_data(payload_raw);
+    serializer_.serialize_message(
+        "/realloc_topic_" + std::to_string(i), static_cast<uint64_t>(i), payload.data(), payload.size());
   }
 
   const auto& serialized = serializer_.get_serialized_data();
@@ -315,10 +316,10 @@ TEST_F(MessageSerializerTest, WireFormatMatchesProjectSpec) {
 
   std::string topic = "/t";
   uint64_t timestamp = 42;
-  std::vector<uint8_t> data = {0xAA, 0xBB};
+  std::vector<uint8_t> raw_data = {0xAA, 0xBB};
 
-  auto msg = create_test_message(data);
-  serializer_.serialize_message(topic, timestamp, msg);
+  auto data = create_test_data(raw_data);
+  serializer_.serialize_message(topic, timestamp, data.data(), data.size());
 
   const auto& serialized = serializer_.get_serialized_data();
 
@@ -350,11 +351,11 @@ TEST_F(MessageSerializerTest, WireFormatMatchesProjectSpec) {
 }
 
 TEST_F(MessageSerializerTest, ZeroCopySerializedMessage) {
-  // Verify that we're working with SerializedMessage directly
-  std::vector<uint8_t> data = {0xDE, 0xAD, 0xBE, 0xEF};
-  auto msg = create_test_message(data);
+  // Verify that we're working with raw byte data directly
+  std::vector<uint8_t> raw_data = {0xDE, 0xAD, 0xBE, 0xEF};
+  auto data = create_test_data(raw_data);
 
-  serializer_.serialize_message("/topic", 100, msg);
+  serializer_.serialize_message("/topic", 100, data.data(), data.size());
 
   const auto& serialized = serializer_.get_serialized_data();
   EXPECT_GT(serialized.size(), 4);
@@ -372,8 +373,8 @@ TEST_F(MessageSerializerTest, ZeroCopySerializedMessage) {
 // ============================================================================
 
 TEST_F(MessageSerializerTest, FinalizeIncludesBinaryHeader) {
-  auto msg = create_test_message({1, 2, 3, 4});
-  serializer_.serialize_message("/topic", 1000, msg);
+  auto data = create_test_data({1, 2, 3, 4});
+  serializer_.serialize_message("/topic", 1000, data.data(), data.size());
 
   auto result = serializer_.finalize();
 
@@ -402,8 +403,8 @@ TEST_F(MessageSerializerTest, FinalizeIncludesBinaryHeader) {
 }
 
 TEST_F(MessageSerializerTest, HeaderMagicIsPJRB) {
-  auto msg = create_test_message({0});
-  serializer_.serialize_message("/t", 0, msg);
+  auto data = create_test_data({0});
+  serializer_.serialize_message("/t", 0, data.data(), data.size());
   auto result = serializer_.finalize();
 
   // Verify magic bytes spell "PJRB"
@@ -414,13 +415,13 @@ TEST_F(MessageSerializerTest, HeaderMagicIsPJRB) {
 }
 
 TEST_F(MessageSerializerTest, MessageCountMatchesAddedMessages) {
-  auto msg1 = create_test_message({1});
-  auto msg2 = create_test_message({2});
-  auto msg3 = create_test_message({3});
+  auto data1 = create_test_data({1});
+  auto data2 = create_test_data({2});
+  auto data3 = create_test_data({3});
 
-  serializer_.serialize_message("/a", 100, msg1);
-  serializer_.serialize_message("/b", 200, msg2);
-  serializer_.serialize_message("/c", 300, msg3);
+  serializer_.serialize_message("/a", 100, data1.data(), data1.size());
+  serializer_.serialize_message("/b", 200, data2.data(), data2.size());
+  serializer_.serialize_message("/c", 300, data3.data(), data3.size());
 
   EXPECT_EQ(serializer_.get_message_count(), 3u);
 
@@ -431,8 +432,8 @@ TEST_F(MessageSerializerTest, MessageCountMatchesAddedMessages) {
 }
 
 TEST_F(MessageSerializerTest, ClearResetsMessageCount) {
-  auto msg = create_test_message({0});
-  serializer_.serialize_message("/t", 0, msg);
+  auto data = create_test_data({0});
+  serializer_.serialize_message("/t", 0, data.data(), data.size());
   EXPECT_EQ(serializer_.get_message_count(), 1u);
 
   serializer_.clear();
@@ -440,9 +441,9 @@ TEST_F(MessageSerializerTest, ClearResetsMessageCount) {
 }
 
 TEST_F(MessageSerializerTest, DecompressedPayloadMatchesOriginal) {
-  std::vector<uint8_t> data = {10, 20, 30, 40, 50};
-  auto msg = create_test_message(data);
-  serializer_.serialize_message("/test", 12345, msg);
+  std::vector<uint8_t> raw_data = {10, 20, 30, 40, 50};
+  auto data = create_test_data(raw_data);
+  serializer_.serialize_message("/test", 12345, data.data(), data.size());
 
   auto result = serializer_.finalize();
 
@@ -483,10 +484,10 @@ TEST_F(MessageSerializerTest, FinalizeEmptyBuffer) {
 TEST_F(MessageSerializerTest, UncompressedSizeMatchesPayload) {
   // Create a message with known serialized size
   std::string topic = "/t";
-  std::vector<uint8_t> data = {0xAA, 0xBB};
-  auto msg = create_test_message(data);
+  std::vector<uint8_t> raw_data = {0xAA, 0xBB};
+  auto data = create_test_data(raw_data);
 
-  serializer_.serialize_message(topic, 42, msg);
+  serializer_.serialize_message(topic, 42, data.data(), data.size());
 
   // Expected size: 2(topic_len) + 2(topic) + 8(timestamp) + 4(data_len) + 2(data) = 18
   EXPECT_EQ(serializer_.get_serialized_data().size(), 18u);

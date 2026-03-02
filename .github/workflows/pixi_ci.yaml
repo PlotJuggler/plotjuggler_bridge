@@ -1,0 +1,131 @@
+name: CI
+
+on:
+  push:
+    branches: [development, main]
+  pull_request:
+    branches: [development, main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    strategy:
+      fail-fast: false
+      matrix:
+        environment: [humble, jazzy, kilted]
+    runs-on: ubuntu-latest
+    name: ${{ matrix.environment }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: prefix-dev/setup-pixi@v0.9.4
+        with:
+          environments: ${{ matrix.environment }}
+          locked: true
+          cache: true
+          cache-write: ${{ github.event_name == 'push' && github.ref_name == 'main' }}
+
+      - name: Build
+        run: pixi run -e ${{ matrix.environment }} build
+
+      - name: Test
+        run: pixi run -e ${{ matrix.environment }} test
+
+  appimage:
+    if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    needs: build-and-test
+    strategy:
+      fail-fast: false
+      matrix:
+        environment: [humble, jazzy, kilted]
+    name: appimage-${{ matrix.environment }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: prefix-dev/setup-pixi@v0.9.4
+        with:
+          environments: ${{ matrix.environment }}
+          locked: true
+          cache: true
+
+      - name: Build
+        run: pixi run -e ${{ matrix.environment }} build
+
+      - name: Create AppImage
+        run: |
+          # Download linuxdeploy
+          wget -q https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
+          chmod +x linuxdeploy-x86_64.AppImage
+
+          CONDA_PREFIX="$(pixi run -e ${{ matrix.environment }} printenv CONDA_PREFIX)"
+
+          # Create AppDir structure
+          mkdir -p AppDir/usr/{bin,lib,share}
+
+          # Copy binary
+          cp install/lib/pj_bridge/pj_bridge_ros2 AppDir/usr/bin/
+
+          # Bundle shared libraries from the conda environment
+          # (exclude glibc/ld-linux which must come from the host)
+          ldd AppDir/usr/bin/pj_bridge_ros2 | \
+            grep "$CONDA_PREFIX" | \
+            awk '{print $3}' | \
+            xargs -I{} cp --no-dereference {} AppDir/usr/lib/ 2>/dev/null || true
+
+          # Also copy transitive deps from conda lib/
+          for lib in AppDir/usr/lib/*.so*; do
+            ldd "$lib" 2>/dev/null | \
+              grep "$CONDA_PREFIX" | \
+              awk '{print $3}' | \
+              xargs -I{} cp --no-dereference {} AppDir/usr/lib/ 2>/dev/null || true
+          done
+
+          # Copy ament index (needed for schema discovery at runtime)
+          cp -r "$CONDA_PREFIX"/share/ament_index AppDir/usr/share/ 2>/dev/null || true
+
+          # Copy message definitions (.msg/.srv/.idl files)
+          for pkg_dir in "$CONDA_PREFIX"/share/*/msg "$CONDA_PREFIX"/share/*/srv; do
+            [ -d "$pkg_dir" ] && cp -r --parents "$pkg_dir" AppDir/usr/share/ 2>/dev/null || true
+          done
+
+          # Create .desktop file
+          cat > AppDir/pj_bridge.desktop <<'DESKTOP'
+          [Desktop Entry]
+          Name=pj_bridge
+          Exec=pj_bridge_ros2
+          Icon=pj_bridge
+          Type=Application
+          Categories=Science;
+          DESKTOP
+
+          # Create minimal icon
+          convert -size 256x256 xc:transparent AppDir/pj_bridge.png 2>/dev/null || \
+            touch AppDir/pj_bridge.png
+
+          # Create AppRun wrapper that sets environment
+          cat > AppDir/AppRun <<'APPRUN'
+          #!/bin/bash
+          SELF="$(readlink -f "$0")"
+          HERE="${SELF%/*}"
+          export LD_LIBRARY_PATH="${HERE}/usr/lib:${LD_LIBRARY_PATH}"
+          export AMENT_PREFIX_PATH="${HERE}/usr"
+          exec "${HERE}/usr/bin/pj_bridge_ros2" "$@"
+          APPRUN
+          chmod +x AppDir/AppRun
+
+          # Generate AppImage
+          ARCH=x86_64 ./linuxdeploy-x86_64.AppImage \
+            --appdir AppDir \
+            --output appimage
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: appimage-${{ matrix.environment }}
+          path: "*.AppImage"

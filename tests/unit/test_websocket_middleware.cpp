@@ -1,20 +1,20 @@
 /*
  * Copyright (C) 2026 Davide Faconti
  *
- * This file is part of pj_ros_bridge.
+ * This file is part of pj_bridge.
  *
- * pj_ros_bridge is free software: you can redistribute it and/or modify
+ * pj_bridge is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as published by
  * the Free Software Foundation, either version 3 of the License, or
  * (at your option) any later version.
  *
- * pj_ros_bridge is distributed in the hope that it will be useful,
+ * pj_bridge is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
  * GNU Affero General Public License for more details.
  *
  * You should have received a copy of the GNU Affero General Public License
- * along with pj_ros_bridge. If not, see <https://www.gnu.org/licenses/>.
+ * along with pj_bridge. If not, see <https://www.gnu.org/licenses/>.
  */
 
 #include <gtest/gtest.h>
@@ -26,9 +26,9 @@
 #include <thread>
 #include <vector>
 
-#include "pj_ros_bridge/middleware/websocket_middleware.hpp"
+#include "pj_bridge/middleware/websocket_middleware.hpp"
 
-using namespace pj_ros_bridge;
+using namespace pj_bridge;
 
 class WebSocketMiddlewareTest : public ::testing::Test {
  protected:
@@ -395,6 +395,49 @@ TEST_F(WebSocketMiddlewareTest, ShutdownWithConnectedClientDoesNotDeadlock) {
   EXPECT_FALSE(disconnect_fired.load());
 
   client.stop();
+}
+
+// ---------------------------------------------------------------------------
+// Bug #6 — Unbounded incoming queue
+//
+// If messages arrive faster than they are consumed, the incoming queue must
+// be bounded to prevent unbounded memory growth.
+// ---------------------------------------------------------------------------
+TEST_F(WebSocketMiddlewareTest, IncomingQueueBounded) {
+  auto result = middleware_->initialize(18095);
+  ASSERT_TRUE(result.has_value());
+
+  ix::WebSocket client;
+  client.setUrl("ws://127.0.0.1:18095");
+  client.setOnMessageCallback([](const ix::WebSocketMessagePtr& /*msg*/) {});
+  client.start();
+
+  ASSERT_TRUE(wait_for_client_open(client)) << "Client failed to connect";
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+  // Send more messages than the queue limit (kMaxIncomingQueueSize = 1024)
+  const int num_messages = 2000;
+  for (int i = 0; i < num_messages; ++i) {
+    client.send("msg_" + std::to_string(i));
+  }
+
+  // Give time for all messages to arrive at the server
+  std::this_thread::sleep_for(std::chrono::milliseconds(500));
+
+  // Drain the queue and count how many we got
+  int received_count = 0;
+  std::vector<uint8_t> data;
+  std::string client_id;
+  while (middleware_->receive_request(data, client_id)) {
+    received_count++;
+  }
+
+  // We should have received at most kMaxIncomingQueueSize messages
+  EXPECT_LE(received_count, 1024) << "Queue should be bounded to 1024 messages";
+  EXPECT_GT(received_count, 0) << "Should have received at least some messages";
+
+  client.stop();
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
 }
 
 int main(int argc, char** argv) {

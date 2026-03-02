@@ -42,12 +42,17 @@ find_library(ZSTD_STATIC_LIBRARY
     ${PC_ZSTD_LIBRARY_DIRS}
 )
 
+# Some environments (e.g. conda/conda-forge, Pixi) may not ship the static library.
+# Use the shared library as a fallback so consumers can still link successfully.
+if(NOT ZSTD_STATIC_LIBRARY AND ZSTD_SHARED_LIBRARY)
+  set(ZSTD_STATIC_LIBRARY "${ZSTD_SHARED_LIBRARY}")
+endif()
+
 include(FindPackageHandleStandardArgs)
 find_package_handle_standard_args(ZSTD
   DEFAULT_MSG
   ZSTD_INCLUDE_DIR
   ZSTD_SHARED_LIBRARY
-  ZSTD_STATIC_LIBRARY
 )
 
 if(ZSTD_FOUND)

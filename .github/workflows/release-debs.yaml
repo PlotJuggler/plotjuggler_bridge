@@ -27,10 +27,6 @@ jobs:
             os_codename: noble
             container: rostooling/setup-ros-docker:ubuntu-noble-ros-kilted-ros-base-latest
             runner: ubuntu-24.04
-          - ros_distro: rolling
-            os_codename: noble
-            container: rostooling/setup-ros-docker:ubuntu-noble-ros-rolling-ros-base-latest
-            runner: ubuntu-24.04
 
     runs-on: ${{ matrix.runner }}
     container:
@@ -43,7 +39,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          path: src/pj_ros_bridge
+          path: src/pj_bridge
 
       - name: Install build tools
         run: |
@@ -55,19 +51,19 @@ jobs:
         run: |
           source /opt/ros/${{ matrix.ros_distro }}/setup.bash
           rosdep update --rosdistro ${{ matrix.ros_distro }}
-          rosdep install --from-paths src/pj_ros_bridge --ignore-src -y --rosdistro ${{ matrix.ros_distro }}
+          rosdep install --from-paths src/pj_bridge --ignore-src -y --rosdistro ${{ matrix.ros_distro }}
 
       - name: Clean previous builds
         shell: bash
         run: |
-          cd src/pj_ros_bridge
+          cd src/pj_bridge
           rm -rf debian .obj-x86_64-linux-gnu
 
       - name: Generate debian packaging
         shell: bash
         run: |
           source /opt/ros/${{ matrix.ros_distro }}/setup.bash
-          cd src/pj_ros_bridge
+          cd src/pj_bridge
           bloom-generate rosdebian \
             --os-name ubuntu \
             --os-version ${{ matrix.os_codename }} \
@@ -77,7 +73,7 @@ jobs:
         shell: bash
         run: |
           source /opt/ros/${{ matrix.ros_distro }}/setup.bash
-          cd src/pj_ros_bridge
+          cd src/pj_bridge
           fakeroot debian/rules binary
 
       - name: Upload deb artifact

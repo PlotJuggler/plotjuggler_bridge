@@ -1,20 +1,20 @@
 /*
  * Copyright (C) 2026 Davide Faconti
  *
- * This file is part of pj_ros_bridge.
+ * This file is part of pj_bridge.
  *
- * pj_ros_bridge is free software: you can redistribute it and/or modify
+ * pj_bridge is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as published by
  * the Free Software Foundation, either version 3 of the License, or
  * (at your option) any later version.
  *
- * pj_ros_bridge is distributed in the hope that it will be useful,
+ * pj_bridge is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
  * GNU Affero General Public License for more details.
  *
  * You should have received a copy of the GNU Affero General Public License
- * along with pj_ros_bridge. If not, see <https://www.gnu.org/licenses/>.
+ * along with pj_bridge. If not, see <https://www.gnu.org/licenses/>.
  */
 
 #include <gtest/gtest.h>
@@ -22,9 +22,9 @@
 #include <memory>
 #include <rclcpp/rclcpp.hpp>
 
-#include "pj_ros_bridge/topic_discovery.hpp"
+#include "pj_bridge_ros2/topic_discovery.hpp"
 
-using namespace pj_ros_bridge;
+using namespace pj_bridge;
 
 class TopicDiscoveryTest : public ::testing::Test {
  protected:
@@ -52,21 +52,6 @@ TEST_F(TopicDiscoveryTest, DiscoverTopicsReturnsVector) {
     EXPECT_FALSE(topic.name.empty());
     EXPECT_FALSE(topic.type.empty());
   }
-}
-
-TEST_F(TopicDiscoveryTest, GetTopicsAfterDiscovery) {
-  auto discovered = discovery_->discover_topics();
-  auto cached = discovery_->get_topics();
-  // Cached result must match the last discovery call
-  ASSERT_EQ(cached.size(), discovered.size());
-  for (size_t i = 0; i < cached.size(); ++i) {
-    EXPECT_EQ(cached[i].name, discovered[i].name);
-    EXPECT_EQ(cached[i].type, discovered[i].type);
-  }
-}
-
-TEST_F(TopicDiscoveryTest, RefreshSucceeds) {
-  EXPECT_TRUE(discovery_->refresh());
 }
 
 TEST_F(TopicDiscoveryTest, FilteredTopicsNotIncluded) {

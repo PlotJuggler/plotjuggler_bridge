@@ -1,39 +1,43 @@
 /*
  * Copyright (C) 2026 Davide Faconti
  *
- * This file is part of pj_ros_bridge.
+ * This file is part of pj_bridge.
  *
- * pj_ros_bridge is free software: you can redistribute it and/or modify
+ * pj_bridge is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as published by
  * the Free Software Foundation, either version 3 of the License, or
  * (at your option) any later version.
  *
- * pj_ros_bridge is distributed in the hope that it will be useful,
+ * pj_bridge is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
  * GNU Affero General Public License for more details.
  *
  * You should have received a copy of the GNU Affero General Public License
- * along with pj_ros_bridge. If not, see <https://www.gnu.org/licenses/>.
+ * along with pj_bridge. If not, see <https://www.gnu.org/licenses/>.
  */
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <deque>
 #include <functional>
 #include <mutex>
 #include <nlohmann/json.hpp>
-#include <rclcpp/rclcpp.hpp>
 #include <string>
+#include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
-#include "pj_ros_bridge/bridge_server.hpp"
-#include "pj_ros_bridge/middleware/middleware_interface.hpp"
+#include "pj_bridge/bridge_server.hpp"
+#include "pj_bridge/middleware/middleware_interface.hpp"
+#include "pj_bridge/subscription_manager_interface.hpp"
+#include "pj_bridge/topic_source_interface.hpp"
 #include "tl/expected.hpp"
 
 using json = nlohmann::json;
-using namespace pj_ros_bridge;
+using namespace pj_bridge;
 
 // ---------------------------------------------------------------------------
 // MockMiddleware — in-process fake for unit-testing BridgeServer
@@ -169,28 +173,131 @@ class MockMiddleware : public MiddlewareInterface {
 };
 
 // ---------------------------------------------------------------------------
+// MockTopicSource — fake topic discovery and schema provider
+// ---------------------------------------------------------------------------
+class MockTopicSource : public TopicSourceInterface {
+ public:
+  std::vector<TopicInfo> get_topics() override {
+    return topics_;
+  }
+
+  std::string get_schema(const std::string& topic_name) override {
+    for (const auto& t : topics_) {
+      if (t.name == topic_name) {
+        return "uint32 seq\nstring data\n";
+      }
+    }
+    return "";
+  }
+
+  std::string schema_encoding() const override {
+    return "ros2msg";
+  }
+
+  // Test helper: set the topics list
+  void set_topics(std::vector<TopicInfo> topics) {
+    topics_ = std::move(topics);
+  }
+
+  // Test helper: remove a single topic by name
+  void remove_topic(const std::string& name) {
+    topics_.erase(
+        std::remove_if(topics_.begin(), topics_.end(), [&](const TopicInfo& t) { return t.name == name; }),
+        topics_.end());
+  }
+
+ private:
+  std::vector<TopicInfo> topics_;
+};
+
+// ---------------------------------------------------------------------------
+// MockSubscriptionManager — fake subscription manager
+// ---------------------------------------------------------------------------
+class MockSubscriptionManager : public SubscriptionManagerInterface {
+ public:
+  void set_message_callback(MessageCallback callback) override {
+    callback_ = std::move(callback);
+  }
+
+  bool subscribe(const std::string& topic_name, const std::string& /*topic_type*/) override {
+    if (known_topics_.find(topic_name) == known_topics_.end()) {
+      return false;
+    }
+    ref_counts_[topic_name]++;
+    return true;
+  }
+
+  bool unsubscribe(const std::string& topic_name) override {
+    auto it = ref_counts_.find(topic_name);
+    if (it == ref_counts_.end() || it->second <= 0) {
+      underflow_detected_ = true;
+      return false;
+    }
+    it->second--;
+    if (it->second == 0) {
+      ref_counts_.erase(it);
+    }
+    return true;
+  }
+
+  void unsubscribe_all() override {
+    ref_counts_.clear();
+  }
+
+  // Test helpers
+  void add_known_topic(const std::string& topic_name) {
+    known_topics_.insert(topic_name);
+  }
+
+  bool is_subscribed(const std::string& topic_name) const {
+    auto it = ref_counts_.find(topic_name);
+    return it != ref_counts_.end() && it->second > 0;
+  }
+
+  int ref_count(const std::string& topic_name) const {
+    auto it = ref_counts_.find(topic_name);
+    return (it != ref_counts_.end()) ? it->second : 0;
+  }
+
+  bool has_underflow() const {
+    return underflow_detected_;
+  }
+
+  void reset_underflow() {
+    underflow_detected_ = false;
+  }
+
+ private:
+  MessageCallback callback_;
+  std::unordered_set<std::string> known_topics_;
+  std::unordered_map<std::string, int> ref_counts_;
+  bool underflow_detected_{false};
+};
+
+// ---------------------------------------------------------------------------
 // Test fixture
 // ---------------------------------------------------------------------------
 class BridgeServerTest : public ::testing::Test {
  protected:
   void SetUp() override {
-    rclcpp::init(0, nullptr);
-    node_ = std::make_shared<rclcpp::Node>("test_bridge_server");
     mock_ = std::make_shared<MockMiddleware>();
+    mock_topic_source_ = std::make_shared<MockTopicSource>();
+    mock_sub_manager_ = std::make_shared<MockSubscriptionManager>();
     // Use a high port that the mock will never actually listen on.
     // session_timeout = 10s, publish_rate = 50 Hz
-    server_ = std::make_unique<BridgeServer>(node_, mock_, 19999, 10.0, 50.0);
+    server_ = std::make_unique<BridgeServer>(mock_topic_source_, mock_sub_manager_, mock_, 19999, 10.0, 50.0);
   }
 
   void TearDown() override {
     server_.reset();
     mock_.reset();
-    node_.reset();
-    rclcpp::shutdown();
+    mock_topic_source_.reset();
+    mock_sub_manager_.reset();
   }
 
-  rclcpp::Node::SharedPtr node_;
   std::shared_ptr<MockMiddleware> mock_;
+  std::shared_ptr<MockTopicSource> mock_topic_source_;
+  std::shared_ptr<MockSubscriptionManager> mock_sub_manager_;
   std::unique_ptr<BridgeServer> server_;
 };
 
@@ -298,18 +405,12 @@ TEST_F(BridgeServerTest, CleanupSessionIdempotent) {
 // 7. PerClientFiltering
 //
 // We create two sessions with different (non-existent) topic subscriptions.
-// Because the topics don't exist in the ROS2 graph, subscribe will report
-// failures — but we can still exercise the publish_aggregated_messages path
-// by injecting messages directly into the shared MessageBuffer and then
-// manually triggering the publish timer callback.
+// Because the topics don't exist in the mock, subscribe will report
+// failures — but we can still exercise the publish_aggregated_messages path.
 //
-// Instead of fighting GenericSubscriptionManager (which needs real ROS2
-// topic types), we verify that subscribing to non-existent topics returns
+// We verify that subscribing to non-existent topics returns
 // an error containing "failures", and that send_binary is NOT called when
 // no messages are buffered.
-//
-// Then we confirm that when two clients have sessions, send_binary is
-// called with the correct per-client identity when there are messages.
 // ---------------------------------------------------------------------------
 TEST_F(BridgeServerTest, PerClientFiltering) {
   ASSERT_TRUE(server_->initialize());
@@ -332,7 +433,7 @@ TEST_F(BridgeServerTest, PerClientFiltering) {
 
   json reply_x = mock_->pop_reply("client_X");
   ASSERT_FALSE(reply_x.is_discarded());
-  // All subscriptions failed since topic doesn't exist in the ROS2 graph
+  // All subscriptions failed since topic doesn't exist
   EXPECT_TRUE(reply_x.contains("failures"));
   EXPECT_FALSE(reply_x["failures"].empty());
 
@@ -352,11 +453,9 @@ TEST_F(BridgeServerTest, PerClientFiltering) {
   // Verify that send_binary has NOT been called (no data to publish).
   mock_->clear_binary_sends();
 
-  // Spin the node briefly so the publish timer fires at least once
-  auto start = std::chrono::steady_clock::now();
-  while (std::chrono::steady_clock::now() - start < std::chrono::milliseconds(60)) {
-    rclcpp::spin_some(node_);
-    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  // Call publish_aggregated_messages directly a few times
+  for (int i = 0; i < 3; ++i) {
+    server_->publish_aggregated_messages();
   }
 
   auto binary_sends = mock_->get_binary_sends();
@@ -477,7 +576,7 @@ TEST_F(BridgeServerTest, SubscribeMissingTopicsField) {
 // With N clients sharing a subscription group, stats were inflated by N.
 // The fix counts once per group regardless of client count.
 //
-// This test creates 3 active sessions and spins the publish timer.
+// This test creates 3 active sessions and calls publish_aggregated_messages.
 // With no messages in the buffer, stats must remain (0, 0) — verifying
 // the counting path does not produce phantom stats with multiple sessions.
 // ---------------------------------------------------------------------------
@@ -493,11 +592,9 @@ TEST_F(BridgeServerTest, StatsNotInflatedByMultipleSessions) {
   }
   ASSERT_EQ(server_->get_active_session_count(), 3u);
 
-  // Spin the node so the publish timer fires multiple times
-  auto start = std::chrono::steady_clock::now();
-  while (std::chrono::steady_clock::now() - start < std::chrono::milliseconds(80)) {
-    rclcpp::spin_some(node_);
-    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  // Call publish_aggregated_messages directly multiple times
+  for (int i = 0; i < 4; ++i) {
+    server_->publish_aggregated_messages();
   }
 
   // No messages were buffered, so stats must be zero
@@ -534,7 +631,7 @@ TEST_F(BridgeServerTest, SubscribeWithRateLimit) {
   ASSERT_TRUE(server_->initialize());
 
   // Subscribe with mixed format: one string (unlimited) and one object (rate-limited)
-  // Both topics don't exist in the ROS2 graph, so they'll fail — but
+  // Both topics don't exist in the mock, so they'll fail — but
   // we're testing that the parsing accepts the mixed format and responds
   // with rate_limits when appropriate.
   json req;
@@ -702,13 +799,10 @@ TEST_F(BridgeServerTest, MissingCommandIncludesProtocolVersion) {
 //   {"encoding": "ros2msg", "definition": "..."}
 // instead of the old string format.
 //
-// Since we can't subscribe to real topics in unit tests (no ROS2 graph),
+// Since we can't subscribe to real topics in unit tests (mock returns failure),
 // this test verifies schema format when subscription fails. The schemas
 // object will be empty for failed subscriptions, but we verify the
 // structure is correct.
-//
-// For a more thorough test, we also add a direct handle_request test
-// that can validate the schema format logic.
 // ---------------------------------------------------------------------------
 TEST_F(BridgeServerTest, SubscribeSchemaHasEncodingFormat) {
   ASSERT_TRUE(server_->initialize());
@@ -789,21 +883,31 @@ TEST_F(BridgeServerTest, SubscribeSchemaEncodingFormatStructure) {
 TEST_F(BridgeServerTest, UnsubscribeRemovesTopics) {
   ASSERT_TRUE(server_->initialize());
 
-  // First create a session via heartbeat
+  // Register real topics so subscribe succeeds
+  mock_topic_source_->set_topics({{"/topic_a", "std_msgs/msg/String"}, {"/topic_b", "std_msgs/msg/String"}});
+  mock_sub_manager_->add_known_topic("/topic_a");
+  mock_sub_manager_->add_known_topic("/topic_b");
+
+  // Create a session via heartbeat
   json hb;
   hb["command"] = "heartbeat";
   mock_->push_request("client_unsub_1", hb.dump());
   server_->process_requests();
 
-  // Subscribe to topics (they don't exist, but we create the session subscription intent)
+  // Subscribe to both topics
   json sub_request;
   sub_request["command"] = "subscribe";
   sub_request["topics"] = json::array({"/topic_a", "/topic_b"});
   mock_->push_request("client_unsub_1", sub_request.dump());
   server_->process_requests();
-  mock_->pop_reply("client_unsub_1");  // discard subscribe response
 
-  // Then unsubscribe from one topic
+  json sub_response = mock_->pop_reply("client_unsub_1");
+  ASSERT_FALSE(sub_response.is_discarded());
+  EXPECT_EQ(sub_response["status"], "success");
+  EXPECT_TRUE(mock_sub_manager_->is_subscribed("/topic_a"));
+  EXPECT_TRUE(mock_sub_manager_->is_subscribed("/topic_b"));
+
+  // Unsubscribe from /topic_a only
   json unsub_request;
   unsub_request["command"] = "unsubscribe";
   unsub_request["id"] = "unsub-1";
@@ -817,9 +921,12 @@ TEST_F(BridgeServerTest, UnsubscribeRemovesTopics) {
   EXPECT_EQ(response["id"], "unsub-1");
   EXPECT_TRUE(response.contains("protocol_version"));
   ASSERT_TRUE(response.contains("removed"));
-  // Note: /topic_a doesn't exist in ROS2 graph, so it was never actually subscribed
-  // The removed array will be empty since no actual subscription existed
-  EXPECT_TRUE(response["removed"].is_array());
+  EXPECT_EQ(response["removed"].size(), 1u);
+  EXPECT_EQ(response["removed"][0], "/topic_a");
+
+  // /topic_a should be unsubscribed, /topic_b should remain
+  EXPECT_FALSE(mock_sub_manager_->is_subscribed("/topic_a"));
+  EXPECT_TRUE(mock_sub_manager_->is_subscribed("/topic_b"));
 }
 
 // ---------------------------------------------------------------------------
@@ -830,6 +937,11 @@ TEST_F(BridgeServerTest, UnsubscribeRemovesTopics) {
 // ---------------------------------------------------------------------------
 TEST_F(BridgeServerTest, SubscribeIsAdditive) {
   ASSERT_TRUE(server_->initialize());
+
+  // Register real topics so subscribe succeeds
+  mock_topic_source_->set_topics({{"/topic_a", "std_msgs/msg/String"}, {"/topic_b", "std_msgs/msg/String"}});
+  mock_sub_manager_->add_known_topic("/topic_a");
+  mock_sub_manager_->add_known_topic("/topic_b");
 
   // Create session
   json hb;
@@ -843,22 +955,27 @@ TEST_F(BridgeServerTest, SubscribeIsAdditive) {
   sub1["topics"] = json::array({"/topic_a"});
   mock_->push_request("client_additive_1", sub1.dump());
   server_->process_requests();
-  mock_->pop_reply("client_additive_1");
 
-  // Subscribe to topic_b (should NOT remove topic_a in the new additive model)
+  json response1 = mock_->pop_reply("client_additive_1");
+  ASSERT_FALSE(response1.is_discarded());
+  EXPECT_EQ(response1["status"], "success");
+  EXPECT_TRUE(response1["schemas"].contains("/topic_a"));
+
+  // Subscribe to topic_b — should NOT remove topic_a (additive model)
   json sub2;
   sub2["command"] = "subscribe";
   sub2["topics"] = json::array({"/topic_b"});
   mock_->push_request("client_additive_1", sub2.dump());
   server_->process_requests();
 
-  json response = mock_->pop_reply("client_additive_1");
-  ASSERT_FALSE(response.is_discarded());
+  json response2 = mock_->pop_reply("client_additive_1");
+  ASSERT_FALSE(response2.is_discarded());
+  EXPECT_EQ(response2["status"], "success");
+  EXPECT_TRUE(response2["schemas"].contains("/topic_b"));
 
-  // Both topics should be in failures (since they don't exist in ROS2 graph)
-  // but the key point is that we asked for /topic_b and it should NOT have
-  // triggered unsubscribe of /topic_a
-  EXPECT_TRUE(response.contains("failures"));
+  // Both topics should still be subscribed
+  EXPECT_TRUE(mock_sub_manager_->is_subscribed("/topic_a"));
+  EXPECT_TRUE(mock_sub_manager_->is_subscribed("/topic_b"));
 }
 
 // ---------------------------------------------------------------------------
@@ -1184,11 +1301,9 @@ TEST_F(BridgeServerTest, PausedClientDoesNotReceiveBinaryFrames) {
   // Clear any binary sends from previous operations
   mock_->clear_binary_sends();
 
-  // Spin the node to let the publish timer fire
-  auto start = std::chrono::steady_clock::now();
-  while (std::chrono::steady_clock::now() - start < std::chrono::milliseconds(60)) {
-    rclcpp::spin_some(node_);
-    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  // Call publish_aggregated_messages directly
+  for (int i = 0; i < 3; ++i) {
+    server_->publish_aggregated_messages();
   }
 
   // Verify binary sends - since topics don't exist, no messages are buffered
@@ -1263,7 +1378,7 @@ TEST_F(BridgeServerTest, RegressionTest_BinaryFrameIncludesHeader) {
   // instead of finalize(), so the header was never prepended.
 
   // We can't easily trigger actual message publishing in unit tests without
-  // real ROS topics, but we can verify the serializer's finalize() method
+  // real topics, but we can verify the serializer's finalize() method
   // is correctly producing the header format by checking the protocol constants.
 
   // Verify the expected magic value matches "PJRB" in little-endian
@@ -1345,8 +1460,7 @@ TEST_F(BridgeServerTest, RegressionTest_PausedClientDisconnectNoDoubleDecrement)
 //
 // In the unit test environment, we can't easily mock SchemaExtractor, but we
 // can verify the failure-reporting path by subscribing to a non-existent topic
-// which produces the "Topic does not exist" failure, confirming the failure
-// response structure is correct.
+// which produces the failure, confirming the failure response structure is correct.
 // ---------------------------------------------------------------------------
 TEST_F(BridgeServerTest, SubscribeFailureResponseContainsTopicAndReason) {
   ASSERT_TRUE(server_->initialize());
@@ -1371,4 +1485,153 @@ TEST_F(BridgeServerTest, SubscribeFailureResponseContainsTopicAndReason) {
     EXPECT_FALSE(failure["topic"].get<std::string>().empty());
     EXPECT_FALSE(failure["reason"].get<std::string>().empty());
   }
+}
+
+// ===========================================================================
+// BUG FIX TESTS - Tests for specific bugs from code review
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// Bug #1 — Ref-count leak on disconnect during subscribe
+//
+// After subscribing to topics and then disconnecting, all ref counts must
+// return to zero with no underflow.
+// ---------------------------------------------------------------------------
+TEST_F(BridgeServerTest, DisconnectDuringSubscribeCleansUpRefCounts) {
+  ASSERT_TRUE(server_->initialize());
+
+  mock_topic_source_->set_topics(
+      {{"/t1", "std_msgs/msg/String"}, {"/t2", "std_msgs/msg/String"}, {"/t3", "std_msgs/msg/String"}});
+  mock_sub_manager_->add_known_topic("/t1");
+  mock_sub_manager_->add_known_topic("/t2");
+  mock_sub_manager_->add_known_topic("/t3");
+
+  // Subscribe to all three
+  json sub;
+  sub["command"] = "subscribe";
+  sub["topics"] = json::array({"/t1", "/t2", "/t3"});
+  mock_->push_request("client_dc", sub.dump());
+  server_->process_requests();
+
+  json sub_resp = mock_->pop_reply("client_dc");
+  ASSERT_EQ(sub_resp["status"], "success");
+
+  // Simulate disconnect
+  mock_->simulate_disconnect("client_dc");
+
+  // All ref counts must be zero
+  EXPECT_EQ(mock_sub_manager_->ref_count("/t1"), 0);
+  EXPECT_EQ(mock_sub_manager_->ref_count("/t2"), 0);
+  EXPECT_EQ(mock_sub_manager_->ref_count("/t3"), 0);
+  EXPECT_FALSE(mock_sub_manager_->has_underflow());
+}
+
+// ---------------------------------------------------------------------------
+// Bug #2 — Ref-count underflow on partial resume
+//
+// When a topic disappears while a client is paused, resume should remove that
+// topic from the session. On disconnect, no underflow should occur.
+// ---------------------------------------------------------------------------
+TEST_F(BridgeServerTest, ResumePartialFailureRemovesTopicsFromSession) {
+  ASSERT_TRUE(server_->initialize());
+
+  mock_topic_source_->set_topics({{"/topic_a", "std_msgs/msg/String"}, {"/topic_b", "std_msgs/msg/String"}});
+  mock_sub_manager_->add_known_topic("/topic_a");
+  mock_sub_manager_->add_known_topic("/topic_b");
+
+  // Subscribe to both
+  json sub;
+  sub["command"] = "subscribe";
+  sub["topics"] = json::array({"/topic_a", "/topic_b"});
+  mock_->push_request("client_resume_fail", sub.dump());
+  server_->process_requests();
+  mock_->pop_reply("client_resume_fail");
+
+  EXPECT_EQ(mock_sub_manager_->ref_count("/topic_a"), 1);
+  EXPECT_EQ(mock_sub_manager_->ref_count("/topic_b"), 1);
+
+  // Pause — decrements ref counts
+  json pause;
+  pause["command"] = "pause";
+  mock_->push_request("client_resume_fail", pause.dump());
+  server_->process_requests();
+  mock_->pop_reply("client_resume_fail");
+
+  EXPECT_EQ(mock_sub_manager_->ref_count("/topic_a"), 0);
+  EXPECT_EQ(mock_sub_manager_->ref_count("/topic_b"), 0);
+
+  // Simulate /topic_b disappearing
+  mock_topic_source_->remove_topic("/topic_b");
+
+  // Resume — /topic_b should fail to re-subscribe
+  json resume;
+  resume["command"] = "resume";
+  mock_->push_request("client_resume_fail", resume.dump());
+  server_->process_requests();
+  mock_->pop_reply("client_resume_fail");
+
+  // /topic_a should be re-subscribed, /topic_b should not
+  EXPECT_EQ(mock_sub_manager_->ref_count("/topic_a"), 1);
+  EXPECT_EQ(mock_sub_manager_->ref_count("/topic_b"), 0);
+
+  // Disconnect — should only unsubscribe /topic_a, NOT /topic_b
+  mock_->simulate_disconnect("client_resume_fail");
+
+  EXPECT_EQ(mock_sub_manager_->ref_count("/topic_a"), 0);
+  EXPECT_EQ(mock_sub_manager_->ref_count("/topic_b"), 0);
+  EXPECT_FALSE(mock_sub_manager_->has_underflow());
+}
+
+// ---------------------------------------------------------------------------
+// Bug #4 — Unsubscribe ignores object format
+//
+// Unsubscribe should accept [{"name": "/topic"}] in addition to ["/topic"].
+// ---------------------------------------------------------------------------
+TEST_F(BridgeServerTest, UnsubscribeAcceptsObjectFormat) {
+  ASSERT_TRUE(server_->initialize());
+
+  mock_topic_source_->set_topics({{"/topic_a", "std_msgs/msg/String"}});
+  mock_sub_manager_->add_known_topic("/topic_a");
+
+  // Subscribe
+  json sub;
+  sub["command"] = "subscribe";
+  sub["topics"] = json::array({"/topic_a"});
+  mock_->push_request("client_obj_unsub", sub.dump());
+  server_->process_requests();
+  mock_->pop_reply("client_obj_unsub");
+
+  EXPECT_TRUE(mock_sub_manager_->is_subscribed("/topic_a"));
+
+  // Unsubscribe using object format
+  json unsub;
+  unsub["command"] = "unsubscribe";
+  unsub["topics"] = json::array({json::object({{"name", "/topic_a"}})});
+  mock_->push_request("client_obj_unsub", unsub.dump());
+  server_->process_requests();
+
+  json response = mock_->pop_reply("client_obj_unsub");
+  ASSERT_FALSE(response.is_discarded());
+  EXPECT_EQ(response["status"], "success");
+  ASSERT_TRUE(response.contains("removed"));
+  EXPECT_EQ(response["removed"].size(), 1u);
+  EXPECT_EQ(response["removed"][0], "/topic_a");
+  EXPECT_EQ(mock_sub_manager_->ref_count("/topic_a"), 0);
+}
+
+// ---------------------------------------------------------------------------
+// Bug #9 — Division by zero with zero publish rate
+//
+// BridgeServer::initialize() should reject publish_rate <= 0.
+// ---------------------------------------------------------------------------
+TEST_F(BridgeServerTest, InitializeRejectsZeroPublishRate) {
+  auto zero_rate_server =
+      std::make_unique<BridgeServer>(mock_topic_source_, mock_sub_manager_, mock_, 19999, 10.0, 0.0);
+  EXPECT_FALSE(zero_rate_server->initialize());
+}
+
+TEST_F(BridgeServerTest, InitializeRejectsNegativePublishRate) {
+  auto neg_rate_server =
+      std::make_unique<BridgeServer>(mock_topic_source_, mock_sub_manager_, mock_, 19999, 10.0, -1.0);
+  EXPECT_FALSE(neg_rate_server->initialize());
 }
