@@ -1,0 +1,35 @@
+{
+  "cli_version": "0.4.2",
+  "checkpoint_id": "4eeea9be2ecb",
+  "strategy": "manual-commit",
+  "branch": "unify-backends",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "CLAUDE.md",
+    "app/include/pj_bridge/message_buffer.hpp",
+    "app/include/pj_bridge/middleware/websocket_middleware.hpp",
+    "app/include/pj_bridge/session_manager.hpp",
+    "app/src/bridge_server.cpp",
+    "app/src/message_buffer.cpp",
+    "app/src/middleware/websocket_middleware.cpp",
+    "app/src/session_manager.cpp",
+    "tests/unit/test_bridge_server.cpp",
+    "tests/unit/test_websocket_middleware.cpp"
+  ],
+  "sessions": [
+    {
+      "metadata": "/4e/eea9be2ecb/0/metadata.json",
+      "transcript": "/4e/eea9be2ecb/0/full.jsonl",
+      "context": "/4e/eea9be2ecb/0/context.md",
+      "content_hash": "/4e/eea9be2ecb/0/content_hash.txt",
+      "prompt": "/4e/eea9be2ecb/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 14,
+    "cache_creation_tokens": 5557,
+    "cache_read_tokens": 1486992,
+    "output_tokens": 1054,
+    "api_call_count": 10
+  }
+}
