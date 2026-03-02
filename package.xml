@@ -17,7 +17,7 @@
   <depend>sensor_msgs</depend>
   <depend>nav_msgs</depend>
 
-  <build_depend>libspdlog-dev</build_depend>
+  <build_depend>spdlog</build_depend>
   <build_depend>nlohmann-json-dev</build_depend>
   <build_depend>libzstd-dev</build_depend>
 
