@@ -28,7 +28,17 @@
 
 namespace pj_bridge {
 
-AggregatedMessageSerializer::AggregatedMessageSerializer() {}
+AggregatedMessageSerializer::AggregatedMessageSerializer() : cctx_(ZSTD_createCCtx()) {}
+
+AggregatedMessageSerializer::~AggregatedMessageSerializer() {
+  ZSTD_freeCCtx(cctx_);
+}
+
+ZSTD_DCtx *AggregatedMessageSerializer::get_dctx() {
+  // Thread-local decompression context (used by static decompress_zstd)
+  thread_local ZSTD_DCtx *dctx = ZSTD_createDCtx();
+  return dctx;
+}
 
 void AggregatedMessageSerializer::serialize_message(
     const std::string &topic_name, uint64_t timestamp_ns, const std::byte *data, size_t data_size) {
@@ -89,9 +99,9 @@ std::vector<uint8_t> AggregatedMessageSerializer::finalize() {
   // Copy header to output
   std::memcpy(result.data(), header.data(), kBinaryHeaderSize);
 
-  // Compress payload after header
-  size_t compressed_size = ZSTD_compress(
-      result.data() + kBinaryHeaderSize, max_compressed, serialized_data_.data(), serialized_data_.size(),
+  // Compress payload after header using persistent context
+  size_t compressed_size = ZSTD_compressCCtx(
+      cctx_, result.data() + kBinaryHeaderSize, max_compressed, serialized_data_.data(), serialized_data_.size(),
       1  // compression level
   );
 
@@ -115,7 +125,7 @@ void AggregatedMessageSerializer::compress_zstd(
   size_t max_compressed_size = ZSTD_compressBound(data.size());
   compressed_data.resize(max_compressed_size);
 
-  // Compress
+  // Compress (static helper — uses one-shot API; hot path uses finalize() with persistent cctx_)
   size_t compressed_size = ZSTD_compress(compressed_data.data(), compressed_data.size(), data.data(), data.size(), 1);
 
   // Check for errors
@@ -145,9 +155,10 @@ void AggregatedMessageSerializer::decompress_zstd(
   }
   decompressed.resize(decompressed_size);
 
-  // Decompress
-  size_t result =
-      ZSTD_decompress(decompressed.data(), decompressed.size(), compressed_data.data(), compressed_data.size());
+  // Decompress using persistent context
+  ZSTD_DCtx *dctx = get_dctx();
+  size_t result = ZSTD_decompressDCtx(
+      dctx, decompressed.data(), decompressed.size(), compressed_data.data(), compressed_data.size());
 
   // Check for errors
   if (ZSTD_isError(result)) {

@@ -19,6 +19,8 @@
 
 #pragma once
 
+#include <zstd.h>
+
 #include <cstddef>
 #include <cstdint>
 #include <string>
@@ -46,6 +48,12 @@ namespace pj_bridge {
 class AggregatedMessageSerializer {
  public:
   AggregatedMessageSerializer();
+  ~AggregatedMessageSerializer();
+
+  AggregatedMessageSerializer(const AggregatedMessageSerializer&) = delete;
+  AggregatedMessageSerializer& operator=(const AggregatedMessageSerializer&) = delete;
+  AggregatedMessageSerializer(AggregatedMessageSerializer&&) = delete;
+  AggregatedMessageSerializer& operator=(AggregatedMessageSerializer&&) = delete;
 
   /**
    * @brief Serialize a message directly to the output buffer
@@ -101,6 +109,8 @@ class AggregatedMessageSerializer {
  private:
   std::vector<uint8_t> serialized_data_;
   size_t message_count_{0};
+  ZSTD_CCtx* cctx_ = nullptr;
+  static ZSTD_DCtx* get_dctx();
 
   template <typename T>
   static void write_le(std::vector<uint8_t>& buffer, T value);
