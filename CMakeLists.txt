@@ -161,23 +161,23 @@ if(ament_cmake_FOUND)
 endif()
 
 # ============================================================================
-# pj_bridge_rti — RTI DDS backend (disabled — replaced by FastDDS backend)
+# pj_bridge_rti — RTI DDS backend
 # ============================================================================
-# if(ENABLE_RTI AND RTIConnextDDS_FOUND)
-#   find_package(CLI11 REQUIRED)
-#
-#   add_library(pj_bridge_rti_lib STATIC
-#     rti/src/dds_topic_discovery.cpp
-#     rti/src/dds_subscription_manager.cpp)
-#   target_include_directories(pj_bridge_rti_lib PUBLIC
-#     ${CMAKE_CURRENT_SOURCE_DIR}/rti/include)
-#   target_link_libraries(pj_bridge_rti_lib PUBLIC
-#     pj_bridge_app RTIConnextDDS::cpp2_api)
-#
-#   add_executable(pj_bridge_rti rti/src/main.cpp)
-#   target_link_libraries(pj_bridge_rti pj_bridge_rti_lib CLI11::CLI11)
-#   install(TARGETS pj_bridge_rti DESTINATION lib/${PROJECT_NAME})
-# endif()
+if(ENABLE_RTI AND RTIConnextDDS_FOUND)
+  find_package(CLI11 REQUIRED)
+
+  add_library(pj_bridge_rti_lib STATIC
+    rti/src/dds_topic_discovery.cpp
+    rti/src/dds_subscription_manager.cpp)
+  target_include_directories(pj_bridge_rti_lib PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/rti/include)
+  target_link_libraries(pj_bridge_rti_lib PUBLIC
+    pj_bridge_app RTIConnextDDS::cpp2_api)
+
+  add_executable(pj_bridge_rti rti/src/main.cpp)
+  target_link_libraries(pj_bridge_rti pj_bridge_rti_lib CLI11::CLI11)
+  install(TARGETS pj_bridge_rti DESTINATION lib/${PROJECT_NAME})
+endif()
 
 # ============================================================================
 # pj_bridge_fastdds — eProsima Fast DDS backend (Conan-managed)
