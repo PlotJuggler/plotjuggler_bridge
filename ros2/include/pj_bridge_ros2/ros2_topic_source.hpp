@@ -34,6 +34,9 @@ namespace pj_bridge {
  *
  * Wraps TopicDiscovery and SchemaExtractor to provide backend-agnostic
  * topic discovery and schema extraction.
+ *
+ * Thread safety: NOT thread-safe. All calls must be serialized externally
+ * (BridgeServer calls get_topics() and get_schema() from the same event-loop thread).
  */
 class Ros2TopicSource : public TopicSourceInterface {
  public:

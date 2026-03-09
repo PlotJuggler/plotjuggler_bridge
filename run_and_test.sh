@@ -5,7 +5,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WS_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
-PKG=pj_ros_bridge
+PKG=pj_bridge
 
 # Source ROS2
 source /opt/ros/humble/setup.bash

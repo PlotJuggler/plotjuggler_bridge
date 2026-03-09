@@ -34,9 +34,9 @@ static constexpr uint32_t kBinaryFrameMagic = 0x42524A50;
 static constexpr size_t kBinaryHeaderSize = 16;
 
 /// Schema encoding identifier for ROS2 message definitions
-static constexpr const char* kSchemaEncodingRos2Msg = "ros2msg";
+inline constexpr const char* kSchemaEncodingRos2Msg = "ros2msg";
 
 /// Schema encoding identifier for OMG IDL type definitions
-static constexpr const char* kSchemaEncodingOmgIdl = "omgidl";
+inline constexpr const char* kSchemaEncodingOmgIdl = "omgidl";
 
 }  // namespace pj_bridge

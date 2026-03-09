@@ -19,6 +19,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <memory>
 #include <mutex>
 #include <nlohmann/json.hpp>
@@ -148,7 +149,7 @@ class BridgeServer {
   double publish_rate_;
 
   // State
-  bool initialized_;
+  std::atomic<bool> initialized_;
 
   // Statistics
   uint64_t total_messages_published_;

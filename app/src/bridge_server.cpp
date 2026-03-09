@@ -68,6 +68,11 @@ bool BridgeServer::initialize() {
     return false;
   }
 
+  if (port_ < 1 || port_ > 65535) {
+    spdlog::error("Invalid port: {} (must be 1-65535)", port_);
+    return false;
+  }
+
   message_buffer_ = std::make_shared<MessageBuffer>();
   session_manager_ = std::make_unique<SessionManager>(session_timeout_);
 
