@@ -1,0 +1,70 @@
+Implement the following plan:
+
+# Plan: Fix AppImage schema discovery (hybrid approach)
+
+## Context
+
+The AppImage fails at runtime with "Empty schema" for every topic. Two problems:
+
+1. **`cp -r --parents` bug** (line 70): absolute paths cause `.msg` files to land at `AppDir/usr/share/home/runner/.pixi/.../sensor_msgs/msg/` instead of `AppDir/usr/share/sensor_msgs/msg/`
+2. **`AMENT_PREFIX_PATH` overwrite** (line 93): the host's ament prefix is replaced entirely, so even if the user has a workspace sourced, custom message types are invisible
+
+## Changes
+
+### File: `.github/workflows/appimage.yaml`
+
+**1. Fix the `.msg`/`.srv` copy loop** (lines 68-71) — replace `cp --parents` with correct relative copies:
+
+```yaml
+          # BEFORE (broken):
+          for pkg_dir in "$CONDA_PREFIX"/share/*/msg "$CONDA_PREFIX"/share/*/srv; do
+            [ -d "$pkg_dir" ] && cp -r --parents "$pkg_dir" AppDir/usr/share/ 2>/dev/null || true
+          done
+
+          # AFTER (correct):
+          for pkg_dir in "$CONDA_PREFIX"/share/*/msg "$CONDA_PREFIX"/share/*/srv; do
+            [ -d "$pkg_dir" ] || continue
+            pkg_name="$(basename "$(dirname "$pkg_dir")")"
+            mkdir -p "AppDir/usr/share/$pkg_name"
+            cp -r "$pkg_dir" "AppDir/usr/share/$pkg_name/"
+          done
+```
+
+This produces `AppDir/usr/share/sensor_msgs/msg/Float32.msg` — the path `ament_index_cpp` expects.
+
+**2. Update AppRun** (line 93) — prepend bundled prefix instead of overwriting host `AMENT_PREFIX_PATH`:
+
+```bash
+# BEFORE:
+export AMENT_PREFIX_PATH="${HERE}/usr"
+
+# AFTER:
+export AMENT_PREFIX_PATH="${HERE}/usr${AMENT_PREFIX_PATH:+:$AMENT_PREFIX_PATH}"
+```
+
+This way:
+- Bundled standard msgs (std_msgs, sensor_msgs, geometry_msgs, etc.) work out of the box
+- If user has sourced a workspace with custom msgs, those are also visible
+- The bundled prefix takes priority (searched first)
+
+## Verification
+
+1. Push, trigger `workflow_dispatch` on AppImage workflow
+2. Download the humble AppImage artifact
+3. Test without sourcing ROS2 (standard msgs only):
+   ```bash
+   ./pj_bridge_ros2-humble-x86_64.AppImage --ros-args -p port:=8080
+   ```
+4. Test with sourced workspace (custom msgs):
+   ```bash
+   source ~/my_workspace/install/setup.bash
+   ./pj_bridge_ros2-humble-x86_64.AppImage --ros-args -p port:=8080
+   ```
+5. Confirm no "Empty schema" errors for standard types in both cases
+
+
+If you need specific details from before exiting plan mode (like exact code snippets, error messages, or content you generated), read the full transcript at: /home/davide/.REDACTED.jsonl
+
+---
+
+trigger appimage CI

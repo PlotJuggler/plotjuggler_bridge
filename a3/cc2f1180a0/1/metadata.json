@@ -1,0 +1,29 @@
+{
+  "cli_version": "0.4.2",
+  "checkpoint_id": "a3cc2f1180a0",
+  "session_id": "dd453a7a-ef51-4f77-b551-b3fbf388def6",
+  "strategy": "manual-commit",
+  "created_at": "2026-03-10T15:18:24.621558012Z",
+  "branch": "main",
+  "checkpoints_count": 1,
+  "files_touched": [
+    ".github/workflows/appimage.yaml"
+  ],
+  "agent": "Claude Code",
+  "token_usage": {
+    "input_tokens": 14,
+    "cache_creation_tokens": 15968,
+    "cache_read_tokens": 283570,
+    "output_tokens": 1382,
+    "api_call_count": 10
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-03-10T15:18:24.616327342Z",
+    "agent_lines": 5,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 5,
+    "agent_percentage": 100
+  }
+}
