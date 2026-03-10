@@ -113,6 +113,7 @@ jobs:
 
       - name: Upload to GitHub Release
         if: startsWith(github.ref, 'refs/tags/')
-        run: gh release upload "${{ github.ref_name }}" *.AppImage --clobber
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          files: "*.AppImage"
