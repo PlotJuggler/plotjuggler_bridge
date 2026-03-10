@@ -102,7 +102,9 @@ jobs:
             --output appimage
 
       - name: Rename AppImage
-        run: mv *.AppImage pj_bridge_ros2-${{ matrix.environment }}-x86_64.AppImage
+        run: |
+          rm -f linuxdeploy-x86_64.AppImage
+          mv *.AppImage pj_bridge_ros2-${{ matrix.environment }}-x86_64.AppImage
 
       - uses: actions/upload-artifact@v4
         with:
