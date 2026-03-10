@@ -1,5 +1,5 @@
 context:
-  version: "0.4.2"
+  version: "0.4.3"
 
 package:
   name: pj-bridge-ros2-${{ ros_distro }}
@@ -26,6 +26,7 @@ build:
 requirements:
   build:
     - ${{ compiler('c') }}
+    - ${{ stdlib('c') }}
     - ${{ compiler('cxx') }}
     - cmake >=3.14
     - ninja
