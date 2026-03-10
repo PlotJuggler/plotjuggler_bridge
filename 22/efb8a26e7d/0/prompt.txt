@@ -1,0 +1,446 @@
+Implement the following plan:
+
+# Plan: Add Conda Package Build & Upload to Release CI
+
+## Context
+
+Users currently install pj_bridge via Debian packages or AppImage. To support installation via `pixi global install`, we need to build conda packages and publish them to a prefix.dev channel. Each ROS distro (humble, jazzy, kilted) gets its own package (`pj-bridge-ros2-humble`, `pj-bridge-ros2-jazzy`, `pj-bridge-ros2-kilted`) since they link against different ROS2 libraries.
+
+## Prerequisites (manual, one-time)
+
+1. Create a channel on https://prefix.dev (e.g. `plotjuggler` or `pj-bridge`)
+2. Go to channel → "Trusted Publishers" tab
+3. Add trusted publisher:
+   - GitHub org: `PlotJuggler`
+   - Repository: `plotjuggler_bridge`
+   - Workflow filename: `conda.yaml`
+4. Click Submit
+
+## Step 1: Create `conda.recipe/recipe.yaml`
+
+This is a Jinja-templated recipe. The `ros_distro` variable is passed at build time via `--variant`.
+
+```yaml
+context:
+  version: "0.4.0"
+  ros_distro: humble  # overridden by --variant at build time
+
+package:
+  name: pj-bridge-ros2-${{ ros_distro }}
+  version: ${{ version }}
+
+source:
+  path: ..
+  use_gitignore: true
+
+build:
+  number: 0
+  script: |
+    cmake $CMAKE_ARGS \
+      -GNinja \
+      -DCMAKE_BUILD_TYPE=Release \
+      -DCMAKE_INSTALL_PREFIX=$PREFIX \
+      -S . -B build
+    cmake --build build --target install
+
+requirements:
+  build:
+    - ${{ compiler('c') }}
+    - ${{ compiler('cxx') }}
+    - cmake >=3.14
+    - ninja
+    - pkg-config
+  host:
+    - ros-${{ ros_distro }}-rclcpp
+    - ros-${{ ros_distro }}-ament-cmake
+    - ros-${{ ros_distro }}-ament-index-cpp
+    - ros-${{ ros_distro }}-sensor-msgs
+    - ros-${{ ros_distro }}-nav-msgs
+    - ixwebsocket
+    - spdlog
+    - zstd
+    - nlohmann_json
+  run:
+    - ros-${{ ros_distro }}-rclcpp
+    - ros-${{ ros_distro }}-ament-index-cpp
+    - ixwebsocket
+    - spdlog
+    - zstd
+
+tests:
+  - package_contents:
+      lib:
+        - lib/pj_bridge/pj_bridge_ros2
+
+about:
+  homepage: https://github.com/PlotJuggler/plotjuggler_bridge
+  license: AGPL-3.0-only
+  license_file: LICENSE
+  summary: Bridge server forwarding ROS2 topic content over WebSocket to PlotJuggler
+```
+
+**Key decisions:**
+- `source.path: ..` — recipe is in `conda.recipe/`, source root is parent
+- `$CMAKE_ARGS` — auto-populated by rattler-build with cross-compilation flags
+- ROS deps use `ros-${{ ros_distro }}-*` naming (robostack convention)
+- The `ament_cmake` build system handles install targets automatically (binary goes to `$PREFIX/lib/pj_bridge/pj_bridge_ros2`)
+
+## Step 2: Create `.github/workflows/conda.yaml`
+
+GitHub Actions matrix with one job per ROS distro. Uses `prefix-dev/rattler-build-action` to build, then uploads to prefix.dev via OIDC trusted publishing.
+
+```yaml
+name: Conda Packages
+
+on:
+  push:
+    tags: ['*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write  # Required for OIDC trusted publishing
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - ros_distro: humble
+            robostack_channel: robostack-humble
+          - ros_distro: jazzy
+            robostack_channel: robostack-jazzy
+          - ros_distro: kilted
+            robostack_channel: robostack-kilted
+    runs-on: ubuntu-latest
+    name: conda-${{ matrix.ros_distro }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build conda package
+        uses: prefix-dev/rattler-build-action@v0.2.36
+        with:
+          recipe-path: conda.recipe/recipe.yaml
+          artifact-name: conda-${{ matrix.ros_distro }}
+          build-args: >
+            --variant ros_distro=${{ matrix.ros_distro }}
+            -c ${{ matrix.robostack_channel }}
+            -c conda-forge
+
+  publish:
+    name: Upload to prefix.dev
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: prefix-dev/rattler-build-action@v0.2.36
+        with:
+          setup-only: true
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          pattern: conda-*
+          merge-multiple: false
+
+      - name: Upload to prefix.dev
+        shell: bash
+        run: |
+          shopt -s nullglob globstar
+          EXIT_CODE=0
+          for pkg in artifacts/**/*.conda artifacts/**/*.tar.bz2; do
+            echo "Uploading ${pkg}"
+            if ! rattler-build upload prefix -c <CHANNEL_NAME> "${pkg}"; then
+              EXIT_CODE=1
+            fi
+          done
+          exit $EXIT_CODE
+```
+
+**Note:** Replace `<CHANNEL_NAME>` with the actual prefix.dev channel name after creating it.
+
+## Step 3: Verify the CMake install targets work standalone
+
+The current `CMakeLists.txt` installs:
+- `pj_bridge_ros2` → `lib/pj_bridge/pj_bridge_ros2` (line 158-160)
+- `pj_bridge_app` headers → `include/` (line 111 area)
+
+The recipe uses `cmake --build build --target install` which will use these targets. The `ament_cmake` build type should work since robostack provides it. If `ament_cmake` is not found in the conda env (e.g. if rattler-build doesn't source the ROS setup), we may need to set `AMENT_PREFIX_PATH=$PREFIX` in the build script. This is a known pattern with robostack — will verify during testing.
+
+## Files to Create/Modify
+
+| File | Action |
+|------|--------|
+| `conda.recipe/recipe.yaml` | **Create** — rattler-build recipe |
+| `.github/workflows/conda.yaml` | **Create** — CI workflow |
+
+No existing files need modification.
+
+## Verification
+
+1. **Local test** (optional): `rattler-build build --recipe conda.recipe/recipe.yaml -c robostack-humble -c conda-forge --variant ros_distro=humble`
+2. **CI test**: Push a tag → check that all 3 `conda-*` jobs pass in the "Conda Packages" workflow
+3. **Upload test**: After configuring trusted publisher on prefix.dev, verify packages appear in the channel
+4. **Install test**: `pixi global install --channel https://prefix.dev/<CHANNEL_NAME> pj-bridge-ros2-humble`
+
+
+If you need specific details from before exiting plan mode (like exact code snippets, error messages, or content you generated), read the full transcript at: /home/davide/.REDACTED.jsonl
+
+---
+
+Base directory for this skill: /home/davide/.claude/plugins/cache/superpowers-marketplace/superpowers/4.0.3/skills/executing-plans
+
+# Executing Plans
+
+## Overview
+
+Load plan, review critically, execute tasks in batches, report for review between batches.
+
+**Core principle:** Batch execution with checkpoints for architect review.
+
+**Announce at start:** "I'm using the executing-plans skill to implement this plan."
+
+## The Process
+
+### Step 1: Load and Review Plan
+1. Read plan file
+2. Review critically - identify any questions or concerns about the plan
+3. If concerns: Raise them with your human partner before starting
+4. If no concerns: Create TodoWrite and proceed
+
+### Step 2: Execute Batch
+**Default: First 3 tasks**
+
+For each task:
+1. Mark as in_progress
+2. Follow each step exactly (plan has bite-sized steps)
+3. Run verifications as specified
+4. Mark as completed
+
+### Step 3: Report
+When batch complete:
+- Show what was implemented
+- Show verification output
+- Say: "Ready for feedback."
+
+### Step 4: Continue
+Based on feedback:
+- Apply changes if needed
+- Execute next batch
+- Repeat until complete
+
+### Step 5: Complete Development
+
+After all tasks complete and verified:
+- Announce: "I'm using the finishing-a-development-branch skill to complete this work."
+- **REQUIRED SUB-SKILL:** Use superpowers:finishing-a-development-branch
+- Follow that skill to verify tests, present options, execute choice
+
+## When to Stop and Ask for Help
+
+**STOP executing immediately when:**
+- Hit a blocker mid-batch (missing dependency, test fails, instruction unclear)
+- Plan has critical gaps preventing starting
+- You don't understand an instruction
+- Verification fails repeatedly
+
+**Ask for clarification rather than guessing.**
+
+## When to Revisit Earlier Steps
+
+**Return to Review (Step 1) when:**
+- Partner updates the plan based on your feedback
+- Fundamental approach needs rethinking
+
+**Don't force through blockers** - stop and ask.
+
+## Remember
+- Review plan critically first
+- Follow plan steps exactly
+- Don't skip verifications
+- Reference skills when plan says to
+- Between batches: just report and wait
+- Stop when blocked, don't guess
+
+---
+
+should I use the robostack channels of pixi?
+
+---
+
+ok, is there anything that I need to do specifically?
+
+---
+
+do I needto create my own channel? can't I use robostack?
+
+---
+
+what do I need here :
+
+---
+
+push it
+
+---
+
+done
+
+---
+
+retag 0.4.0 (remove local/remote, ag again, push)
+
+---
+
+fix this warning  remote: This repository moved. Please use the new location:                                                                                                                                                                                                                  
+     remote:   git@github.com:PlotJuggler/plotjuggler_bridge.git
+
+---
+
+conda package CI failed https://github.REDACTED
+
+---
+
+trigger it yourself
+
+---
+
+monitor it and tell me if it works or not
+
+---
+
+<task-notification>
+<task-id>b0os9uben</task-id>
+<tool-use-id>toolu_01UJM6L4xCkS1otHDBFiDA6e</tool-use-id>
+<output-file>/tmp/claude-1000/-home-davide-ws-plotjuggler-src-pj-ros-bridge/tasks/b0os9uben.output</output-file>
+<status>completed</status>
+<summary>Background command "Wait then check run status" completed (exit code 0)</summary>
+</task-notification>
+Read the output file to retrieve the result: /tmp/claude-1000/-home-davide-ws-plotjuggler-src-pj-ros-bridge/tasks/b0os9uben.output
+
+---
+
+<task-notification>
+<task-id>bwhl7b866</task-id>
+<tool-use-id>toolu_01LWgkQTSiJXMyAyXt7gEco1</tool-use-id>
+<output-file>REDACTED.output</output-file>
+<status>completed</status>
+<summary>Background command "Wait 60s then check status" completed (exit code 0)</summary>
+</task-notification>
+Read the output file to retrieve the result: REDACTED.output
+
+---
+
+<task-notification>
+<task-id>b32rlk1tf</task-id>
+<tool-use-id>toolu_01P9jdhMpGRpDHQnS8pfnhYS</tool-use-id>
+<output-file>REDACTED.output</output-file>
+<status>completed</status>
+<summary>Background command "Wait 90s then check status" completed (exit code 0)</summary>
+</task-notification>
+Read the output file to retrieve the result: REDACTED.output
+
+---
+
+<task-notification>
+<task-id>b9jozs3ff</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>REDACTED.output</output-file>
+<status>completed</status>
+<summary>Background command "Wait 100s then check status" completed (exit code 0)</summary>
+</task-notification>
+Read the output file to retrieve the result: REDACTED.output
+
+---
+
+<task-notification>
+<task-id>b76vx4m17</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>REDACTED.output</output-file>
+<status>completed</status>
+<summary>Background command "Wait 2min then check all-distro run" completed (exit code 0)</summary>
+</task-notification>
+Read the output file to retrieve the result: REDACTED.output
+
+---
+
+how do I know if my package is now available in pixi?
+
+---
+
+I don't see the AppImages being uploaded to the release, only the debian packages
+
+---
+
+can you trigger it manually and upload it to the release or am I oblige to retag?
+
+---
+
+download and upload
+
+---
+
+<task-notification>
+<task-id>bzza1mn24</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>REDACTED.output</output-file>
+<status>completed</status>
+<summary>Background command "Wait 2min then check appimage run" completed (exit code 0)</summary>
+</task-notification>
+Read the output file to retrieve the result: REDACTED.output
+
+---
+
+<task-notification>
+<task-id>bghuzeizz</task-id>
+<tool-use-id>toolu_01CpQDF46bAwChxpqik27wop</tool-use-id>
+<output-file>/tmp/claude-1000/-home-davide-ws-plotjuggler-src-pj-ros-bridge/tasks/bghuzeizz.output</output-file>
+<status>completed</status>
+<summary>Background command "Wait 2.5min then check appimage run" completed (exit code 0)</summary>
+</task-notification>
+Read the output file to retrieve the result: /tmp/claude-1000/-home-davide-ws-plotjuggler-src-pj-ros-bridge/tasks/bghuzeizz.output
+
+---
+
+how do I update the pixi version on my computer to test it again?
+
+---
+
+I want to downlaod 0.4.1
+
+---
+
+it is published
+
+---
+
+davide@davide-Katana:~/ws_plotjuggler/src/pj_ros_bridge$ pixi global install --channel https://prefix.dev/plotjuggler --channel robostack-humble --channel conda-forge pj-bridge-ros2-humble
+└── pj-bridge-ros2-humble: 0.4.0 (already installed)
+    └─ exposes: pj_bridge_ros2
+ but
+
+---
+
+pixi global upgrade pj-bridge-ros2-humble
+Error:   × `pixi global upgrade` has been removed, and will be re-added in future releases
+  ╰─▶ You can call `pixi global update` for most use cases
+
+---
+
+davide@davide-Katana:~/ws_plotjuggler/src/pj_ros_bridge$ pj_bridge_ros2 --ros-args -p port:=8080
+/home/davide/.pixi/envs/pj-bridge-ros2-humble/bin/pj_bridge_ros2: error while loading shared libraries: libsensor_msgs__rosidl_typesupport_cpp.so: cannot open shared object file: No such file or directory
+
+---
+
+analyze my software and tell me why I need those
+
+---
+
+recreate 0.4.1 with the fix
