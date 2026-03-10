@@ -1,0 +1,81 @@
+read README.md
+
+---
+
+make the default port 9090 in all the files and documentations
+
+---
+
+back to the readme. in "usage" add in order the case of pixi, AppImage, ros2 run, dastdds
+
+---
+
+in pixi, how to I change my parameters (port numebr for instance)?
+
+---
+
+to keep it more organize, move together the "how to build" and "how to run in the same sections
+
+---
+
+we just released this: https://prefix.dev/channels/plotjuggler. let create two different sections instead (I crated them): "Download and run" that describe how to download with pixi and run it, or download the AppImage from the release page and run it, and the section "Build instructions" that focus on building on pixi, colcon or fastdds with conan
+
+---
+
+add the instructions after # Run with custom port
+
+---
+
+davide@davide-Katana:~/ws_plotjuggler/src/pj_ros_bridge$ pixi global install pj-bridge-ros2-humble -c https://prefix.dev/plotjuggler -c robostack-staging -c conda-forge
+└── pj-bridge-ros2-humble: 0.4.0 (installed)
+    └─ exposes: Nothing
+davide@davide-Katana:~/ws_plotjuggler/src/pj_ros_bridge$ pj_bridge_ros2 --ros-args -p port:=8080
+
+---
+
+pj_bridge_ros2 --ros-args -p port:=8080
+/home/davide/.pixi/envs/pj-bridge-ros2-humble/lib/pj_bridge/pj_bridge_ros2: error while loading shared libraries: libsensor_msgs__rosidl_typesupport_cpp.so: cannot open shared object file: No such file or directory
+
+---
+
+can I fix my package to solve this problem?
+
+---
+
+search the internet. what is the recommended way in ros2?
+
+---
+
+fix the root cause, we will create a new package
+
+---
+
+read the file. how do I add the argument "port" to the appimage?
+
+---
+
+double check the current version of the document. any suggestion?
+
+---
+
+fix
+
+---
+
+review again
+
+---
+
+keep 9090
+
+---
+
+git-cola
+
+---
+
+this failed now https://github.REDACTED
+
+---
+
+commit and retag 0.4.1

@@ -1,0 +1,32 @@
+{
+  "cli_version": "0.4.2",
+  "checkpoint_id": "6abeba3e0562",
+  "session_id": "ec7c8c17-db25-4040-9d18-d6c7c7b5cc4a",
+  "strategy": "manual-commit",
+  "created_at": "2026-03-10T14:12:01.430367402Z",
+  "branch": "main",
+  "checkpoints_count": 2,
+  "files_touched": [
+    "conda.recipe/recipe.yaml"
+  ],
+  "agent": "Claude Code",
+  "transcript_identifier_at_start": "548afa9b-4db3-4770-8ad8-9f60a02943d1",
+  "checkpoint_transcript_start": 379,
+  "transcript_lines_at_start": 379,
+  "token_usage": {
+    "input_tokens": 17,
+    "cache_creation_tokens": 7919,
+    "cache_read_tokens": 1264737,
+    "output_tokens": 1748,
+    "api_call_count": 13
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-03-10T14:12:01.377768038Z",
+    "agent_lines": 1,
+    "human_added": 248,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 249,
+    "agent_percentage": 0.4016064257028112
+  }
+}
