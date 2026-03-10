@@ -17,10 +17,11 @@ independently.
 
 ### Key Features
 
-- **No DDS Required**: Clients connect via WebSocket (single port) without needing ROS2/DDS installed
-- **High Performance**: 50 Hz message aggregation with ZSTD compression
+- **No ROS required**: if you have PlotJuggler 3.16+ installed on your computer, you don't need ROS installed on it.
+- **No DDS Communication**: Clients connect via WebSocket (single port) without needing ROS2/DDS installed
+- **High Performance**: 50 Hz message aggregation with ZSTD compression. The original message timestamp is preserved, and less bandwidth is used.
 - **Multi-Client Support**: Multiple clients can connect simultaneously with shared subscriptions
-- **Runtime Schema Discovery**: Automatic extraction of message schemas from installed ROS2 packages
+- **Runtime Schema Discovery**: Automatic extraction of message schemas from installed ROS2 packages on the server side.
 - **Large Message Stripping**: Automatic stripping of large array fields (Image, PointCloud2, LaserScan, OccupancyGrid) to reduce bandwidth while preserving metadata
 
 ## CI Status
