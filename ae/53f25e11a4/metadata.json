@@ -1,0 +1,28 @@
+{
+  "cli_version": "0.4.2",
+  "checkpoint_id": "ae53f25e11a4",
+  "strategy": "manual-commit",
+  "branch": "main",
+  "checkpoints_count": 1,
+  "files_touched": [
+    ".github/workflows/appimage.yaml",
+    ".github/workflows/conda.yaml",
+    ".github/workflows/release-debs.yaml"
+  ],
+  "sessions": [
+    {
+      "metadata": "/ae/53f25e11a4/0/metadata.json",
+      "transcript": "/ae/53f25e11a4/0/full.jsonl",
+      "context": "/ae/53f25e11a4/0/context.md",
+      "content_hash": "/ae/53f25e11a4/0/content_hash.txt",
+      "prompt": "/ae/53f25e11a4/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 203,
+    "cache_creation_tokens": 176181,
+    "cache_read_tokens": 7776859,
+    "output_tokens": 43165,
+    "api_call_count": 154
+  }
+}
