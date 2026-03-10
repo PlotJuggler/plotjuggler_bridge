@@ -4,3 +4,7 @@ CMakeUserPresets.json
 /.obj-x86_64-linux-gnu/*
 /debian/*
 /build_*
+/AppDir/*
+/build/*
+/install/*
+/log/*

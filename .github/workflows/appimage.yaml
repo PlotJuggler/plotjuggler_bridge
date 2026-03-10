@@ -93,7 +93,7 @@ jobs:
           SELF="$(readlink -f "$0")"
           HERE="${SELF%/*}"
           export LD_LIBRARY_PATH="${HERE}/usr/lib:${LD_LIBRARY_PATH}"
-          export AMENT_PREFIX_PATH="${HERE}/usr${AMENT_PREFIX_PATH:+:$AMENT_PREFIX_PATH}"
+          export AMENT_PREFIX_PATH="${AMENT_PREFIX_PATH:+$AMENT_PREFIX_PATH:}${HERE}/usr"
           exec "${HERE}/usr/bin/pj_bridge_ros2" "$@"
           APPRUN
           chmod +x AppDir/AppRun
