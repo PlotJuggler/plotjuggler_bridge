@@ -67,7 +67,10 @@ jobs:
 
           # Copy message definitions (.msg/.srv/.idl files)
           for pkg_dir in "$CONDA_PREFIX"/share/*/msg "$CONDA_PREFIX"/share/*/srv; do
-            [ -d "$pkg_dir" ] && cp -r --parents "$pkg_dir" AppDir/usr/share/ 2>/dev/null || true
+            [ -d "$pkg_dir" ] || continue
+            pkg_name="$(basename "$(dirname "$pkg_dir")")"
+            mkdir -p "AppDir/usr/share/$pkg_name"
+            cp -r "$pkg_dir" "AppDir/usr/share/$pkg_name/"
           done
 
           # Create .desktop file
@@ -90,7 +93,7 @@ jobs:
           SELF="$(readlink -f "$0")"
           HERE="${SELF%/*}"
           export LD_LIBRARY_PATH="${HERE}/usr/lib:${LD_LIBRARY_PATH}"
-          export AMENT_PREFIX_PATH="${HERE}/usr"
+          export AMENT_PREFIX_PATH="${HERE}/usr${AMENT_PREFIX_PATH:+:$AMENT_PREFIX_PATH}"
           exec "${HERE}/usr/bin/pj_bridge_ros2" "$@"
           APPRUN
           chmod +x AppDir/AppRun
