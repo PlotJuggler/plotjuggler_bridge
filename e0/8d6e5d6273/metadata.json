@@ -3,7 +3,7 @@
   "checkpoint_id": "e08d6e5d6273",
   "strategy": "manual-commit",
   "branch": "main",
-  "checkpoints_count": 0,
+  "checkpoints_count": 1,
   "files_touched": [
     ".github/workflows/appimage.yaml",
     ".github/workflows/conda.yaml",
@@ -16,13 +16,20 @@
       "context": "/e0/8d6e5d6273/0/context.md",
       "content_hash": "/e0/8d6e5d6273/0/content_hash.txt",
       "prompt": "/e0/8d6e5d6273/0/prompt.txt"
+    },
+    {
+      "metadata": "/e0/8d6e5d6273/1/metadata.json",
+      "transcript": "/e0/8d6e5d6273/1/full.jsonl",
+      "context": "/e0/8d6e5d6273/1/context.md",
+      "content_hash": "/e0/8d6e5d6273/1/content_hash.txt",
+      "prompt": "/e0/8d6e5d6273/1/prompt.txt"
     }
   ],
   "token_usage": {
-    "input_tokens": 18,
-    "cache_creation_tokens": 17473,
-    "cache_read_tokens": 1187898,
-    "output_tokens": 4710,
-    "api_call_count": 10
+    "input_tokens": 39,
+    "cache_creation_tokens": 37521,
+    "cache_read_tokens": 1553627,
+    "output_tokens": 6576,
+    "api_call_count": 23
   }
 }
