@@ -1,5 +1,5 @@
 context:
-  version: "0.4.1"
+  version: "0.4.2"
 
 package:
   name: pj-bridge-ros2-${{ ros_distro }}
@@ -49,6 +49,7 @@ requirements:
     - ixwebsocket
     - spdlog
     - zstd
+    - zlib
 
 tests:
   - package_contents:
