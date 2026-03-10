@@ -16,6 +16,7 @@ build:
       -GNinja \
       -DCMAKE_BUILD_TYPE=Release \
       -DCMAKE_INSTALL_PREFIX=$PREFIX \
+      -DBUILD_TESTING=OFF \
       -S . -B build
     cmake --build build --target install
 
