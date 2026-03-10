@@ -1,0 +1,31 @@
+{
+  "cli_version": "0.4.2",
+  "checkpoint_id": "e192bd64bf42",
+  "strategy": "manual-commit",
+  "branch": "main",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "conda.recipe/variants.yaml",
+    "output/.condapackageignore",
+    "output/linux-64/pj-bridge-ros2-humble-0.4.3-hee40719_0.conda",
+    "output/linux-64/repodata.json",
+    "output/noarch/repodata.json",
+    "output/rattler-build-log.txt"
+  ],
+  "sessions": [
+    {
+      "metadata": "/e1/92bd64bf42/0/metadata.json",
+      "transcript": "/e1/92bd64bf42/0/full.jsonl",
+      "context": "/e1/92bd64bf42/0/context.md",
+      "content_hash": "/e1/92bd64bf42/0/content_hash.txt",
+      "prompt": "/e1/92bd64bf42/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 25,
+    "cache_creation_tokens": 18010,
+    "cache_read_tokens": 735877,
+    "output_tokens": 3385,
+    "api_call_count": 19
+  }
+}
