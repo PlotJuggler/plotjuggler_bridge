@@ -82,11 +82,8 @@ jobs:
         shell: bash
         run: |
           shopt -s nullglob globstar
-          EXIT_CODE=0
           for pkg in artifacts/**/*.conda artifacts/**/*.tar.bz2; do
             echo "Uploading ${pkg}"
-            if ! rattler-build upload prefix --force -c plotjuggler "${pkg}"; then
-              EXIT_CODE=1
-            fi
+            rattler-build upload prefix --force -c plotjuggler "${pkg}" || \
+              echo "::warning::Failed to upload ${pkg} (may already exist on prefix.dev)"
           done
-          exit $EXIT_CODE
