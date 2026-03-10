@@ -1,0 +1,35 @@
+{
+  "cli_version": "0.4.2",
+  "checkpoint_id": "b531b04d554b",
+  "strategy": "manual-commit",
+  "branch": "main",
+  "checkpoints_count": 13,
+  "files_touched": [
+    "CLAUDE.md",
+    "README.md",
+    "app/include/pj_bridge/bridge_server.hpp",
+    "conda.recipe/recipe.yaml",
+    "docs/API.md",
+    "docs/ARCHITECTURE.md",
+    "fastdds/src/main.cpp",
+    "launch/test_topics.launch.py",
+    "rti/src/main.cpp",
+    "tests/integration/test_client.py"
+  ],
+  "sessions": [
+    {
+      "metadata": "/b5/31b04d554b/0/metadata.json",
+      "transcript": "/b5/31b04d554b/0/full.jsonl",
+      "context": "/b5/31b04d554b/0/context.md",
+      "content_hash": "/b5/31b04d554b/0/content_hash.txt",
+      "prompt": "/b5/31b04d554b/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 107,
+    "cache_creation_tokens": 92801,
+    "cache_read_tokens": 4213896,
+    "output_tokens": 19949,
+    "api_call_count": 68
+  }
+}
