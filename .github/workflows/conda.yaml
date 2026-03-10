@@ -4,6 +4,17 @@ on:
   push:
     tags: ['*']
   workflow_dispatch:
+    inputs:
+      ros_distro:
+        description: 'ROS distro to build (leave empty for all)'
+        required: false
+        type: choice
+        options:
+          - all
+          - humble
+          - jazzy
+          - kilted
+        default: all
 
 permissions:
   contents: read
@@ -27,6 +38,9 @@ jobs:
             robostack_channel: robostack-kilted
     runs-on: ubuntu-latest
     name: conda-${{ matrix.ros_distro }}
+    if: >-
+      inputs.ros_distro == '' || inputs.ros_distro == 'all'
+      || inputs.ros_distro == matrix.ros_distro
 
     steps:
       - uses: actions/checkout@v4
