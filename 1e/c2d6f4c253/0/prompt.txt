@@ -1,0 +1,87 @@
+Implement the following plan:
+
+# Plan: Fix Conda Recipe Run Dependencies & Republish
+
+## Context
+
+The 0.4.1 conda packages published to prefix.dev are broken — `sensor_msgs` and `nav_msgs` were missing from run deps, causing `pj_bridge_ros2` to fail at startup with shared library errors. We fixed the recipe locally but can't re-upload 0.4.1 (prefix.dev rejects same filename with different hash). Need to bump version and republish.
+
+Additionally, an audit revealed `zlib` is missing from run deps (linked dynamically via FetchContent'd ixwebsocket).
+
+## Changes
+
+### File: `conda.recipe/recipe.yaml`
+
+1. **Bump version** `0.4.1` → `0.4.2`
+2. **Add `zlib` to run deps** — binary links `libz.so.1` dynamically (used by IXWebSocket built via FetchContent)
+
+Current run deps (already fixed locally but not published):
+```yaml
+run:
+  - ros-${{ ros_distro }}-rclcpp          # ✅ already there
+  - ros-${{ ros_distro }}-ament-index-cpp # ✅ already there
+  - ros-${{ ros_distro }}-sensor-msgs     # ✅ just added (linked via MessageStripper)
+  - ros-${{ ros_distro }}-nav-msgs        # ✅ just added (linked via MessageStripper)
+  - ixwebsocket                           # harmless (FetchContent used, but ok)
+  - spdlog                                # ✅
+  - zstd                                  # ✅
+  - zlib                                  # ← ADD (libz.so.1 linked by ixwebsocket)
+```
+
+**Not adding explicitly** (transitive, verified in pixi.lock):
+- `rmw-cyclonedds-cpp` — pulled transitively by `rclcpp` via robostack
+- `rcpputils` — pulled transitively by `rclcpp`
+- `openssl` — not linked (ixwebsocket built without TLS in our config)
+
+## Verification
+
+1. Commit, tag `0.4.2`, push → conda CI builds + publishes
+2. `pixi global update pj-bridge-ros2-humble` → verify 0.4.2 installed
+3. `pj_bridge_ros2 --ros-args -p port:=8080` → verify it starts without library errors
+
+
+If you need specific details from before exiting plan mode (like exact code snippets, error messages, or content you generated), read the full transcript at: /home/davide/.REDACTED.jsonl
+
+---
+
+ixwebsocket is present in pixi. double check
+
+---
+
+did you push 0.4.2?
+
+---
+
+yes
+
+---
+
+/home/davide/.pixi/envs/pj-bridge-ros2-humble/bin/pj_bridge_ros2: /lib/x86_64-linux-gnu/libc.so.6: version `GLIBC_2.38' not found (required by /home/davide/.pixi/envs/pj-bridge-ros2-humble/bin/pj_bridge_ros2)
+
+---
+
+[Request interrupted by user for tool use]
+
+---
+
+before you push. is there any way to check locally instead of creating packages and cross our fingers?
+
+---
+
+push the new tag
+
+---
+
+tell me how to delete all packages from channel I do notwant to keep the there
+
+---
+
+https://github.REDACTED
+
+---
+
+we have two pipelines that will push to release, but this fails if it arrives first. finda fix
+
+---
+
+yes

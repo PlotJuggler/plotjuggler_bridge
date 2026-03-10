@@ -1,0 +1,26 @@
+{
+  "cli_version": "0.4.2",
+  "checkpoint_id": "1ec2d6f4c253",
+  "strategy": "manual-commit",
+  "branch": "main",
+  "checkpoints_count": 1,
+  "files_touched": [
+    ".github/workflows/appimage.yaml"
+  ],
+  "sessions": [
+    {
+      "metadata": "/1e/c2d6f4c253/0/metadata.json",
+      "transcript": "/1e/c2d6f4c253/0/full.jsonl",
+      "context": "/1e/c2d6f4c253/0/context.md",
+      "content_hash": "/1e/c2d6f4c253/0/content_hash.txt",
+      "prompt": "/1e/c2d6f4c253/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 29,
+    "cache_creation_tokens": 10446,
+    "cache_read_tokens": 1036606,
+    "output_tokens": 2593,
+    "api_call_count": 19
+  }
+}
