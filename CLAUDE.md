@@ -135,7 +135,7 @@ BridgeServer does NOT own timers. The entry point (`main.cpp`) drives the event 
 
 ### Communication Pattern
 
-**WebSocket** (single port, default 8080):
+**WebSocket** (single port, default 9090):
 - **Text frames**: JSON API commands and responses (get_topics, subscribe, heartbeat, pause, resume, unsubscribe)
 - **Binary frames**: ZSTD-compressed aggregated message stream
 
@@ -220,7 +220,7 @@ pre-commit run -a
 
 ### ROS2 (via `--ros-args -p`):
 ```yaml
-port: 8080                  # WebSocket port
+port: 9090                  # WebSocket port
 publish_rate: 50.0          # Hz
 session_timeout: 10.0       # seconds
 strip_large_messages: true  # Strip Image/PointCloud2/etc data fields
@@ -228,12 +228,12 @@ strip_large_messages: true  # Strip Image/PointCloud2/etc data fields
 
 ### RTI (via CLI flags):
 ```bash
-pj_bridge_rti --domains 0 1 --port 8080 --publish-rate 50 --session-timeout 10
+pj_bridge_rti --domains 0 1 --port 9090 --publish-rate 50 --session-timeout 10
 ```
 
 ### FastDDS (via CLI flags):
 ```bash
-pj_bridge_fastdds --domains 0 1 --port 8080 --publish-rate 50 --session-timeout 10
+pj_bridge_fastdds --domains 0 1 --port 9090 --publish-rate 50 --session-timeout 10
 ```
 
 ## Important Design Decisions

@@ -32,14 +32,14 @@ int main(int argc, char* argv[]) {
   CLI::App app{"pj_bridge eProsima FastDDS Backend"};
 
   std::vector<int32_t> domain_ids;
-  int port = 8080;
+  int port = 9090;
   double publish_rate = 50.0;
   double session_timeout = 10.0;
   std::string log_level = "info";
   bool stats_enabled = false;
 
   app.add_option("--domains,-d", domain_ids, "DDS domain IDs")->required()->expected(1, -1);
-  app.add_option("--port,-p", port, "WebSocket port")->default_val(8080)->check(CLI::Range(1, 65535));
+  app.add_option("--port,-p", port, "WebSocket port")->default_val(9090)->check(CLI::Range(1, 65535));
   app.add_option("--publish-rate", publish_rate, "Aggregation publish rate in Hz")->default_val(50.0);
   app.add_option("--session-timeout", session_timeout, "Session timeout in seconds")->default_val(10.0);
   app.add_option("--log-level", log_level, "Log level (trace, debug, info, warn, error)")->default_val("info");

@@ -30,7 +30,7 @@ class BridgeClient:
     HEADER_SIZE = 16
     MAGIC_PJRB = 0x42524A50  # "PJRB" in ASCII (little-endian)
 
-    def __init__(self, host="localhost", port=8080):
+    def __init__(self, host="localhost", port=9090):
         """
         Initialize the bridge client
 
@@ -370,8 +370,8 @@ def main():
     parser.add_argument(
         "--port",
         type=int,
-        default=8080,
-        help="WebSocket port (default: 8080)",
+        default=9090,
+        help="WebSocket port (default: 9090)",
     )
     parser.add_argument(
         "--command",

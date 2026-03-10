@@ -19,6 +19,9 @@ build:
       -DBUILD_TESTING=OFF \
       -S . -B build
     cmake --build build --target install
+    # Symlink into bin/ so pixi global install auto-exposes the executable
+    mkdir -p $PREFIX/bin
+    ln -sf ../lib/pj_bridge/pj_bridge_ros2 $PREFIX/bin/pj_bridge_ros2
 
 requirements:
   build:
@@ -49,6 +52,7 @@ tests:
   - package_contents:
       files:
         - lib/pj_bridge/pj_bridge_ros2
+        - bin/pj_bridge_ros2
 
 about:
   homepage: https://github.com/PlotJuggler/plotjuggler_bridge

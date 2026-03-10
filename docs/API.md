@@ -1,6 +1,6 @@
 # API Protocol
 
-`pj_ros_bridge` uses a single WebSocket port (default 8080). Text frames carry JSON API requests/responses; binary frames carry ZSTD-compressed aggregated message data.
+`pj_ros_bridge` uses a single WebSocket port (default 9090). Text frames carry JSON API requests/responses; binary frames carry ZSTD-compressed aggregated message data.
 
 ## Request IDs and Protocol Version
 

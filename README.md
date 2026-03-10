@@ -4,7 +4,7 @@
 
 A high-performance bridge server that forwards middleware topic content over WebSocket to PlotJuggler clients. Three backends share a common core:
 
-- **ROS2** (`pj_bridge_ros2`) — ROS2 Humble / Jazzy via `rclcpp`
+- **ROS2** (`pj_bridge_ros2`) — ROS2 Humble / Jazzy / Kilted via `rclcpp`
 - **FastDDS** (`pj_bridge_fastdds`) — eProsima Fast DDS 3.4 (standalone, no ROS2 required)
 - **RTI** (`pj_bridge_rti`) — RTI Connext DDS (build disabled, code preserved)
 
@@ -20,51 +20,82 @@ independently.
 - **No DDS Required**: Clients connect via WebSocket (single port) without needing ROS2/DDS installed
 - **High Performance**: 50 Hz message aggregation with ZSTD compression
 - **Multi-Client Support**: Multiple clients can connect simultaneously with shared subscriptions
-- **Session Management**: Automatic cleanup of disconnected clients via heartbeat monitoring and WebSocket close events
 - **Runtime Schema Discovery**: Automatic extraction of message schemas from installed ROS2 packages
-- **Zero-Copy Design**: Efficient message handling using shared pointers and move semantics
 - **Large Message Stripping**: Automatic stripping of large array fields (Image, PointCloud2, LaserScan, OccupancyGrid) to reduce bandwidth while preserving metadata
-- **Type-Safe Error Handling**: Comprehensive error reporting using `tl::expected`
 
-## Architecture
-
-For detailed architecture documentation, see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
-
-## Building
+## CI Status
 
 |  | Humble | Jazzy | Kilted |
 |--|--------|-------|--------|
 | **Pixi** | [![Pixi: Humble](https://github.com/PlotJuggler/plotjuggler_bridge/actions/workflows/pixi_humble.yaml/badge.svg?branch=main)](https://github.com/PlotJuggler/plotjuggler_bridge/actions/workflows/pixi_humble.yaml) | [![Pixi: Jazzy](https://github.com/PlotJuggler/plotjuggler_bridge/actions/workflows/pixi_jazzy.yaml/badge.svg?branch=main)](https://github.com/PlotJuggler/plotjuggler_bridge/actions/workflows/pixi_jazzy.yaml) | [![Pixi: Kilted](https://github.com/PlotJuggler/plotjuggler_bridge/actions/workflows/pixi_kilted.yaml/badge.svg?branch=main)](https://github.com/PlotJuggler/plotjuggler_bridge/actions/workflows/pixi_kilted.yaml) |
 | **colcon** | [![ROS: Humble](https://github.com/PlotJuggler/plotjuggler_bridge/actions/workflows/ros_humble.yaml/badge.svg?branch=main)](https://github.com/PlotJuggler/plotjuggler_bridge/actions/workflows/ros_humble.yaml) | [![ROS: Jazzy](https://github.com/PlotJuggler/plotjuggler_bridge/actions/workflows/ros_jazzy.yaml/badge.svg?branch=main)](https://github.com/PlotJuggler/plotjuggler_bridge/actions/workflows/ros_jazzy.yaml) | [![ROS: Kilted](https://github.com/PlotJuggler/plotjuggler_bridge/actions/workflows/ros_kilted.yaml/badge.svg?branch=main)](https://github.com/PlotJuggler/plotjuggler_bridge/actions/workflows/ros_kilted.yaml) |
 
+## Configuration Parameters
 
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `port` | int | 9090 | WebSocket server port |
+| `publish_rate` | double | 50.0 | Aggregation publish rate in Hz |
+| `session_timeout` | double | 10.0 | Client timeout duration in seconds |
+| `strip_large_messages` | bool | true | Strip large arrays from Image, PointCloud2, LaserScan, OccupancyGrid messages |
+
+## Just "Download and Run"
+
+### Pixi
+
+Install the pre-built package from the [PlotJuggler conda channel](https://prefix.dev/channels/plotjuggler) — no build step required.
+
+```bash
+# Install (change humble to jazzy or kilted as needed)
+pixi global install pj-bridge-ros2-humble \
+  -c https://prefix.dev/plotjuggler -c robostack-staging -c conda-forge
+
+# Run (add arguments if different from default)
+pj_bridge_ros2 --ros-args -p port:=9090
+```
+
+### AppImage
+
+Pre-built AppImages are available from [GitHub Releases](https://github.com/PlotJuggler/plotjuggler_bridge/releases).
+
+Example for ROS2 Humble:
+
+```bash
+# Do once after downloading the file
+chmod +x pj_bridge_ros2-humble-x86_64.AppImage
+
+# Run (add arguments if different from default)
+./pj_bridge_ros2-humble-x86_64.AppImage --ros-args -p port:=9090
+```
+
+## Build Instructions
 
 All dependencies (IXWebSocket, spdlog, nlohmann_json, ZSTD) are provided by the dependency manager — nothing is vendored except `tl::expected`.
 
-### ROS2 backend — Pixi (recommended)
+### ROS2 — Pixi
 
 [Pixi](https://pixi.sh) manages the full toolchain including ROS2 via [RoboStack](https://robostack.github.io/).
 
-```bash
-git clone <repository_url> pj_bridge && cd pj_bridge
+From the cloned **plotjuggler_bridge** directory:
 
-# Humble
+```bash
+# Build and test (change humble to jazzy or kilted as needed)
 pixi run -e humble build
 pixi run -e humble test
 
-# Jazzy
-pixi run -e jazzy build
-pixi run -e jazzy test
+# Run
+pixi shell -e humble
+ros2 run pj_bridge pj_bridge_ros2
 ```
 
-### ROS2 backend — colcon
+### ROS2 — colcon
 
 Standard ROS2 build using `colcon`. Dependencies are installed via `rosdep`; only IXWebSocket is fetched automatically via CMake FetchContent.
 
 ```bash
 # Set up workspace
 mkdir -p ~/ws_plotjuggler/src && cd ~/ws_plotjuggler/src
-git clone <repository_url> pj_bridge
+git clone https://github.com/PlotJuggler/plotjuggler_bridge && cd plotjuggler_bridge
 
 # Install dependencies
 source /opt/ros/${ROS_DISTRO}/setup.bash
@@ -74,77 +105,33 @@ rosdep install --from-paths pj_bridge --ignore-src -y
 cd ~/ws_plotjuggler
 colcon build --packages-select pj_bridge --cmake-args -DCMAKE_BUILD_TYPE=Release
 colcon test --packages-select pj_bridge && colcon test-result --verbose
+
+# Run
+source install/setup.bash
+ros2 run pj_bridge pj_bridge_ros2
 ```
 
-### FastDDS backend — Conan
+### FastDDS — Conan
+
+Standalone build using eProsima Fast DDS (no ROS2 required).
+
+From the cloned **plotjuggler_bridge** directory:
 
 ```bash
-cd pj_bridge
+# Build
 conan install . --output-folder=build_fastdds --build=missing -s build_type=Release
 cd build_fastdds
 cmake .. -DCMAKE_BUILD_TYPE=Release -DENABLE_FASTDDS=ON \
          -DCMAKE_TOOLCHAIN_FILE=conan_toolchain.cmake
 make -j$(nproc)
+
+# Run
+./pj_bridge_fastdds --domains 0 1
 ```
 
-### Running Tests
+## Documentation
 
-```bash
-# Via pixi (154 unit tests)
-pixi run -e humble test
-
-# Or manually after building
-colcon test --packages-select pj_bridge && colcon test-result --verbose
-```
-
-## Usage
-
-### Starting the Server
-
-#### ROS2 backend
-
-```bash
-# Default (port 8080, 50 Hz, 10 s timeout)
-ros2 run pj_bridge pj_bridge_ros2
-
-# Custom
-ros2 run pj_bridge pj_bridge_ros2 --ros-args \
-  -p port:=9090 -p publish_rate:=50.0 -p session_timeout:=10.0
-```
-
-#### FastDDS backend
-
-```bash
-pj_bridge_fastdds --domains 0 1 --port 8080 --publish-rate 50 --session-timeout 10
-```
-
-### Configuration Parameters
-
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `port` | int | 9090 | WebSocket server port |
-| `publish_rate` | double | 50.0 | Aggregation publish rate in Hz |
-| `session_timeout` | double | 10.0 | Client timeout duration in seconds |
-| `strip_large_messages` | bool | true | Strip large arrays from Image, PointCloud2, LaserScan, OccupancyGrid messages |
-
-### Testing with Sample Data
-
-```bash
-# Terminal 1: Play rosbag
-source /opt/ros/humble/setup.bash
-ros2 bag play /path/to/sample.mcap --loop
-
-# Terminal 2: Run server
-source /opt/ros/humble/setup.bash
-source ~/ws_plotjuggler/install/setup.bash
-ros2 run pj_bridge pj_bridge_node
-
-# Terminal 3: Run Python test client
-cd ~/ws_plotjuggler/src/pj_bridge
-python3 tests/integration/test_client.py --subscribe /topic1 /topic2
-```
-
-## API Protocol
+- For detailed architecture documentation, see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 For the full API protocol documentation (commands, responses, binary wire format), see [docs/API.md](docs/API.md).
 
@@ -155,7 +142,7 @@ For the full API protocol documentation (commands, responses, binary wire format
 Another process is using the port. Either kill the conflicting process or use a custom port:
 
 ```bash
-ros2 run pj_bridge pj_bridge_node --ros-args -p port:=9090
+ros2 run pj_bridge pj_bridge_ros2 --ros-args -p port:=9090
 ```
 
 ### Client receives no data
@@ -163,7 +150,7 @@ ros2 run pj_bridge pj_bridge_node --ros-args -p port:=9090
 1. Verify server is running: `ps aux | grep pj_bridge`
 2. Check topics are being published: `ros2 topic list`
 3. Verify heartbeat is being sent (required every 1 second)
-4. Check server logs: `ros2 run pj_bridge pj_bridge_node --ros-args --log-level debug`
+4. Check server logs: `ros2 run pj_bridge pj_bridge_ros2 --ros-args --log-level debug`
 
 ### "Failed to get schema for topic" error
 
@@ -178,7 +165,7 @@ ros2 interface show <package_name>/msg/<MessageType>
 The client stopped sending heartbeats. Ensure the client sends a heartbeat every 1 second. The default timeout is 10 seconds. Increase if needed:
 
 ```bash
-ros2 run pj_bridge pj_bridge_node --ros-args -p session_timeout:=20.0
+ros2 run pj_bridge pj_bridge_ros2 --ros-args -p session_timeout:=20.0
 ```
 
 ## License

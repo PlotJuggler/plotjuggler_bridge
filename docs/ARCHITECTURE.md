@@ -28,7 +28,7 @@ pj_bridge is a multi-backend bridge server that forwards middleware topic data o
 
 ## Communication Pattern
 
-Single WebSocket port (default 8080), two frame types:
+Single WebSocket port (default 9090), two frame types:
 
 - **Text frames**: JSON API requests and responses (`get_topics`, `subscribe`, `unsubscribe`, `heartbeat`, `pause`, `resume`)
 - **Binary frames**: ZSTD-compressed aggregated message stream, sent per-client based on their subscriptions

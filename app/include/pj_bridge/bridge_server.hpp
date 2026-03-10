@@ -60,14 +60,14 @@ class BridgeServer {
    * @param topic_source Backend-specific topic discovery and schema provider
    * @param subscription_manager Backend-specific subscription manager
    * @param middleware Middleware interface for network communication
-   * @param port Server port (default: 8080)
+   * @param port Server port (default: 9090)
    * @param session_timeout Session timeout in seconds (default: 10.0)
    * @param publish_rate Message aggregation publish rate in Hz (default: 50.0)
    */
   explicit BridgeServer(
       std::shared_ptr<TopicSourceInterface> topic_source,
       std::shared_ptr<SubscriptionManagerInterface> subscription_manager,
-      std::shared_ptr<MiddlewareInterface> middleware, int port = 8080, double session_timeout = 10.0,
+      std::shared_ptr<MiddlewareInterface> middleware, int port = 9090, double session_timeout = 10.0,
       double publish_rate = 50.0);
 
   /// Shuts down middleware before members are destroyed, preventing

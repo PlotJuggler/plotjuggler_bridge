@@ -36,7 +36,7 @@ int main(int argc, char** argv) {
   RCLCPP_INFO(node->get_logger(), "Starting pj_bridge (ROS2 backend)...");
 
   // Declare and get parameters
-  node->declare_parameter<int>("port", 8080);
+  node->declare_parameter<int>("port", 9090);
   node->declare_parameter<double>("publish_rate", 50.0);
   node->declare_parameter<double>("session_timeout", 10.0);
   node->declare_parameter<bool>("strip_large_messages", true);
