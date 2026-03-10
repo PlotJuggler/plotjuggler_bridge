@@ -1,0 +1,31 @@
+{
+  "cli_version": "0.4.2",
+  "checkpoint_id": "f52b7c6b3ab6",
+  "session_id": "241c7238-b902-4e25-8149-ce4dfd57d1bb",
+  "strategy": "manual-commit",
+  "created_at": "2026-03-10T12:37:06.824303826Z",
+  "branch": "main",
+  "checkpoints_count": 1,
+  "files_touched": [
+    ".github/workflows/conda.yaml",
+    "conda.recipe/recipe.yaml"
+  ],
+  "agent": "Claude Code",
+  "transcript_identifier_at_start": "2d6c5e64-5632-4929-a436-a55c7e001d0b",
+  "token_usage": {
+    "input_tokens": 68,
+    "cache_creation_tokens": 49579,
+    "cache_read_tokens": 1684137,
+    "output_tokens": 9629,
+    "api_call_count": 41
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-03-10T12:37:06.80231564Z",
+    "agent_lines": 14,
+    "human_added": 187,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 201,
+    "agent_percentage": 6.965174129353234
+  }
+}
