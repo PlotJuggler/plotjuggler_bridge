@@ -1,5 +1,5 @@
 context:
-  version: "0.4.3"
+  version: "0.5.0"
 
 package:
   name: pj-bridge-ros2-${{ ros_distro }}
