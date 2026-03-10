@@ -46,6 +46,16 @@ jobs:
           apt-get update
           apt-get install -y python3-bloom fakeroot debhelper dh-python
 
+      - name: Install IXWebSocket from source
+        run: |
+          cd /tmp
+          wget -q https://github.com/machinezone/IXWebSocket/archive/refs/tags/v11.4.6.tar.gz
+          tar xzf v11.4.6.tar.gz
+          cd IXWebSocket-11.4.6
+          cmake -B build -DCMAKE_BUILD_TYPE=Release -DUSE_TLS=OFF -DUSE_ZLIB=ON
+          cmake --build build -j$(nproc)
+          cmake --install build
+
       - name: Install ROS dependencies
         shell: bash
         run: |

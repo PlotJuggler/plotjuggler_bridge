@@ -41,8 +41,8 @@ jobs:
           # Create AppDir structure
           mkdir -p AppDir/usr/{bin,lib,share}
 
-          # Copy binary
-          cp install/lib/pj_bridge/pj_bridge_ros2 AppDir/usr/bin/
+          # Copy binary (colcon isolated-install layout)
+          cp install/pj_bridge/lib/pj_bridge/pj_bridge_ros2 AppDir/usr/bin/
 
           # Bundle shared libraries from the conda environment
           # (exclude glibc/ld-linux which must come from the host)
