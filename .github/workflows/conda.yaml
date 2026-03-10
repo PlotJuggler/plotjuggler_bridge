@@ -1,0 +1,72 @@
+name: Conda Packages
+
+on:
+  push:
+    tags: ['*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write  # Required for OIDC trusted publishing
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - ros_distro: humble
+            robostack_channel: robostack-humble
+          - ros_distro: jazzy
+            robostack_channel: robostack-jazzy
+          - ros_distro: kilted
+            robostack_channel: robostack-kilted
+    runs-on: ubuntu-latest
+    name: conda-${{ matrix.ros_distro }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build conda package
+        uses: prefix-dev/rattler-build-action@v0.2.36
+        with:
+          recipe-path: conda.recipe/recipe.yaml
+          artifact-name: conda-${{ matrix.ros_distro }}
+          build-args: >
+            --variant ros_distro=${{ matrix.ros_distro }}
+            -c ${{ matrix.robostack_channel }}
+            -c conda-forge
+
+  publish:
+    name: Upload to prefix.dev
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: prefix-dev/rattler-build-action@v0.2.36
+        with:
+          setup-only: true
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          pattern: conda-*
+          merge-multiple: false
+
+      - name: Upload to prefix.dev
+        shell: bash
+        run: |
+          shopt -s nullglob globstar
+          EXIT_CODE=0
+          for pkg in artifacts/**/*.conda artifacts/**/*.tar.bz2; do
+            echo "Uploading ${pkg}"
+            if ! rattler-build upload prefix -c plotjuggler "${pkg}"; then
+              EXIT_CODE=1
+            fi
+          done
+          exit $EXIT_CODE
