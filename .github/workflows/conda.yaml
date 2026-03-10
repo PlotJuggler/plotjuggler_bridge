@@ -25,22 +25,28 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set.outputs.matrix }}
+    steps:
+      - id: set
+        run: |
+          if [[ "$DISTRO" == "all" || -z "$DISTRO" ]]; then
+            echo 'matrix={"include":[{"ros_distro":"humble","robostack_channel":"robostack-humble"},{"ros_distro":"jazzy","robostack_channel":"robostack-jazzy"},{"ros_distro":"kilted","robostack_channel":"robostack-kilted"}]}' >> "$GITHUB_OUTPUT"
+          else
+            echo "matrix={\"include\":[{\"ros_distro\":\"$DISTRO\",\"robostack_channel\":\"robostack-$DISTRO\"}]}" >> "$GITHUB_OUTPUT"
+          fi
+        env:
+          DISTRO: ${{ inputs.ros_distro }}
+
   build:
+    needs: setup
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - ros_distro: humble
-            robostack_channel: robostack-humble
-          - ros_distro: jazzy
-            robostack_channel: robostack-jazzy
-          - ros_distro: kilted
-            robostack_channel: robostack-kilted
+      matrix: ${{ fromJson(needs.setup.outputs.matrix) }}
     runs-on: ubuntu-latest
     name: conda-${{ matrix.ros_distro }}
-    if: >-
-      inputs.ros_distro == '' || inputs.ros_distro == 'all'
-      || inputs.ros_distro == matrix.ros_distro
 
     steps:
       - uses: actions/checkout@v4
