@@ -114,9 +114,27 @@ jobs:
           name: appimage-${{ matrix.environment }}
           path: "*.AppImage"
 
-      - name: Upload to GitHub Release
-        if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
+  release:
+    needs: appimage
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
         with:
-          tag_name: ${{ github.ref_name }}
-          files: "*.AppImage"
+          path: artifacts
+          pattern: appimage-*
+          merge-multiple: true
+
+      - name: Upload to GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          tag="${{ github.ref_name }}"
+          # Create release if it doesn't exist yet
+          gh release view "$tag" >/dev/null 2>&1 || \
+            gh release create "$tag" --title "$tag" --generate-notes || true
+          # Upload assets (--clobber overwrites if re-run)
+          gh release upload "$tag" artifacts/*.AppImage --clobber

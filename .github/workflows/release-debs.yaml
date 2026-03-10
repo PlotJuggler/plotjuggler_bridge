@@ -100,22 +100,6 @@ jobs:
       contents: write
 
     steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Determine release tag
-        id: tag
-        run: |
-          if [[ "${{ github.ref_type }}" == "tag" ]]; then
-            echo "name=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
-            echo "prerelease=false" >> "$GITHUB_OUTPUT"
-          else
-            LATEST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "0.0.0")
-            echo "name=${LATEST_TAG}-dev" >> "$GITHUB_OUTPUT"
-            echo "prerelease=true" >> "$GITHUB_OUTPUT"
-          fi
-
       - name: Download all deb artifacts
         uses: actions/download-artifact@v4
         with:
@@ -123,14 +107,14 @@ jobs:
           pattern: deb-*
           merge-multiple: true
 
-      - name: List artifacts
-        run: ls -lh debs/
-
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ steps.tag.outputs.name }}
-          name: ${{ steps.tag.outputs.name }}
-          prerelease: ${{ steps.tag.outputs.prerelease }}
-          generate_release_notes: true
-          files: debs/*.deb
+      - name: Upload to GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          tag="${{ github.ref_name }}"
+          # Create release if it doesn't exist yet
+          gh release view "$tag" >/dev/null 2>&1 || \
+            gh release create "$tag" --title "$tag" --generate-notes || true
+          # Upload assets (--clobber overwrites if re-run)
+          gh release upload "$tag" debs/*.deb --clobber
