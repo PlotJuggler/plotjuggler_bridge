@@ -45,7 +45,7 @@ make -j$(nproc)
 
 ### External Dependencies
 
-- **IXWebSocket** — vendored in `3rdparty/ixwebsocket`
+- **IXWebSocket** — `find_package` first, FetchContent fallback
 - **spdlog** — system package preferred (for ROS2 ABI compatibility with `librcl_logging_spdlog`); FetchContent fallback for standalone builds
 - **ZSTD** — system package (`libzstd-dev`)
 - **CLI11** — FetchContent (RTI backend only)
@@ -168,9 +168,9 @@ For each message (streamed, no header):
 ### Core (always required)
 - **ZSTD** — compression (`libzstd-dev`)
 - **spdlog** — logging (system package or FetchContent)
-- **IXWebSocket** — WebSocket (vendored in 3rdparty/)
-- **nlohmann/json** — JSON (header-only, in 3rdparty/)
-- **tl::expected** — error handling (header-only, in 3rdparty/)
+- **IXWebSocket** — WebSocket (`find_package` first, FetchContent fallback)
+- **nlohmann/json** — JSON (`find_package(REQUIRED)`)
+- **tl::expected** — error handling (header-only, vendored in 3rdparty/)
 
 ### ROS2 Backend
 - `rclcpp`, `ament_index_cpp`, `ament_cmake`

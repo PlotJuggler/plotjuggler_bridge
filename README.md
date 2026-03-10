@@ -48,7 +48,7 @@ Install the pre-built package from the [PlotJuggler conda channel](https://prefi
 ```bash
 # Install (change humble to jazzy or kilted as needed)
 pixi global install pj-bridge-ros2-humble \
-  -c https://prefix.dev/plotjuggler -c robostack-staging -c conda-forge
+  -c https://prefix.dev/plotjuggler -c robostack-humble -c conda-forge
 
 # Run (add arguments if different from default)
 pj_bridge_ros2 --ros-args -p port:=9090
@@ -70,7 +70,7 @@ chmod +x pj_bridge_ros2-humble-x86_64.AppImage
 
 ## Build Instructions
 
-All dependencies (IXWebSocket, spdlog, nlohmann_json, ZSTD) are provided by the dependency manager — nothing is vendored except `tl::expected`.
+All dependencies (spdlog, nlohmann_json, ZSTD) are provided by the dependency manager. IXWebSocket is resolved via `find_package` first, with a FetchContent fallback for colcon builds. Only `tl::expected` is vendored.
 
 ### ROS2 — Pixi
 
