@@ -44,6 +44,8 @@ requirements:
   run:
     - ros-${{ ros_distro }}-rclcpp
     - ros-${{ ros_distro }}-ament-index-cpp
+    - ros-${{ ros_distro }}-sensor-msgs
+    - ros-${{ ros_distro }}-nav-msgs
     - ixwebsocket
     - spdlog
     - zstd
