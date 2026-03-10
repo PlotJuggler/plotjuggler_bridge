@@ -1,0 +1,30 @@
+{
+  "cli_version": "0.4.2",
+  "checkpoint_id": "ae53f25e11a4",
+  "session_id": "d7b34d50-9ab1-4f42-b2c4-f2f870b4dcd6",
+  "strategy": "manual-commit",
+  "created_at": "2026-03-10T22:25:15.830720458Z",
+  "branch": "main",
+  "checkpoints_count": 1,
+  "files_touched": [
+    ".github/workflows/appimage.yaml",
+    ".github/workflows/release-debs.yaml"
+  ],
+  "agent": "Claude Code",
+  "token_usage": {
+    "input_tokens": 19,
+    "cache_creation_tokens": 21038,
+    "cache_read_tokens": 491289,
+    "output_tokens": 2795,
+    "api_call_count": 15
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-03-10T22:25:15.821880711Z",
+    "agent_lines": 34,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 34,
+    "agent_percentage": 100
+  }
+}

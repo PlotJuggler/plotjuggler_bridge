@@ -1,0 +1,86 @@
+Implement the following plan:
+
+# Fix CI release/upload failures for tag 0.5.0
+
+## Context
+
+Tag 0.5.0 fails on AppImage and Debian release workflows. Conda worked.
+The working tree already has partial fixes from the previous planning session — this plan reviews them, identifies a remaining race condition, and adds the final fix.
+
+## Current State of Working Tree
+
+**`appimage.yaml`** (staged) — Major restructure already done:
+- Removed per-matrix-job `softprops/action-gh-release` upload
+- Added `actions/upload-artifact` per matrix job + single `release` job that downloads and uploads via `gh release` CLI
+- Eliminates the intra-workflow race (3 matrix jobs no longer fight over the release)
+
+**`release-debs.yaml`** (unstaged) — Smaller change already done:
+- Replaced `softprops/action-gh-release@v2` with `gh release` CLI (create-if-not-exists + `--clobber`)
+- The Debian workflow already had a single `release` job, so no structural change needed
+
+**`conda.yaml`** — No changes needed (already has `--force` on upload)
+
+## Remaining Bug: Cross-Workflow Race
+
+Both the AppImage `release` job and the Debian `release` job use this pattern:
+
+```bash
+gh release view "$tag" >/dev/null 2>&1 || \
+  gh release create "$tag" --title "$tag" --generate-notes
+gh release upload "$tag" ... --clobber
+```
+
+If both jobs check simultaneously, both find "not found", both try `gh release create`, one fails → `set -e` kills the step. This is unlikely (AppImage builds are slower) but not impossible, and it would cause the same intermittent failure we're trying to fix.
+
+**Fix**: Add `|| true` after the create command:
+```bash
+gh release view "$tag" >/dev/null 2>&1 || \
+  gh release create "$tag" --title "$tag" --generate-notes || true
+gh release upload "$tag" ... --clobber
+```
+
+If `create` fails because another workflow already created it, execution continues. If it fails for a real reason, the subsequent `upload` will fail with a clear error.
+
+## Cleanup: Debian Dead Code
+
+The "Determine release tag" step (lines 107-117) has an unreachable `else` branch (the job already requires `startsWith(github.ref, 'refs/tags/')`). The `prerelease` output is unused. The step just produces `github.ref_name` with extra indirection.
+
+**Fix**: Remove the "Determine release tag" step, the checkout (only needed for `git describe` in the dead branch), and "List artifacts" (debugging noise). Use `github.ref_name` directly.
+
+## Changes
+
+### 1. `appimage.yaml` — Add `|| true` (1 line)
+
+Line 138: `gh release create "$tag" --title "$tag" --generate-notes` → append `|| true`
+
+### 2. `release-debs.yaml` — Simplify release job
+
+Remove:
+- `actions/checkout@v4` step (no longer needed)
+- "Determine release tag" step (dead code)
+- "List artifacts" step
+
+Change upload step:
+- Use `github.ref_name` directly instead of `steps.tag.outputs.name`
+- Add `|| true` after `gh release create`
+
+### 3. Conda — No changes
+
+### 4. Release procedure
+- Commit the workflow fixes
+- Delete the orphaned 0.5.0 GitHub release and tag
+- Create fresh 0.5.0 tag on the new commit
+- Push — triggers all three workflows with clean state
+
+## Verification
+- Inspect final workflow YAML for correctness
+- Push tag, watch all three workflows pass
+- GitHub release has 3 AppImages + 3 .deb files
+- prefix.dev shows 0.5.0 conda packages
+
+
+If you need specific details from before exiting plan mode (like exact code snippets, error messages, or content you generated), read the full transcript at: /home/davide/.REDACTED.jsonl
+
+---
+
+continue retagging
