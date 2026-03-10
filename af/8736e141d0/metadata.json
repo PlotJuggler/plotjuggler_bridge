@@ -1,0 +1,27 @@
+{
+  "cli_version": "0.4.2",
+  "checkpoint_id": "af8736e141d0",
+  "strategy": "manual-commit",
+  "branch": "main",
+  "checkpoints_count": 2,
+  "files_touched": [
+    ".github/workflows/conda.yaml",
+    "create_release.py"
+  ],
+  "sessions": [
+    {
+      "metadata": "/af/8736e141d0/0/metadata.json",
+      "transcript": "/af/8736e141d0/0/full.jsonl",
+      "context": "/af/8736e141d0/0/context.md",
+      "content_hash": "/af/8736e141d0/0/content_hash.txt",
+      "prompt": "/af/8736e141d0/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 31,
+    "cache_creation_tokens": 8505,
+    "cache_read_tokens": 883730,
+    "output_tokens": 3179,
+    "api_call_count": 21
+  }
+}
