@@ -35,6 +35,7 @@ requirements:
     - ixwebsocket
     - spdlog
     - zstd
+    - zlib
     - nlohmann_json
   run:
     - ros-${{ ros_distro }}-rclcpp
