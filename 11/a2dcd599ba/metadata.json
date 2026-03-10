@@ -3,7 +3,7 @@
   "checkpoint_id": "11a2dcd599ba",
   "strategy": "manual-commit",
   "branch": "main",
-  "checkpoints_count": 3,
+  "checkpoints_count": 4,
   "files_touched": [
     ".github/workflows/appimage.yaml",
     "AppDir/.DirIcon",
@@ -1826,13 +1826,20 @@
       "context": "/11/a2dcd599ba/0/context.md",
       "content_hash": "/11/a2dcd599ba/0/content_hash.txt",
       "prompt": "/11/a2dcd599ba/0/prompt.txt"
+    },
+    {
+      "metadata": "/11/a2dcd599ba/1/metadata.json",
+      "transcript": "/11/a2dcd599ba/1/full.jsonl",
+      "context": "/11/a2dcd599ba/1/context.md",
+      "content_hash": "/11/a2dcd599ba/1/content_hash.txt",
+      "prompt": "/11/a2dcd599ba/1/prompt.txt"
     }
   ],
   "token_usage": {
-    "input_tokens": 50,
-    "cache_creation_tokens": 64765,
-    "cache_read_tokens": 1321222,
-    "output_tokens": 19823,
-    "api_call_count": 34
+    "input_tokens": 71,
+    "cache_creation_tokens": 80862,
+    "cache_read_tokens": 1836045,
+    "output_tokens": 23908,
+    "api_call_count": 48
   }
 }

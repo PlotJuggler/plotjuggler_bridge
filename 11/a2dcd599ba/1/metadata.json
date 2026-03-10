@@ -1,0 +1,32 @@
+{
+  "cli_version": "0.4.2",
+  "checkpoint_id": "11a2dcd599ba",
+  "session_id": "dd453a7a-ef51-4f77-b551-b3fbf388def6",
+  "strategy": "manual-commit",
+  "created_at": "2026-03-10T18:21:45.651816428Z",
+  "branch": "main",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "pj_bridge_ros2-humble-x86_64.AppImage"
+  ],
+  "agent": "Claude Code",
+  "transcript_identifier_at_start": "a8fa2ef0-e7ba-409f-9f1e-036c44fb4cb3",
+  "checkpoint_transcript_start": 39,
+  "transcript_lines_at_start": 39,
+  "token_usage": {
+    "input_tokens": 21,
+    "cache_creation_tokens": 16097,
+    "cache_read_tokens": 514823,
+    "output_tokens": 4085,
+    "api_call_count": 14
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-03-10T18:21:45.64185941Z",
+    "agent_lines": 0,
+    "human_added": 191,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 191,
+    "agent_percentage": 0
+  }
+}
