@@ -47,7 +47,7 @@ requirements:
 
 tests:
   - package_contents:
-      lib:
+      files:
         - lib/pj_bridge/pj_bridge_ros2
 
 about:
