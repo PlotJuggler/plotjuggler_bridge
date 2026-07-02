@@ -249,6 +249,7 @@ if(BUILD_TESTING AND ament_cmake_FOUND)
     tests/unit/test_topic_discovery.cpp
     tests/unit/test_schema_extractor.cpp
     tests/unit/test_generic_subscription_manager.cpp
+    tests/unit/test_ros2_subscription_manager.cpp
     tests/unit/test_message_stripper.cpp
   )
 

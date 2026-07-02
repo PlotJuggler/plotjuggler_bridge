@@ -37,7 +37,7 @@ namespace pj_bridge {
  */
 class Ros2SubscriptionManager : public SubscriptionManagerInterface {
  public:
-  explicit Ros2SubscriptionManager(rclcpp::Node::SharedPtr node, bool strip_large_messages = true);
+  explicit Ros2SubscriptionManager(rclcpp::Node::SharedPtr node, bool strip_large_messages = false);
 
   Ros2SubscriptionManager(const Ros2SubscriptionManager&) = delete;
   Ros2SubscriptionManager& operator=(const Ros2SubscriptionManager&) = delete;

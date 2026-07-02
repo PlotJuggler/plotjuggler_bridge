@@ -197,7 +197,7 @@ Then, for each message in the (compressed) payload:
 
 ## Testing
 
-### Test Count: 174 unit tests across 10 test suites
+### Test Count: 176 unit tests across 11 test suites
 
 ### Commands
 ```bash
@@ -232,7 +232,7 @@ pre-commit run -a
 port: 9090                  # WebSocket port
 publish_rate: 50.0          # Hz
 session_timeout: 10.0       # seconds
-strip_large_messages: true  # Strip Image/PointCloud2/etc data fields
+strip_large_messages: false # Opt-in: strip Image/PointCloud2/etc data fields
 ```
 
 ### RTI (via CLI flags):
@@ -263,5 +263,5 @@ pj_bridge_fastdds --domains 0 1 --port 9090 --publish-rate 50 --session-timeout 
 
 **Last Updated**: 2026-07-02
 **Project Phase**: Unified multi-backend architecture
-**Test Status**: 174 unit tests passing (all sanitizers clean)
+**Test Status**: 176 unit tests passing (all sanitizers clean)
 **Executables**: `pj_bridge_ros2` (ROS2), `pj_bridge_rti` (RTI DDS, disabled), `pj_bridge_fastdds` (FastDDS)

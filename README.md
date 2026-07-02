@@ -22,7 +22,7 @@ independently.
 - **High Performance**: 50 Hz message aggregation with ZSTD compression. The original message timestamp is preserved, and less bandwidth is used.
 - **Multi-Client Support**: Multiple clients can connect simultaneously with shared subscriptions
 - **Runtime Schema Discovery**: Automatic extraction of message schemas from installed ROS2 packages on the server side.
-- **Large Message Stripping**: Automatic stripping of large array fields (Image, PointCloud2, LaserScan, OccupancyGrid) to reduce bandwidth while preserving metadata
+- **Large Message Stripping** (opt-in): Optional stripping of large array fields (Image, PointCloud2, LaserScan, OccupancyGrid) to reduce bandwidth while preserving metadata. Disabled by default — full message data is forwarded; enable with `strip_large_messages:=true` for low-bandwidth links
 
 ## CI Status
 
@@ -38,7 +38,7 @@ independently.
 | `port` | int | 9090 | WebSocket server port |
 | `publish_rate` | double | 50.0 | Aggregation publish rate in Hz |
 | `session_timeout` | double | 10.0 | Client timeout duration in seconds |
-| `strip_large_messages` | bool | true | Strip large arrays from Image, PointCloud2, LaserScan, OccupancyGrid messages |
+| `strip_large_messages` | bool | false | Opt-in: strip large arrays from Image, PointCloud2, LaserScan, OccupancyGrid messages |
 
 ## Just "Download and Run"
 

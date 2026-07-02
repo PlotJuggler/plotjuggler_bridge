@@ -39,7 +39,7 @@ int main(int argc, char** argv) {
   node->declare_parameter<int>("port", 9090);
   node->declare_parameter<double>("publish_rate", 50.0);
   node->declare_parameter<double>("session_timeout", 10.0);
-  node->declare_parameter<bool>("strip_large_messages", true);
+  node->declare_parameter<bool>("strip_large_messages", false);
 
   int port = node->get_parameter("port").as_int();
   double publish_rate = node->get_parameter("publish_rate").as_double();
