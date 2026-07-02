@@ -8,3 +8,10 @@ CMakeUserPresets.json
 /build/*
 /install/*
 /log/*
+
+# Sanitizer build/install dirs (in-repo colcon builds)
+build_tsan/
+install_tsan/
+build_asan/
+install_asan/
+log/

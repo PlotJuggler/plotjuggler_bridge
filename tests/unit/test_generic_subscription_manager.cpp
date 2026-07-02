@@ -19,7 +19,11 @@
 
 #include <gtest/gtest.h>
 
+#include <atomic>
+#include <chrono>
 #include <rclcpp/rclcpp.hpp>
+#include <sensor_msgs/msg/imu.hpp>
+#include <thread>
 
 #include "pj_bridge_ros2/generic_subscription_manager.hpp"
 
@@ -210,4 +214,36 @@ TEST_F(GenericSubscriptionManagerTest, MultipleTopicsIndependent) {
 
   EXPECT_FALSE(manager_->is_subscribed("/topic1"));
   EXPECT_TRUE(manager_->is_subscribed("/topic2"));
+}
+
+// ---------------------------------------------------------------------------
+// QoS adaptation
+//
+// Sensor publishers (cameras, lidars, IMUs) typically offer BEST_EFFORT
+// reliability. A RELIABLE subscription is QoS-incompatible with them in
+// ROS2 — it matches nothing and silently receives zero messages — so the
+// manager must adapt its subscription QoS to what publishers actually offer.
+// ---------------------------------------------------------------------------
+TEST_F(GenericSubscriptionManagerTest, AdaptsQosToBestEffortPublisher) {
+  auto publisher = node_->create_publisher<sensor_msgs::msg::Imu>("/qos_be_topic", rclcpp::SensorDataQoS());
+
+  std::atomic<int> received{0};
+  auto callback = [&received](const std::string&, const std::shared_ptr<rclcpp::SerializedMessage>&, uint64_t) {
+    received++;
+  };
+
+  ASSERT_TRUE(manager_->subscribe("/qos_be_topic", "sensor_msgs/msg/Imu", callback));
+
+  rclcpp::executors::SingleThreadedExecutor executor;
+  executor.add_node(node_);
+
+  sensor_msgs::msg::Imu msg;
+  auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  while (received.load() == 0 && std::chrono::steady_clock::now() < deadline) {
+    publisher->publish(msg);
+    executor.spin_some();
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+
+  EXPECT_GT(received.load(), 0) << "RELIABLE subscription never matches a BEST_EFFORT publisher";
 }

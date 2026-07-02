@@ -19,6 +19,8 @@
 
 #include <gtest/gtest.h>
 
+#include <cstdlib>
+#include <filesystem>
 #include <fstream>
 #include <sstream>
 
@@ -257,4 +259,80 @@ TEST_F(SchemaExtractorTest, ImuSchemaContainsExpectedFields) {
   EXPECT_NE(actual_no_comments.find("MSG: geometry_msgs/Vector3"), std::string::npos);
   EXPECT_NE(actual_no_comments.find("MSG: std_msgs/Header"), std::string::npos);
   EXPECT_NE(actual_no_comments.find("MSG: builtin_interfaces/Time"), std::string::npos);
+}
+
+// ---------------------------------------------------------------------------
+// Bounded-string handling
+//
+// "string<=256 name" is a bounded string — a builtin type with a bound
+// suffix. It must not be mistaken for a nested message type (which makes the
+// whole schema extraction fail and returns ""). Uses a fixture package
+// registered via AMENT_PREFIX_PATH.
+// ---------------------------------------------------------------------------
+class SchemaExtractorFixturePackageTest : public ::testing::Test {
+ protected:
+  void SetUp() override {
+    const char* old_path = getenv("AMENT_PREFIX_PATH");
+    old_ament_prefix_path_ = old_path ? old_path : "";
+
+    fixture_prefix_ = std::filesystem::temp_directory_path() / "pj_bridge_schema_fixture";
+    std::filesystem::remove_all(fixture_prefix_);
+
+    // Minimal ament index entry: marker file + share/<pkg>/msg/<Type>.msg
+    std::filesystem::create_directories(fixture_prefix_ / "share/ament_index/resource_index/packages");
+    std::ofstream(fixture_prefix_ / "share/ament_index/resource_index/packages/pj_fixture_msgs").close();
+    std::filesystem::create_directories(fixture_prefix_ / "share/pj_fixture_msgs/msg");
+    std::ofstream msg(fixture_prefix_ / "share/pj_fixture_msgs/msg/BoundedField.msg");
+    msg << "string<=256 name\n";
+    msg << "string<=10[<=5] tags\n";
+    msg << "uint32 id\n";
+    msg.close();
+
+    std::string new_path = fixture_prefix_.string();
+    if (!old_ament_prefix_path_.empty()) {
+      new_path += ":" + old_ament_prefix_path_;
+    }
+    setenv("AMENT_PREFIX_PATH", new_path.c_str(), 1);
+
+    extractor_ = std::make_unique<SchemaExtractor>();
+  }
+
+  void TearDown() override {
+    setenv("AMENT_PREFIX_PATH", old_ament_prefix_path_.c_str(), 1);
+    std::filesystem::remove_all(fixture_prefix_);
+    extractor_.reset();
+  }
+
+  std::filesystem::path fixture_prefix_;
+  std::string old_ament_prefix_path_;
+  std::unique_ptr<SchemaExtractor> extractor_;
+};
+
+TEST_F(SchemaExtractorFixturePackageTest, BoundedStringFieldDoesNotEmptySchema) {
+  std::string schema = extractor_->get_message_definition("pj_fixture_msgs/msg/BoundedField");
+
+  ASSERT_FALSE(schema.empty()) << "bounded string field made the whole schema extraction fail";
+  EXPECT_NE(schema.find("string<=256 name"), std::string::npos);
+  EXPECT_NE(schema.find("uint32 id"), std::string::npos);
+  // The bounded string must NOT have been expanded as a nested type
+  EXPECT_EQ(schema.find("MSG: pj_fixture_msgs/string<=256"), std::string::npos);
+}
+
+// ---------------------------------------------------------------------------
+// Empty definition vs extraction failure
+//
+// std_msgs/msg/Empty has a legitimately empty definition (0-byte .msg file).
+// The extractor must distinguish that from a failed extraction so that
+// callers can accept the topic instead of rejecting it as an error.
+// ---------------------------------------------------------------------------
+TEST_F(SchemaExtractorTest, EmptyMessageDefinitionDistinguishedFromFailure) {
+  auto ok = extractor_->try_get_message_definition("std_msgs/msg/Empty");
+  ASSERT_TRUE(ok.has_value()) << "std_msgs/msg/Empty is a valid type: " << ok.error();
+  EXPECT_TRUE(ok->empty());
+
+  auto bad = extractor_->try_get_message_definition("definitely_not_a_pkg/msg/Nope");
+  EXPECT_FALSE(bad.has_value());
+
+  auto malformed = extractor_->try_get_message_definition("not-a-type");
+  EXPECT_FALSE(malformed.has_value());
 }

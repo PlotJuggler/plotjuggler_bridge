@@ -22,6 +22,7 @@
 #include <chrono>
 #include <cstddef>
 #include <deque>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -52,8 +53,12 @@ class MessageBuffer {
  public:
   static constexpr uint64_t kDefaultMaxMessageAgeNs = 1'000'000'000;  ///< 1 second
 
+  /// Clock source returning nanoseconds since epoch; injectable for testing.
+  using ClockFn = std::function<uint64_t()>;
+
   /// @param max_message_age_ns  TTL for buffered messages (default 1 second).
-  explicit MessageBuffer(uint64_t max_message_age_ns = kDefaultMaxMessageAgeNs);
+  /// @param clock_fn            Clock override for tests (default: wall clock).
+  explicit MessageBuffer(uint64_t max_message_age_ns = kDefaultMaxMessageAgeNs, ClockFn clock_fn = {});
 
   /// Add a message to the buffer for the given topic.
   /// Triggers cleanup of stale messages before inserting.
@@ -77,7 +82,9 @@ class MessageBuffer {
   mutable std::mutex mutex_;
   std::unordered_map<std::string, std::deque<BufferedMessage>> topic_buffers_;
   uint64_t max_message_age_ns_;
+  ClockFn clock_fn_;
 
+  uint64_t now_ns() const;
   void cleanup_old_messages();
 };
 

@@ -23,6 +23,7 @@
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace pj_bridge {
@@ -30,6 +31,11 @@ namespace pj_bridge {
 struct Session {
   std::string client_id;
   std::unordered_map<std::string, double> subscribed_topics;
+  /// Topics for which this session currently holds a middleware subscription
+  /// ref. Invariant: a ref is held iff the topic is in this set — pause
+  /// releases all refs, resume re-acquires them, and cleanup releases exactly
+  /// the held ones (never relying on the paused flag).
+  std::unordered_set<std::string> ref_held_topics;
   std::chrono::steady_clock::time_point last_heartbeat;
   std::chrono::steady_clock::time_point created_at;
   bool paused{false};
@@ -53,6 +59,8 @@ class SessionManager {
   bool session_exists(const std::string& client_id) const;
   bool set_paused(const std::string& client_id, bool paused);
   bool is_paused(const std::string& client_id) const;
+  bool set_ref_held(const std::string& client_id, const std::string& topic, bool held);
+  std::unordered_set<std::string> get_ref_held_topics(const std::string& client_id) const;
 
  private:
   std::unordered_map<std::string, Session> sessions_;

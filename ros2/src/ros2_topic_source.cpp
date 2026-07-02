@@ -19,6 +19,8 @@
 
 #include "pj_bridge_ros2/ros2_topic_source.hpp"
 
+#include <stdexcept>
+
 #include "pj_bridge/protocol_constants.hpp"
 
 namespace pj_bridge {
@@ -40,10 +42,16 @@ std::vector<TopicInfo> Ros2TopicSource::get_topics() {
 std::string Ros2TopicSource::get_schema(const std::string& topic_name) {
   auto it = topic_type_cache_.find(topic_name);
   if (it == topic_type_cache_.end()) {
-    return "";
+    throw std::runtime_error("unknown topic '" + topic_name + "'");
   }
 
-  return schema_extractor_.get_message_definition(it->second);
+  auto definition = schema_extractor_.try_get_message_definition(it->second);
+  if (!definition.has_value()) {
+    throw std::runtime_error(definition.error());
+  }
+
+  // May be legitimately empty (e.g. std_msgs/msg/Empty)
+  return *definition;
 }
 
 std::string Ros2TopicSource::schema_encoding() const {

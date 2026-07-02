@@ -23,6 +23,8 @@
 
 #include <map>
 #include <nlohmann/json.hpp>
+#include <optional>
+#include <unordered_set>
 
 #include "pj_bridge/message_serializer.hpp"
 #include "pj_bridge/protocol_constants.hpp"
@@ -30,6 +32,30 @@
 using json = nlohmann::json;
 
 namespace pj_bridge {
+
+namespace {
+
+// Bounds for client-supplied max_rate_hz. The publish path stores rates as
+// integer milli-hertz in an int, so values above kMaxRateHz would overflow
+// the cast (UB) and values below kMinRateHz would truncate to 0 == unlimited,
+// the opposite of the client's intent.
+constexpr double kMaxRateHz = 1e6;
+constexpr double kMinRateHz = 0.001;
+
+double clamp_rate_hz(double rate_hz) {
+  if (rate_hz <= 0.0) {
+    return 0.0;  // 0 (or negative) = no rate limit
+  }
+  if (rate_hz < kMinRateHz) {
+    return kMinRateHz;
+  }
+  if (rate_hz > kMaxRateHz) {
+    return kMaxRateHz;
+  }
+  return rate_hz;
+}
+
+}  // namespace
 
 BridgeServer::BridgeServer(
     std::shared_ptr<TopicSourceInterface> topic_source,
@@ -116,19 +142,28 @@ bool BridgeServer::process_requests() {
     return false;
   }
 
-  // Receive request (non-blocking with timeout)
-  std::vector<uint8_t> request_data;
-  std::string client_id;
-  bool received = middleware_->receive_request(request_data, client_id);
-
-  if (!received || request_data.empty()) {
-    return false;
+  // Drain all pending requests. A single-request-per-call policy driven by a
+  // 10 ms timer caps throughput at ~100 req/s and lets one chatty client
+  // delay everyone else's heartbeats. The cap bounds one tick's latency.
+  constexpr int kMaxRequestsPerCall = 256;
+  bool processed_any = false;
+  for (int i = 0; i < kMaxRequestsPerCall; i++) {
+    std::vector<uint8_t> request_data;
+    std::string client_id;
+    if (!middleware_->receive_request(request_data, client_id) || request_data.empty()) {
+      break;
+    }
+    process_single_request(request_data, client_id);
+    processed_any = true;
   }
+  return processed_any;
+}
 
+void BridgeServer::process_single_request(const std::vector<uint8_t>& request_data, const std::string& client_id) {
   std::string request(request_data.begin(), request_data.end());
   if (client_id.empty()) {
     spdlog::warn("Received request with no client identity");
-    return true;
+    return;
   }
 
   // Parse request JSON
@@ -174,7 +209,6 @@ bool BridgeServer::process_requests() {
     spdlog::warn("Failed to send response to client '{}', cleaning up session", client_id);
     cleanup_session(client_id);
   }
-  return true;
 }
 
 std::string BridgeServer::handle_get_topics(const std::string& client_id, const nlohmann::json& request) {
@@ -225,17 +259,16 @@ std::string BridgeServer::handle_subscribe(const std::string& client_id, const n
 
   // Parse requested topics — supports mixed array of strings and objects:
   //   ["topic1", {"name": "topic2", "max_rate_hz": 10.0}]
-  std::unordered_map<std::string, double> requested_topics;
+  // A bare string means "no rate specified" (nullopt), which must not
+  // overwrite a previously configured rate on re-subscribe.
+  std::unordered_map<std::string, std::optional<double>> requested_topics;
   for (const auto& topic : request["topics"]) {
     if (topic.is_string()) {
-      requested_topics[topic.get<std::string>()] = 0.0;
+      requested_topics[topic.get<std::string>()] = std::nullopt;
     } else if (topic.is_object() && topic.contains("name") && topic["name"].is_string()) {
-      double rate_hz = 0.0;
+      std::optional<double> rate_hz;
       if (topic.contains("max_rate_hz") && topic["max_rate_hz"].is_number()) {
-        rate_hz = topic["max_rate_hz"].get<double>();
-        if (rate_hz < 0.0) {
-          rate_hz = 0.0;
-        }
+        rate_hz = clamp_rate_hz(topic["max_rate_hz"].get<double>());
       }
       requested_topics[topic["name"].get<std::string>()] = rate_hz;
     }
@@ -256,9 +289,12 @@ std::string BridgeServer::handle_subscribe(const std::string& client_id, const n
     topic_types[topic.name] = topic.type;
   }
 
-  // Subscribe to new topics — track successes and failures
+  // Validate topics and extract schemas BEFORE taking any refs, so a schema
+  // failure can never corrupt the reference count.
   json schemas = json::object();
   json failures = json::array();
+  std::vector<std::pair<std::string, std::string>> validated;  // (name, type)
+  std::unordered_map<std::string, std::string> extracted_schemas;
 
   for (const auto& topic_name : topics_to_add) {
     if (topic_types.find(topic_name) == topic_types.end()) {
@@ -272,8 +308,8 @@ std::string BridgeServer::handle_subscribe(const std::string& client_id, const n
 
     std::string topic_type = topic_types[topic_name];
 
-    // Get schema BEFORE subscribing to avoid corrupting the reference count
-    // if schema extraction fails after subscribe() increments it.
+    // get_schema throws on failure; an empty return is a legitimately empty
+    // definition (e.g. std_msgs/msg/Empty) and must not fail the subscribe.
     std::string schema;
     try {
       schema = topic_source_->get_schema(topic_name);
@@ -286,46 +322,58 @@ std::string BridgeServer::handle_subscribe(const std::string& client_id, const n
       continue;
     }
 
-    if (schema.empty()) {
-      spdlog::error("Empty schema for topic '{}' (type: {})", topic_name, topic_type);
-      json failure;
-      failure["topic"] = topic_name;
-      failure["reason"] = "Schema extraction returned empty definition";
-      failures.push_back(failure);
-      continue;
-    }
-
-    // Subscribe via subscription manager (ref-counted)
-    bool success = subscription_manager_->subscribe(topic_name, topic_type);
-    if (!success) {
-      spdlog::error("Failed to subscribe to topic '{}'", topic_name);
-      json failure;
-      failure["topic"] = topic_name;
-      failure["reason"] = "Subscription manager failed to create subscription";
-      failures.push_back(failure);
-      continue;
-    }
-
-    // Immediately add to session. If session is gone (client disconnected
-    // between subscribe and now), roll back the ref count.
-    if (!session_manager_->add_subscription(client_id, topic_name, requested_topics[topic_name])) {
-      spdlog::warn("Session gone for client '{}', rolling back subscribe for '{}'", client_id, topic_name);
-      subscription_manager_->unsubscribe(topic_name);
-      continue;
-    }
-
-    nlohmann::json schema_obj;
-    schema_obj["encoding"] = topic_source_->schema_encoding();
-    schema_obj["definition"] = schema;
-    schemas[topic_name] = schema_obj;
-
-    spdlog::info("Client '{}' subscribed to topic '{}' (type: {})", client_id, topic_name, topic_type);
+    validated.emplace_back(topic_name, topic_type);
+    extracted_schemas[topic_name] = std::move(schema);
   }
 
-  // Update rates for topics that were already subscribed but may have a new rate
-  for (const auto& [topic, rate] : requested_topics) {
-    if (current_subs.find(topic) != current_subs.end()) {
-      session_manager_->add_subscription(client_id, topic, rate);
+  // Acquire refs and record subscriptions atomically with respect to
+  // pause/resume and cleanup_session (which run on other threads).
+  // Invariant: a middleware ref is held iff set_ref_held(topic, true).
+  // Paused clients hold no refs — their topics are acquired on resume.
+  {
+    std::lock_guard<std::mutex> lock(cleanup_mutex_);
+    const bool paused = session_manager_->is_paused(client_id);
+
+    for (const auto& [topic_name, topic_type] : validated) {
+      bool ref_acquired = false;
+      if (!paused) {
+        if (!subscription_manager_->subscribe(topic_name, topic_type)) {
+          spdlog::error("Failed to subscribe to topic '{}'", topic_name);
+          json failure;
+          failure["topic"] = topic_name;
+          failure["reason"] = "Subscription manager failed to create subscription";
+          failures.push_back(failure);
+          continue;
+        }
+        ref_acquired = true;
+      }
+
+      // Add to session. If the session is gone (client disconnected between
+      // request and now), roll back the ref.
+      const double rate = requested_topics[topic_name].value_or(0.0);
+      if (!session_manager_->add_subscription(client_id, topic_name, rate)) {
+        spdlog::warn("Session gone for client '{}', rolling back subscribe for '{}'", client_id, topic_name);
+        if (ref_acquired) {
+          subscription_manager_->unsubscribe(topic_name);
+        }
+        continue;
+      }
+      session_manager_->set_ref_held(client_id, topic_name, ref_acquired);
+
+      nlohmann::json schema_obj;
+      schema_obj["encoding"] = topic_source_->schema_encoding();
+      schema_obj["definition"] = extracted_schemas[topic_name];
+      schemas[topic_name] = schema_obj;
+
+      spdlog::info("Client '{}' subscribed to topic '{}' (type: {})", client_id, topic_name, topic_type);
+    }
+
+    // Update rates for already-subscribed topics, only where a rate was
+    // explicitly given (bare strings must not reset an existing limit).
+    for (const auto& [topic, rate] : requested_topics) {
+      if (rate.has_value() && current_subs.find(topic) != current_subs.end()) {
+        session_manager_->add_subscription(client_id, topic, *rate);
+      }
     }
   }
 
@@ -376,30 +424,37 @@ std::string BridgeServer::handle_unsubscribe(const std::string& client_id, const
     return create_error_response("INVALID_REQUEST", "Missing or invalid 'topics' array", request);
   }
 
-  auto current_subs = session_manager_->get_subscriptions(client_id);
-
   std::vector<std::string> removed;
 
-  for (const auto& topic_item : request["topics"]) {
-    std::string topic_name;
-    if (topic_item.is_string()) {
-      topic_name = topic_item.get<std::string>();
-    } else if (topic_item.is_object() && topic_item.contains("name") && topic_item["name"].is_string()) {
-      topic_name = topic_item["name"].get<std::string>();
-    } else {
-      continue;
-    }
+  {
+    std::lock_guard<std::mutex> lock(cleanup_mutex_);
+    auto current_subs = session_manager_->get_subscriptions(client_id);
+    auto held_refs = session_manager_->get_ref_held_topics(client_id);
 
-    if (current_subs.find(topic_name) != current_subs.end()) {
-      subscription_manager_->unsubscribe(topic_name);
-      current_subs.erase(topic_name);
-      removed.push_back(topic_name);
+    for (const auto& topic_item : request["topics"]) {
+      std::string topic_name;
+      if (topic_item.is_string()) {
+        topic_name = topic_item.get<std::string>();
+      } else if (topic_item.is_object() && topic_item.contains("name") && topic_item["name"].is_string()) {
+        topic_name = topic_item["name"].get<std::string>();
+      } else {
+        continue;
+      }
 
-      spdlog::info("Client '{}' unsubscribed from topic '{}'", client_id, topic_name);
+      if (current_subs.find(topic_name) != current_subs.end()) {
+        // Release the middleware ref only if this session actually holds one
+        // (a paused client's refs were already released by pause).
+        if (held_refs.count(topic_name) > 0) {
+          subscription_manager_->unsubscribe(topic_name);
+        }
+        session_manager_->remove_subscription(client_id, topic_name);
+        current_subs.erase(topic_name);
+        removed.push_back(topic_name);
+
+        spdlog::info("Client '{}' unsubscribed from topic '{}'", client_id, topic_name);
+      }
     }
   }
-
-  session_manager_->update_subscriptions(client_id, current_subs);
 
   json response;
   response["status"] = "success";
@@ -434,25 +489,32 @@ std::string BridgeServer::handle_pause(const std::string& client_id, const nlohm
 
   session_manager_->update_heartbeat(client_id);
 
-  if (session_manager_->is_paused(client_id)) {
-    spdlog::debug("Client '{}' already paused", client_id);
-    json response;
-    response["status"] = "ok";
-    response["paused"] = true;
-    inject_response_fields(response, request);
-    return response.dump();
+  size_t released = 0;
+  {
+    std::lock_guard<std::mutex> lock(cleanup_mutex_);
+
+    if (session_manager_->is_paused(client_id)) {
+      spdlog::debug("Client '{}' already paused", client_id);
+      json response;
+      response["status"] = "ok";
+      response["paused"] = true;
+      inject_response_fields(response, request);
+      return response.dump();
+    }
+
+    session_manager_->set_paused(client_id, true);
+
+    // Release exactly the refs this session holds
+    auto held_refs = session_manager_->get_ref_held_topics(client_id);
+    for (const auto& topic : held_refs) {
+      subscription_manager_->unsubscribe(topic);
+      session_manager_->set_ref_held(client_id, topic, false);
+      spdlog::debug("Released ref for topic '{}' (client '{}' paused)", topic, client_id);
+    }
+    released = held_refs.size();
   }
 
-  session_manager_->set_paused(client_id, true);
-
-  // Decrement ref counts for all subscribed topics
-  auto subs = session_manager_->get_subscriptions(client_id);
-  for (const auto& [topic, rate] : subs) {
-    subscription_manager_->unsubscribe(topic);
-    spdlog::debug("Decremented ref count for topic '{}' (client '{}' paused)", topic, client_id);
-  }
-
-  spdlog::info("Client '{}' paused ({} topics refs decremented)", client_id, subs.size());
+  spdlog::info("Client '{}' paused ({} topic refs released)", client_id, released);
 
   json response;
   response["status"] = "ok";
@@ -469,55 +531,66 @@ std::string BridgeServer::handle_resume(const std::string& client_id, const nloh
 
   session_manager_->update_heartbeat(client_id);
 
-  if (!session_manager_->is_paused(client_id)) {
-    spdlog::debug("Client '{}' not paused", client_id);
-    json response;
-    response["status"] = "ok";
-    response["paused"] = false;
-    inject_response_fields(response, request);
-    return response.dump();
-  }
-
-  session_manager_->set_paused(client_id, false);
-
-  // Build topic name → type lookup for subscribe calls
+  // Build topic name → type lookup for subscribe calls (graph query — keep
+  // it outside the cleanup lock)
   auto available_topics = topic_source_->get_topics();
   std::unordered_map<std::string, std::string> topic_types;
   for (const auto& t : available_topics) {
     topic_types[t.name] = t.type;
   }
 
-  // Increment ref counts for all subscribed topics
-  auto subs = session_manager_->get_subscriptions(client_id);
   std::vector<std::string> failed_topics;
-  for (const auto& [topic, rate] : subs) {
-    auto type_it = topic_types.find(topic);
-    if (type_it == topic_types.end()) {
-      spdlog::warn("Topic '{}' no longer exists, cannot re-subscribe for client '{}'", topic, client_id);
-      failed_topics.push_back(topic);
-      continue;
-    }
-    bool ok = subscription_manager_->subscribe(topic, type_it->second);
-    if (ok) {
-      spdlog::debug("Incremented ref count for topic '{}' (client '{}' resumed)", topic, client_id);
-    } else {
-      spdlog::warn("Topic '{}' subscription failed on resume for client '{}'", topic, client_id);
-      failed_topics.push_back(topic);
-    }
-  }
+  size_t resubscribed = 0;
+  {
+    std::lock_guard<std::mutex> lock(cleanup_mutex_);
 
-  // Remove failed topics from session to prevent ref-count underflow on disconnect
-  for (const auto& topic : failed_topics) {
-    session_manager_->remove_subscription(client_id, topic);
+    if (!session_manager_->is_paused(client_id)) {
+      spdlog::debug("Client '{}' not paused", client_id);
+      json response;
+      response["status"] = "ok";
+      response["paused"] = false;
+      inject_response_fields(response, request);
+      return response.dump();
+    }
+
+    session_manager_->set_paused(client_id, false);
+
+    // Re-acquire refs for all session topics not already held. Topics that
+    // are temporarily missing from discovery stay in the session (per the
+    // pause contract: subscriptions are preserved) with no ref held — they
+    // are re-acquired on a later resume once the publisher is back.
+    auto subs = session_manager_->get_subscriptions(client_id);
+    auto held_refs = session_manager_->get_ref_held_topics(client_id);
+    for (const auto& [topic, rate] : subs) {
+      if (held_refs.count(topic) > 0) {
+        continue;
+      }
+      auto type_it = topic_types.find(topic);
+      if (type_it == topic_types.end()) {
+        spdlog::warn("Topic '{}' currently unavailable, keeping subscription for client '{}'", topic, client_id);
+        failed_topics.push_back(topic);
+        continue;
+      }
+      if (subscription_manager_->subscribe(topic, type_it->second)) {
+        session_manager_->set_ref_held(client_id, topic, true);
+        resubscribed++;
+        spdlog::debug("Re-acquired ref for topic '{}' (client '{}' resumed)", topic, client_id);
+      } else {
+        spdlog::warn("Topic '{}' subscription failed on resume for client '{}'", topic, client_id);
+        failed_topics.push_back(topic);
+      }
+    }
   }
 
   spdlog::info(
-      "Client '{}' resumed ({} topics re-subscribed, {} failed)", client_id, subs.size() - failed_topics.size(),
-      failed_topics.size());
+      "Client '{}' resumed ({} topics re-subscribed, {} unavailable)", client_id, resubscribed, failed_topics.size());
 
   json response;
   response["status"] = "ok";
   response["paused"] = false;
+  if (!failed_topics.empty()) {
+    response["unavailable_topics"] = failed_topics;
+  }
   inject_response_fields(response, request);
   return response.dump();
 }
@@ -560,15 +633,12 @@ void BridgeServer::cleanup_session(const std::string& client_id) {
     return;
   }
 
-  auto subscriptions = session_manager_->get_subscriptions(client_id);
-  bool was_paused = session_manager_->is_paused(client_id);
-
-  // Unsubscribe from all topics (only if not paused — paused clients already decremented ref counts)
-  if (!was_paused) {
-    for (const auto& [topic, rate] : subscriptions) {
-      subscription_manager_->unsubscribe(topic);
-      spdlog::debug("Unsubscribed client '{}' from topic '{}'", client_id, topic);
-    }
+  // Release exactly the refs this session holds. Paused clients hold none;
+  // there is no separate paused check to race against.
+  auto held_refs = session_manager_->get_ref_held_topics(client_id);
+  for (const auto& topic : held_refs) {
+    subscription_manager_->unsubscribe(topic);
+    spdlog::debug("Unsubscribed client '{}' from topic '{}'", client_id, topic);
   }
 
   session_manager_->remove_session(client_id);
@@ -578,7 +648,7 @@ void BridgeServer::cleanup_session(const std::string& client_id) {
     last_sent_times_.erase(client_id);
   }
 
-  spdlog::info("Cleaned up session for client '{}' ({} topics unsubscribed)", client_id, subscriptions.size());
+  spdlog::info("Cleaned up session for client '{}' ({} topic refs released)", client_id, held_refs.size());
 }
 
 size_t BridgeServer::get_active_session_count() const {

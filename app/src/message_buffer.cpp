@@ -23,7 +23,12 @@
 
 namespace pj_bridge {
 
-MessageBuffer::MessageBuffer(uint64_t max_message_age_ns) : max_message_age_ns_(max_message_age_ns) {}
+MessageBuffer::MessageBuffer(uint64_t max_message_age_ns, ClockFn clock_fn)
+    : max_message_age_ns_(max_message_age_ns), clock_fn_(std::move(clock_fn)) {}
+
+uint64_t MessageBuffer::now_ns() const {
+  return clock_fn_ ? clock_fn_() : get_current_time_ns();
+}
 
 void MessageBuffer::add_message(
     const std::string& topic_name, uint64_t timestamp_ns, std::shared_ptr<std::vector<std::byte>> data) {
@@ -33,7 +38,7 @@ void MessageBuffer::add_message(
 
   BufferedMessage msg;
   msg.timestamp_ns = timestamp_ns;
-  msg.received_at_ns = get_current_time_ns();
+  msg.received_at_ns = now_ns();
   msg.data = std::move(data);
 
   topic_buffers_[topic_name].push_back(std::move(msg));
@@ -62,12 +67,15 @@ size_t MessageBuffer::size() const {
 }
 
 void MessageBuffer::cleanup_old_messages() {
-  uint64_t current_time = get_current_time_ns();
+  uint64_t current_time = now_ns();
 
   for (auto& [topic, buffer] : topic_buffers_) {
     while (!buffer.empty()) {
       const auto& oldest_msg = buffer.front();
-      if (current_time - oldest_msg.received_at_ns > max_message_age_ns_) {
+      // received_at_ns can be ahead of current_time after a backwards
+      // wall-clock step (NTP); unsigned subtraction would wrap and purge
+      // fresh messages, so only age messages the clock is actually past.
+      if (current_time > oldest_msg.received_at_ns && current_time - oldest_msg.received_at_ns > max_message_age_ns_) {
         buffer.pop_front();
       } else {
         break;

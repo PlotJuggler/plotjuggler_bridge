@@ -56,6 +56,8 @@ class GenericSubscriptionManager {
   void unsubscribe_all();
 
  private:
+  rclcpp::QoS adapt_qos(const std::string& topic_name) const;
+
   struct SubscriptionInfo {
     std::shared_ptr<rclcpp::GenericSubscription> subscription;
     size_t reference_count;

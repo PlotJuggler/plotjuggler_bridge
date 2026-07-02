@@ -30,6 +30,11 @@
 namespace pj_bridge {
 
 std::string SchemaExtractor::get_message_definition(const std::string& message_type) {
+  auto result = try_get_message_definition(message_type);
+  return result.has_value() ? *result : "";
+}
+
+tl::expected<std::string, std::string> SchemaExtractor::try_get_message_definition(const std::string& message_type) {
   {
     std::shared_lock<std::shared_mutex> lock(cache_mutex_);
     auto it = definition_cache_.find(message_type);
@@ -42,14 +47,14 @@ std::string SchemaExtractor::get_message_definition(const std::string& message_t
   std::string type_name;
 
   if (!parse_message_type(message_type, package_name, type_name)) {
-    return "";
+    return tl::unexpected<std::string>("invalid message type format: '" + message_type + "'");
   }
 
   std::ostringstream result;
   std::unordered_set<std::string> processed_types;
 
   if (!build_message_definition_recursive(package_name, type_name, result, processed_types, true)) {
-    return "";
+    return tl::unexpected<std::string>("failed to resolve message definition for '" + message_type + "'");
   }
 
   std::string definition = result.str();
@@ -141,6 +146,13 @@ bool SchemaExtractor::build_message_definition_recursive(
       size_t bracket_pos = base_type.find('[');
       if (bracket_pos != std::string::npos) {
         base_type = base_type.substr(0, bracket_pos);
+      }
+
+      // Strip a bound suffix ("string<=256" is a bounded builtin string,
+      // not a nested message type)
+      size_t bound_pos = base_type.find('<');
+      if (bound_pos != std::string::npos) {
+        base_type = base_type.substr(0, bound_pos);
       }
 
       static const std::unordered_set<std::string> kBuiltinTypes = {"bool",   "byte",  "char",   "float32", "float64",

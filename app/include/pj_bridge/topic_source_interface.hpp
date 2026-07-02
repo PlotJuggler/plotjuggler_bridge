@@ -50,8 +50,9 @@ class TopicSourceInterface {
   /// Return the full schema definition for a topic.
   /// @param topic_name  fully-qualified topic name
   /// @return the schema text (e.g. concatenated .msg definitions for ROS2,
-  ///         OMG IDL for RTI). Empty string if the schema cannot be resolved.
-  /// @throws std::exception on unrecoverable schema extraction errors.
+  ///         OMG IDL for RTI). An empty string is a VALID schema — some types
+  ///         have legitimately empty definitions (e.g. std_msgs/msg/Empty).
+  /// @throws std::exception when the schema cannot be resolved.
   virtual std::string get_schema(const std::string& topic_name) = 0;
 
   /// Return the encoding identifier for schemas produced by this source.

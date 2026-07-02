@@ -22,7 +22,6 @@
 #include <ixwebsocket/IXWebSocketServer.h>
 
 #include <atomic>
-#include <condition_variable>
 #include <memory>
 #include <mutex>
 #include <queue>
@@ -65,7 +64,6 @@ class WebSocketMiddleware : public MiddlewareInterface {
 
   std::queue<IncomingRequest> incoming_queue_;
   mutable std::mutex queue_mutex_;
-  std::condition_variable queue_cv_;
 
   std::unordered_map<std::string, std::shared_ptr<ix::WebSocket>> clients_;
   mutable std::mutex clients_mutex_;
@@ -75,8 +73,9 @@ class WebSocketMiddleware : public MiddlewareInterface {
 
   mutable std::mutex state_mutex_;
   bool initialized_;
+  /// Stop thread that exceeded the shutdown timeout; joined in the destructor.
+  std::thread pending_stop_thread_;
 
-  static constexpr int kReceiveTimeoutMs = 10;
   static constexpr int kShutdownTimeoutSeconds = 3;
   static constexpr size_t kMaxIncomingQueueSize = 1024;
 };

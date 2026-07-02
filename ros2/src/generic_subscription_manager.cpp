@@ -25,6 +25,41 @@ namespace pj_bridge {
 
 GenericSubscriptionManager::GenericSubscriptionManager(rclcpp::Node::SharedPtr node) : node_(node) {}
 
+rclcpp::QoS GenericSubscriptionManager::adapt_qos(const std::string& topic_name) const {
+  // Match the QoS the publishers actually offer (same policy as rosbag2):
+  // a RELIABLE subscription never matches a BEST_EFFORT publisher (sensor
+  // topics!) and a VOLATILE one misses latched (TRANSIENT_LOCAL) samples.
+  rclcpp::QoS qos(100);
+
+  auto publishers = node_->get_publishers_info_by_topic(topic_name);
+  if (publishers.empty()) {
+    return qos;
+  }
+
+  bool any_best_effort = false;
+  bool all_transient_local = true;
+  for (const auto& info : publishers) {
+    const auto& profile = info.qos_profile();
+    if (profile.reliability() == rclcpp::ReliabilityPolicy::BestEffort) {
+      any_best_effort = true;
+    }
+    if (profile.durability() != rclcpp::DurabilityPolicy::TransientLocal) {
+      all_transient_local = false;
+    }
+  }
+
+  // BEST_EFFORT matches both kinds of publisher; TRANSIENT_LOCAL only
+  // matches if every publisher offers it.
+  if (any_best_effort) {
+    qos.best_effort();
+  }
+  if (all_transient_local) {
+    qos.transient_local();
+  }
+
+  return qos;
+}
+
 bool GenericSubscriptionManager::subscribe(
     const std::string& topic_name, const std::string& topic_type, Ros2MessageCallback callback) {
   std::lock_guard<std::mutex> lock(mutex_);
@@ -42,7 +77,7 @@ bool GenericSubscriptionManager::subscribe(
       callback(topic_name, msg, receive_time);
     };
 
-    auto subscription = node_->create_generic_subscription(topic_name, topic_type, rclcpp::QoS(100), sub_callback);
+    auto subscription = node_->create_generic_subscription(topic_name, topic_type, adapt_qos(topic_name), sub_callback);
 
     subscriptions_[topic_name] = SubscriptionInfo{subscription, 1};
 

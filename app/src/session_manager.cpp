@@ -75,6 +75,14 @@ bool SessionManager::update_subscriptions(
   }
 
   it->second.subscribed_topics = topics;
+  // Refs can only be held for subscribed topics
+  for (auto held_it = it->second.ref_held_topics.begin(); held_it != it->second.ref_held_topics.end();) {
+    if (topics.find(*held_it) == topics.end()) {
+      held_it = it->second.ref_held_topics.erase(held_it);
+    } else {
+      ++held_it;
+    }
+  }
   return true;
 }
 
@@ -98,7 +106,35 @@ bool SessionManager::remove_subscription(const std::string& client_id, const std
     return false;
   }
 
+  it->second.ref_held_topics.erase(topic);
   return it->second.subscribed_topics.erase(topic) > 0;
+}
+
+bool SessionManager::set_ref_held(const std::string& client_id, const std::string& topic, bool held) {
+  std::lock_guard<std::mutex> lock(mutex_);
+
+  auto it = sessions_.find(client_id);
+  if (it == sessions_.end()) {
+    return false;
+  }
+
+  if (held) {
+    it->second.ref_held_topics.insert(topic);
+  } else {
+    it->second.ref_held_topics.erase(topic);
+  }
+  return true;
+}
+
+std::unordered_set<std::string> SessionManager::get_ref_held_topics(const std::string& client_id) const {
+  std::lock_guard<std::mutex> lock(mutex_);
+
+  auto it = sessions_.find(client_id);
+  if (it == sessions_.end()) {
+    return {};
+  }
+
+  return it->second.ref_held_topics;
 }
 
 std::unordered_map<std::string, double> SessionManager::get_subscriptions(const std::string& client_id) const {

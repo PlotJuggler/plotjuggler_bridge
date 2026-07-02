@@ -353,3 +353,47 @@ TEST_F(MessageBufferTest, MoveMessagesOverwritesExistingOutput) {
   // Buffer should be empty after move
   EXPECT_EQ(buffer_.size(), 0);
 }
+
+// ---------------------------------------------------------------------------
+// BackwardsClockStepDoesNotPurgeFreshMessages
+//
+// TTL cleanup uses the wall clock, which is not monotonic: an NTP step can
+// move it backwards between add_message() calls. Fresh messages whose
+// received_at_ns is ahead of the stepped-back clock must NOT be evicted
+// (unsigned subtraction would wrap to a huge age and purge everything).
+// ---------------------------------------------------------------------------
+TEST_F(MessageBufferTest, BackwardsClockStepDoesNotPurgeFreshMessages) {
+  uint64_t fake_now = 10'000'000'000ULL;  // t = 10 s
+  MessageBuffer buffer(MessageBuffer::kDefaultMaxMessageAgeNs, [&fake_now]() { return fake_now; });
+
+  buffer.add_message("topic1", 1, create_test_data({1}));
+  ASSERT_EQ(buffer.size(), 1);
+
+  // NTP steps the clock back 500 ms — well within the 1 s TTL
+  fake_now -= 500'000'000ULL;
+  buffer.add_message("topic1", 2, create_test_data({2}));
+
+  // Both messages are fresh; neither may be purged
+  EXPECT_EQ(buffer.size(), 2);
+}
+
+// ---------------------------------------------------------------------------
+// ExpiredMessagesStillPurgedWithInjectedClock
+//
+// Companion to the backwards-step test: normal forward aging must still
+// evict messages older than the TTL.
+// ---------------------------------------------------------------------------
+TEST_F(MessageBufferTest, ExpiredMessagesStillPurgedWithInjectedClock) {
+  uint64_t fake_now = 10'000'000'000ULL;
+  MessageBuffer buffer(MessageBuffer::kDefaultMaxMessageAgeNs, [&fake_now]() { return fake_now; });
+
+  buffer.add_message("topic1", 1, create_test_data({1}));
+  ASSERT_EQ(buffer.size(), 1);
+
+  // Advance past the 1 s TTL
+  fake_now += 1'500'000'000ULL;
+  buffer.add_message("topic1", 2, create_test_data({2}));
+
+  // The first message is stale and must be gone; the new one remains
+  EXPECT_EQ(buffer.size(), 1);
+}

@@ -25,6 +25,7 @@
 #include <mutex>
 #include <nlohmann/json.hpp>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -182,6 +183,9 @@ class MockTopicSource : public TopicSourceInterface {
   }
 
   std::string get_schema(const std::string& topic_name) override {
+    if (empty_schema_topics_.count(topic_name) > 0) {
+      return "";  // legitimately empty definition (e.g. std_msgs/msg/Empty)
+    }
     for (const auto& t : topics_) {
       if (t.name == topic_name) {
         return "uint32 seq\nstring data\n";
@@ -206,8 +210,14 @@ class MockTopicSource : public TopicSourceInterface {
         topics_.end());
   }
 
+  // Test helper: mark a topic whose schema is legitimately empty
+  void set_empty_schema_topic(const std::string& name) {
+    empty_schema_topics_.insert(name);
+  }
+
  private:
   std::vector<TopicInfo> topics_;
+  std::unordered_set<std::string> empty_schema_topics_;
 };
 
 // ---------------------------------------------------------------------------
@@ -216,10 +226,12 @@ class MockTopicSource : public TopicSourceInterface {
 class MockSubscriptionManager : public SubscriptionManagerInterface {
  public:
   void set_message_callback(MessageCallback callback) override {
+    std::lock_guard<std::mutex> lock(mutex_);
     callback_ = std::move(callback);
   }
 
   bool subscribe(const std::string& topic_name, const std::string& /*topic_type*/) override {
+    std::lock_guard<std::mutex> lock(mutex_);
     if (known_topics_.find(topic_name) == known_topics_.end()) {
       return false;
     }
@@ -228,6 +240,7 @@ class MockSubscriptionManager : public SubscriptionManagerInterface {
   }
 
   bool unsubscribe(const std::string& topic_name) override {
+    std::lock_guard<std::mutex> lock(mutex_);
     auto it = ref_counts_.find(topic_name);
     if (it == ref_counts_.end() || it->second <= 0) {
       underflow_detected_ = true;
@@ -241,33 +254,42 @@ class MockSubscriptionManager : public SubscriptionManagerInterface {
   }
 
   void unsubscribe_all() override {
+    std::lock_guard<std::mutex> lock(mutex_);
     ref_counts_.clear();
   }
 
   // Test helpers
   void add_known_topic(const std::string& topic_name) {
+    std::lock_guard<std::mutex> lock(mutex_);
     known_topics_.insert(topic_name);
   }
 
   bool is_subscribed(const std::string& topic_name) const {
+    std::lock_guard<std::mutex> lock(mutex_);
     auto it = ref_counts_.find(topic_name);
     return it != ref_counts_.end() && it->second > 0;
   }
 
   int ref_count(const std::string& topic_name) const {
+    std::lock_guard<std::mutex> lock(mutex_);
     auto it = ref_counts_.find(topic_name);
     return (it != ref_counts_.end()) ? it->second : 0;
   }
 
   bool has_underflow() const {
+    std::lock_guard<std::mutex> lock(mutex_);
     return underflow_detected_;
   }
 
   void reset_underflow() {
+    std::lock_guard<std::mutex> lock(mutex_);
     underflow_detected_ = false;
   }
 
  private:
+  // Locked like the real backend managers so concurrency tests can drive
+  // BridgeServer from multiple threads without racing inside the mock.
+  mutable std::mutex mutex_;
   MessageCallback callback_;
   std::unordered_set<std::string> known_topics_;
   std::unordered_map<std::string, int> ref_counts_;
@@ -1634,4 +1656,350 @@ TEST_F(BridgeServerTest, InitializeRejectsNegativePublishRate) {
   auto neg_rate_server =
       std::make_unique<BridgeServer>(mock_topic_source_, mock_sub_manager_, mock_, 19999, 10.0, -1.0);
   EXPECT_FALSE(neg_rate_server->initialize());
+}
+
+// ---------------------------------------------------------------------------
+// UnsubscribeWhilePausedDoesNotDoubleDecrement
+//
+// A paused client's subscription refs were already released by pause.
+// Unsubscribing while paused must NOT decrement again, or a topic shared
+// with another client would be destroyed under it.
+// ---------------------------------------------------------------------------
+TEST_F(BridgeServerTest, UnsubscribeWhilePausedDoesNotDoubleDecrement) {
+  ASSERT_TRUE(server_->initialize());
+  mock_topic_source_->set_topics({{"/shared", "std_msgs/msg/String"}});
+  mock_sub_manager_->add_known_topic("/shared");
+
+  json sub;
+  sub["command"] = "subscribe";
+  sub["topics"] = json::array({"/shared"});
+
+  // Client A and client B both subscribe to /shared (ref = 2)
+  mock_->push_request("client_a", sub.dump());
+  server_->process_requests();
+  mock_->push_request("client_b", sub.dump());
+  server_->process_requests();
+  ASSERT_EQ(mock_sub_manager_->ref_count("/shared"), 2);
+
+  // Client A pauses (releases its ref, ref = 1)
+  json pause_req;
+  pause_req["command"] = "pause";
+  mock_->push_request("client_a", pause_req.dump());
+  server_->process_requests();
+  ASSERT_EQ(mock_sub_manager_->ref_count("/shared"), 1);
+
+  // Client A unsubscribes while paused — its ref is already released,
+  // so the count must stay at 1 (client B's ref).
+  json unsub;
+  unsub["command"] = "unsubscribe";
+  unsub["topics"] = json::array({"/shared"});
+  mock_->push_request("client_a", unsub.dump());
+  server_->process_requests();
+
+  EXPECT_EQ(mock_sub_manager_->ref_count("/shared"), 1);
+  EXPECT_TRUE(mock_sub_manager_->is_subscribed("/shared"));
+  EXPECT_FALSE(mock_sub_manager_->has_underflow());
+
+  // Client A resuming afterwards must not re-acquire the unsubscribed topic.
+  json resume_req;
+  resume_req["command"] = "resume";
+  mock_->push_request("client_a", resume_req.dump());
+  server_->process_requests();
+  EXPECT_EQ(mock_sub_manager_->ref_count("/shared"), 1);
+}
+
+// ---------------------------------------------------------------------------
+// SubscribeWhilePausedDefersRefUntilResume
+//
+// A paused client holds zero subscription refs by invariant. Subscribing
+// while paused must record the topic in the session but only acquire the
+// middleware ref on resume — otherwise resume double-acquires and the ref
+// leaks forever after disconnect.
+// ---------------------------------------------------------------------------
+TEST_F(BridgeServerTest, SubscribeWhilePausedDefersRefUntilResume) {
+  ASSERT_TRUE(server_->initialize());
+  mock_topic_source_->set_topics({{"/x", "std_msgs/msg/String"}});
+  mock_sub_manager_->add_known_topic("/x");
+
+  // Pause first (creates the session)
+  json pause_req;
+  pause_req["command"] = "pause";
+  mock_->push_request("client_p", pause_req.dump());
+  server_->process_requests();
+
+  // Subscribe while paused: session records the topic, no ref acquired yet
+  json sub;
+  sub["command"] = "subscribe";
+  sub["topics"] = json::array({"/x"});
+  mock_->push_request("client_p", sub.dump());
+  server_->process_requests();
+  EXPECT_EQ(mock_sub_manager_->ref_count("/x"), 0);
+
+  // Resume: exactly one ref acquired
+  json resume_req;
+  resume_req["command"] = "resume";
+  mock_->push_request("client_p", resume_req.dump());
+  server_->process_requests();
+  EXPECT_EQ(mock_sub_manager_->ref_count("/x"), 1);
+
+  // Disconnect: the ref is fully released, nothing leaks
+  mock_->simulate_disconnect("client_p");
+  EXPECT_EQ(mock_sub_manager_->ref_count("/x"), 0);
+  EXPECT_FALSE(mock_sub_manager_->has_underflow());
+}
+
+// ---------------------------------------------------------------------------
+// PauseVsDisconnectRaceKeepsRefCountsConsistent
+//
+// cleanup_session runs on the middleware (WebSocket) thread while pause
+// runs on the event-loop thread. If pause's state flip and ref release are
+// not atomic with respect to cleanup, both paths release the same refs and
+// the count underflows (destroying subscriptions other clients still use).
+// ---------------------------------------------------------------------------
+TEST_F(BridgeServerTest, PauseVsDisconnectRaceKeepsRefCountsConsistent) {
+  ASSERT_TRUE(server_->initialize());
+  mock_topic_source_->set_topics({{"/r", "std_msgs/msg/String"}});
+  mock_sub_manager_->add_known_topic("/r");
+
+  json sub;
+  sub["command"] = "subscribe";
+  sub["topics"] = json::array({"/r"});
+  json pause_req;
+  pause_req["command"] = "pause";
+
+  constexpr int kIterations = 2000;
+  for (int i = 0; i < kIterations; i++) {
+    const std::string client = "racer_" + std::to_string(i);
+
+    mock_->push_request(client, sub.dump());
+    server_->process_requests();
+    ASSERT_EQ(mock_sub_manager_->ref_count("/r"), 1);
+
+    // Pause on the "event loop" thread, disconnect on the "middleware" thread
+    mock_->push_request(client, pause_req.dump());
+    std::thread event_loop([&]() { server_->process_requests(); });
+    std::thread ws_thread([&]() { mock_->simulate_disconnect(client); });
+    event_loop.join();
+    ws_thread.join();
+
+    ASSERT_FALSE(mock_sub_manager_->has_underflow()) << "double ref release on iteration " << i;
+    ASSERT_EQ(mock_sub_manager_->ref_count("/r"), 0) << "leaked ref on iteration " << i;
+
+    // A pause that lost the race may have recreated an empty session; drop it
+    // so the next iteration starts clean.
+    mock_->simulate_disconnect(client);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// SubscribeClampsExcessiveRateLimit
+//
+// max_rate_hz is client-controlled. Values whose milli-hertz representation
+// exceeds int range would be undefined behavior in the rate-limit math, so
+// the server must clamp to a sane maximum (1e6 Hz) at parse time.
+// ---------------------------------------------------------------------------
+TEST_F(BridgeServerTest, SubscribeClampsExcessiveRateLimit) {
+  ASSERT_TRUE(server_->initialize());
+  mock_topic_source_->set_topics({{"/t", "std_msgs/msg/String"}});
+  mock_sub_manager_->add_known_topic("/t");
+
+  json sub;
+  sub["command"] = "subscribe";
+  sub["topics"] = json::array({{{"name", "/t"}, {"max_rate_hz", 1e15}}});
+  mock_->push_request("client_clamp_hi", sub.dump());
+  server_->process_requests();
+
+  json response = mock_->pop_reply("client_clamp_hi");
+  ASSERT_FALSE(response.is_discarded());
+  ASSERT_TRUE(response.contains("rate_limits"));
+  ASSERT_TRUE(response["rate_limits"].contains("/t"));
+  EXPECT_LE(response["rate_limits"]["/t"].get<double>(), 1e6);
+}
+
+// ---------------------------------------------------------------------------
+// SubscribeClampsTinyRateLimitUp
+//
+// Rates in (0, 0.001) truncate to zero milli-hertz, which the publish path
+// treats as "unlimited" — the opposite of the client's intent. Such rates
+// must be clamped UP to the smallest representable limit (0.001 Hz).
+// ---------------------------------------------------------------------------
+TEST_F(BridgeServerTest, SubscribeClampsTinyRateLimitUp) {
+  ASSERT_TRUE(server_->initialize());
+  mock_topic_source_->set_topics({{"/t", "std_msgs/msg/String"}});
+  mock_sub_manager_->add_known_topic("/t");
+
+  json sub;
+  sub["command"] = "subscribe";
+  sub["topics"] = json::array({{{"name", "/t"}, {"max_rate_hz", 0.0005}}});
+  mock_->push_request("client_clamp_lo", sub.dump());
+  server_->process_requests();
+
+  json response = mock_->pop_reply("client_clamp_lo");
+  ASSERT_FALSE(response.is_discarded());
+  ASSERT_TRUE(response.contains("rate_limits"));
+  ASSERT_TRUE(response["rate_limits"].contains("/t"));
+  EXPECT_GE(response["rate_limits"]["/t"].get<double>(), 0.001);
+}
+
+// ---------------------------------------------------------------------------
+// ResubscribeWithBareStringPreservesRateLimit
+//
+// A bare-string topic entry means "no rate specified", not "unlimited".
+// Re-asserting a subscription with a plain string (a natural client pattern)
+// must not silently wipe a previously configured rate limit.
+// ---------------------------------------------------------------------------
+TEST_F(BridgeServerTest, ResubscribeWithBareStringPreservesRateLimit) {
+  ASSERT_TRUE(server_->initialize());
+  mock_topic_source_->set_topics({{"/scan", "sensor_msgs/msg/LaserScan"}});
+  mock_sub_manager_->add_known_topic("/scan");
+
+  json sub_with_rate;
+  sub_with_rate["command"] = "subscribe";
+  sub_with_rate["topics"] = json::array({{{"name", "/scan"}, {"max_rate_hz", 10.0}}});
+  mock_->push_request("client_rate_keep", sub_with_rate.dump());
+  server_->process_requests();
+  mock_->pop_reply("client_rate_keep");
+
+  json sub_bare;
+  sub_bare["command"] = "subscribe";
+  sub_bare["topics"] = json::array({"/scan"});
+  mock_->push_request("client_rate_keep", sub_bare.dump());
+  server_->process_requests();
+
+  json response = mock_->pop_reply("client_rate_keep");
+  ASSERT_FALSE(response.is_discarded());
+  ASSERT_TRUE(response.contains("rate_limits")) << "bare-string re-subscribe wiped the rate limit";
+  ASSERT_TRUE(response["rate_limits"].contains("/scan"));
+  EXPECT_DOUBLE_EQ(response["rate_limits"]["/scan"].get<double>(), 10.0);
+}
+
+// ---------------------------------------------------------------------------
+// ResubscribeWithExplicitZeroClearsRateLimit
+//
+// Companion to the bare-string test: an explicit max_rate_hz of 0 is the
+// documented way to remove a rate limit, and must keep working.
+// ---------------------------------------------------------------------------
+TEST_F(BridgeServerTest, ResubscribeWithExplicitZeroClearsRateLimit) {
+  ASSERT_TRUE(server_->initialize());
+  mock_topic_source_->set_topics({{"/scan", "sensor_msgs/msg/LaserScan"}});
+  mock_sub_manager_->add_known_topic("/scan");
+
+  json sub_with_rate;
+  sub_with_rate["command"] = "subscribe";
+  sub_with_rate["topics"] = json::array({{{"name", "/scan"}, {"max_rate_hz", 10.0}}});
+  mock_->push_request("client_rate_clear", sub_with_rate.dump());
+  server_->process_requests();
+  mock_->pop_reply("client_rate_clear");
+
+  json sub_zero;
+  sub_zero["command"] = "subscribe";
+  sub_zero["topics"] = json::array({{{"name", "/scan"}, {"max_rate_hz", 0.0}}});
+  mock_->push_request("client_rate_clear", sub_zero.dump());
+  server_->process_requests();
+
+  json response = mock_->pop_reply("client_rate_clear");
+  ASSERT_FALSE(response.is_discarded());
+  EXPECT_FALSE(response.contains("rate_limits") && response["rate_limits"].contains("/scan"))
+      << "explicit max_rate_hz=0 must clear the limit";
+}
+
+// ---------------------------------------------------------------------------
+// ResumePreservesTopicsMissingFromDiscovery
+//
+// docs/API.md: pause "preserves subscriptions and rate limits". A publisher
+// that is briefly down while the client resumes must not cost the client its
+// subscription: the topic stays in the session (without a middleware ref)
+// and is re-acquired on a later resume once the publisher is back.
+// ---------------------------------------------------------------------------
+TEST_F(BridgeServerTest, ResumePreservesTopicsMissingFromDiscovery) {
+  ASSERT_TRUE(server_->initialize());
+  mock_topic_source_->set_topics({{"/gone", "std_msgs/msg/String"}});
+  mock_sub_manager_->add_known_topic("/gone");
+
+  json sub;
+  sub["command"] = "subscribe";
+  sub["topics"] = json::array({"/gone"});
+  mock_->push_request("client_flaky", sub.dump());
+  server_->process_requests();
+  ASSERT_EQ(mock_sub_manager_->ref_count("/gone"), 1);
+
+  json pause_req;
+  pause_req["command"] = "pause";
+  json resume_req;
+  resume_req["command"] = "resume";
+
+  // Pause, then the publisher restarts: topic vanishes from discovery
+  mock_->push_request("client_flaky", pause_req.dump());
+  server_->process_requests();
+  ASSERT_EQ(mock_sub_manager_->ref_count("/gone"), 0);
+  mock_topic_source_->remove_topic("/gone");
+
+  // Resume while the topic is missing: no ref, no underflow, but the
+  // subscription must survive in the session
+  mock_->push_request("client_flaky", resume_req.dump());
+  server_->process_requests();
+  EXPECT_EQ(mock_sub_manager_->ref_count("/gone"), 0);
+  EXPECT_FALSE(mock_sub_manager_->has_underflow());
+
+  // Publisher comes back; a later pause/resume cycle re-acquires the topic
+  mock_topic_source_->set_topics({{"/gone", "std_msgs/msg/String"}});
+  mock_->push_request("client_flaky", pause_req.dump());
+  server_->process_requests();
+  mock_->push_request("client_flaky", resume_req.dump());
+  server_->process_requests();
+  EXPECT_EQ(mock_sub_manager_->ref_count("/gone"), 1) << "subscription was dropped while the publisher was away";
+
+  // Disconnect releases exactly the refs that are held
+  mock_->simulate_disconnect("client_flaky");
+  EXPECT_EQ(mock_sub_manager_->ref_count("/gone"), 0);
+  EXPECT_FALSE(mock_sub_manager_->has_underflow());
+}
+
+// ---------------------------------------------------------------------------
+// ProcessRequestsDrainsAllPendingRequests
+//
+// process_requests() is driven by a 10 ms timer, so handling a single
+// request per invocation caps command throughput at ~100 req/s and lets a
+// burst (or one chatty client) starve other clients' heartbeats into false
+// session timeouts. One invocation must drain the pending queue.
+// ---------------------------------------------------------------------------
+TEST_F(BridgeServerTest, ProcessRequestsDrainsAllPendingRequests) {
+  ASSERT_TRUE(server_->initialize());
+
+  json hb;
+  hb["command"] = "heartbeat";
+  for (int i = 0; i < 5; i++) {
+    mock_->push_request("drain_client_" + std::to_string(i), hb.dump());
+  }
+
+  server_->process_requests();
+
+  EXPECT_EQ(server_->get_active_session_count(), 5u) << "one process_requests call must handle all queued requests";
+}
+
+// ---------------------------------------------------------------------------
+// SubscribeAcceptsEmptySchemaDefinition
+//
+// Some types have legitimately empty definitions (std_msgs/msg/Empty is a
+// 0-byte .msg). The topic source signals extraction FAILURE by throwing;
+// an empty string is a valid schema and must not fail the subscription.
+// ---------------------------------------------------------------------------
+TEST_F(BridgeServerTest, SubscribeAcceptsEmptySchemaDefinition) {
+  ASSERT_TRUE(server_->initialize());
+  mock_topic_source_->set_topics({{"/trigger", "std_msgs/msg/Empty"}});
+  mock_topic_source_->set_empty_schema_topic("/trigger");
+  mock_sub_manager_->add_known_topic("/trigger");
+
+  json sub;
+  sub["command"] = "subscribe";
+  sub["topics"] = json::array({"/trigger"});
+  mock_->push_request("client_empty_schema", sub.dump());
+  server_->process_requests();
+
+  json response = mock_->pop_reply("client_empty_schema");
+  ASSERT_FALSE(response.is_discarded());
+  EXPECT_EQ(response["status"], "success") << response.dump();
+  ASSERT_TRUE(response["schemas"].contains("/trigger"));
+  EXPECT_EQ(response["schemas"]["/trigger"]["definition"], "");
+  EXPECT_EQ(mock_sub_manager_->ref_count("/trigger"), 1);
 }

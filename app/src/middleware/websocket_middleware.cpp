@@ -30,6 +30,18 @@ WebSocketMiddleware::WebSocketMiddleware() : initialized_(false) {}
 
 WebSocketMiddleware::~WebSocketMiddleware() {
   shutdown();
+
+  // Join any stop thread that outlived its shutdown timeout. Blocking here
+  // is deliberate: letting it run detached past main() races static
+  // destruction.
+  std::thread pending;
+  {
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    pending = std::move(pending_stop_thread_);
+  }
+  if (pending.joinable()) {
+    pending.join();
+  }
 }
 
 tl::expected<void, std::string> WebSocketMiddleware::initialize(uint16_t port) {
@@ -44,11 +56,16 @@ tl::expected<void, std::string> WebSocketMiddleware::initialize(uint16_t port) {
   server_->setOnClientMessageCallback([this](
                                           std::shared_ptr<ix::ConnectionState> connection_state,
                                           ix::WebSocket& web_socket, const ix::WebSocketMessagePtr& msg) {
+    // Copy the server pointer under the same lock as the initialized_ check:
+    // shutdown() concurrently moves server_ away, so touching the member
+    // after releasing the lock would dereference a null shared_ptr.
+    std::shared_ptr<ix::WebSocketServer> server;
     {
       std::lock_guard<std::mutex> state_lock(state_mutex_);
-      if (!initialized_) {
+      if (!initialized_ || !server_) {
         return;
       }
+      server = server_;
     }
 
     std::string client_id = connection_state->getId();
@@ -56,7 +73,7 @@ tl::expected<void, std::string> WebSocketMiddleware::initialize(uint16_t port) {
     if (msg->type == ix::WebSocketMessageType::Open) {
       {
         std::lock_guard<std::mutex> clients_lock(clients_mutex_);
-        for (const auto& client : server_->getClients()) {
+        for (const auto& client : server->getClients()) {
           if (client.get() == &web_socket) {
             clients_[client_id] = client;
             break;
@@ -104,7 +121,6 @@ tl::expected<void, std::string> WebSocketMiddleware::initialize(uint16_t port) {
           }
           incoming_queue_.push(std::move(req));
         }
-        queue_cv_.notify_one();
       }
     }
   });
@@ -138,12 +154,10 @@ void WebSocketMiddleware::shutdown() {
     server_to_stop = std::move(server_);
   }
 
-  queue_cv_.notify_all();
-
   if (server_to_stop) {
     // Replace the message callback with a no-op before stopping. The original
-    // callback captures `this`, so it must not fire after the WebSocketMiddleware
-    // instance is destroyed (which can happen if the stop thread is detached on timeout).
+    // callback captures `this`, so it must not fire while the stop thread
+    // outlives this shutdown call (it is joined in the destructor on timeout).
     server_to_stop->setOnClientMessageCallback(
         [](std::shared_ptr<ix::ConnectionState>, ix::WebSocket&, const ix::WebSocketMessagePtr&) {});
 
@@ -173,14 +187,19 @@ void WebSocketMiddleware::shutdown() {
       stop_thread.join();
       spdlog::debug("[shutdown] Server stop completed (took {}ms)", elapsed_ms);
     } else {
-      // Timeout reached. Detach the thread and let it finish in the background.
-      // The thread captures server_to_stop by shared_ptr, so the server
-      // will be destroyed when stop() finishes and the thread exits.
-      // The message callback was already cleared above, so no use-after-free.
+      // Timeout reached. Keep the thread joinable and hand it to the
+      // destructor: a detached thread still running IXWebSocket teardown
+      // during static destruction (after main() returns) is undefined
+      // behavior. shutdown() itself stays bounded; only final destruction
+      // waits for a hung stop() to complete.
       spdlog::warn(
-          "[shutdown] Server stop timed out after {}s ({}ms elapsed), detaching shutdown thread",
+          "[shutdown] Server stop timed out after {}s ({}ms elapsed), deferring join to destructor",
           kShutdownTimeoutSeconds, elapsed_ms);
-      stop_thread.detach();
+      std::lock_guard<std::mutex> lock(state_mutex_);
+      if (pending_stop_thread_.joinable()) {
+        pending_stop_thread_.join();
+      }
+      pending_stop_thread_ = std::move(stop_thread);
     }
   }
 
@@ -204,10 +223,12 @@ bool WebSocketMiddleware::receive_request(std::vector<uint8_t>& data, std::strin
     }
   }
 
-  std::unique_lock<std::mutex> lock(queue_mutex_);
+  // Truly non-blocking: callers poll from timers/event loops, so waiting on
+  // the condition variable here would park the caller's thread (up to 10 ms
+  // per empty poll) and delay everything else it drives.
+  std::lock_guard<std::mutex> lock(queue_mutex_);
 
-  if (!queue_cv_.wait_for(
-          lock, std::chrono::milliseconds(kReceiveTimeoutMs), [this]() { return !incoming_queue_.empty(); })) {
+  if (incoming_queue_.empty()) {
     return false;
   }
 

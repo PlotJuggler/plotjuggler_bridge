@@ -141,8 +141,17 @@ BridgeServer does NOT own timers. The entry point (`main.cpp`) drives the event 
 
 ### Message Serialization Format
 
+Each binary frame starts with a fixed 16-byte header, followed by the
+ZSTD-compressed message stream (see docs/API.md for the full layout):
+
 ```
-For each message (streamed, no header):
+Frame header (16 bytes, uncompressed):
+  - Magic "PJRB" (uint32_t LE, 0x42524A50)
+  - Message count (uint32_t LE)
+  - Uncompressed payload size (uint32_t LE)
+  - Flags (uint32_t LE)
+
+Then, for each message in the (compressed) payload:
   - Topic name length (uint16_t LE)
   - Topic name (N bytes UTF-8)
   - Timestamp (uint64_t ns since epoch, LE)
@@ -188,7 +197,7 @@ For each message (streamed, no header):
 
 ## Testing
 
-### Test Count: 154 unit tests across 10 test suites
+### Test Count: 174 unit tests across 10 test suites
 
 ### Commands
 ```bash
@@ -252,7 +261,7 @@ pj_bridge_fastdds --domains 0 1 --port 9090 --publish-rate 50 --session-timeout 
 
 ---
 
-**Last Updated**: 2026-02-26
+**Last Updated**: 2026-07-02
 **Project Phase**: Unified multi-backend architecture
-**Test Status**: 154 unit tests passing (all sanitizers clean)
+**Test Status**: 174 unit tests passing (all sanitizers clean)
 **Executables**: `pj_bridge_ros2` (ROS2), `pj_bridge_rti` (RTI DDS, disabled), `pj_bridge_fastdds` (FastDDS)

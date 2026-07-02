@@ -81,13 +81,13 @@ int main(int argc, char** argv) {
 
     auto timeout_timer = node->create_wall_timer(1s, [&server]() { server.check_session_timeouts(); });
 
-    // Spin until shutdown
+    // Spin until shutdown. spin() blocks waiting for work and returns when
+    // rclcpp::shutdown() runs (e.g. on SIGINT) — unlike spin_some() in a
+    // loop, which returns immediately when idle and busy-spins a full core.
     rclcpp::executors::SingleThreadedExecutor executor;
     executor.add_node(node);
 
-    while (rclcpp::ok()) {
-      executor.spin_some(100ms);
-    }
+    executor.spin();
 
     // Graceful shutdown
     RCLCPP_INFO(node->get_logger(), "Shutting down bridge server...");

@@ -26,6 +26,8 @@
 #include <unordered_map>
 #include <unordered_set>
 
+#include "tl/expected.hpp"
+
 namespace pj_bridge {
 
 /**
@@ -44,9 +46,22 @@ class SchemaExtractor {
    * @brief Get message definition text
    *
    * @param message_type Full message type name (e.g., "std_msgs/msg/String")
-   * @return Message definition text, or empty string on failure
+   * @return Message definition text, or empty string on failure.
+   *         Note: a legitimately empty definition (std_msgs/msg/Empty) is
+   *         indistinguishable from failure here — use
+   *         try_get_message_definition() to tell them apart.
    */
   std::string get_message_definition(const std::string& message_type);
+
+  /**
+   * @brief Get message definition text, distinguishing failure from a
+   *        legitimately empty definition
+   *
+   * @param message_type Full message type name (e.g., "std_msgs/msg/String")
+   * @return Definition text (possibly empty, e.g. std_msgs/msg/Empty) on
+   *         success, or an error description on failure.
+   */
+  tl::expected<std::string, std::string> try_get_message_definition(const std::string& message_type);
 
  private:
   bool parse_message_type(const std::string& message_type, std::string& library_name, std::string& type_name) const;

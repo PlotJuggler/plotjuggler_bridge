@@ -83,10 +83,10 @@ class BridgeServer {
   /**
    * @brief Process incoming API requests
    *
-   * Non-blocking call that checks for pending requests,
+   * Non-blocking call that drains pending requests (bounded per call),
    * processes them, and sends responses.
    *
-   * @return true if a request was processed, false if no requests pending
+   * @return true if at least one request was processed, false if none pending
    */
   bool process_requests();
 
@@ -123,6 +123,7 @@ class BridgeServer {
   StatsSnapshot snapshot_and_reset_stats();
 
  private:
+  void process_single_request(const std::vector<uint8_t>& request_data, const std::string& client_id);
   std::string handle_get_topics(const std::string& client_id, const nlohmann::json& request);
   std::string handle_subscribe(const std::string& client_id, const nlohmann::json& request);
   std::string handle_unsubscribe(const std::string& client_id, const nlohmann::json& request);
