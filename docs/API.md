@@ -112,6 +112,25 @@ Non-whitelisted topics are excluded from `get_topics` responses, and
 `subscribe` requests targeting them fail per-topic with reason
 `"Topic not whitelisted"` (see below).
 
+## QoS Depth Heuristics (ROS2 only)
+
+When creating a subscription, the ROS2 backend picks a KEEP_LAST history
+depth by summing the history depth every discovered publisher on the topic
+offers (so a burst from every publisher still fits in the subscription
+queue), then clamping the total to a configurable range — the same heuristic
+`foxglove_bridge`'s `determineQoS()` uses:
+
+- **ROS2**: int parameters `min_qos_depth` (default `1`) and `max_qos_depth`
+  (default `100`).
+
+If no publishers are discovered yet, the depth defaults to `min(100,
+max_qos_depth)`. Both values must be `>= 0` and `min_qos_depth <=
+max_qos_depth`; the server refuses to start otherwise. This is independent of
+the subscription's reliability/durability, which is separately adapted to
+match what the discovered publishers offer (a RELIABLE subscription still
+switches to BEST_EFFORT if any publisher is BEST_EFFORT, and to
+TRANSIENT_LOCAL only if every publisher offers it).
+
 ## Subscribe
 
 Subscribe to one or more topics. **Breaking change:** Subscribe now uses an additive model - it only adds topics without removing existing subscriptions. Use the `unsubscribe` command to remove topics.

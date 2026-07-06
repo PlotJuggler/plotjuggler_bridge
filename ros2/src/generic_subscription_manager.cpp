@@ -19,11 +19,15 @@
 
 #include "pj_bridge_ros2/generic_subscription_manager.hpp"
 
+#include <algorithm>
+
 #include "pj_bridge/time_utils.hpp"
 
 namespace pj_bridge {
 
-GenericSubscriptionManager::GenericSubscriptionManager(rclcpp::Node::SharedPtr node) : node_(node) {}
+GenericSubscriptionManager::GenericSubscriptionManager(
+    rclcpp::Node::SharedPtr node, size_t min_qos_depth, size_t max_qos_depth)
+    : node_(node), min_qos_depth_(min_qos_depth), max_qos_depth_(max_qos_depth) {}
 
 rclcpp::QoS GenericSubscriptionManager::adapt_qos(const std::string& topic_name) const {
   // Match the QoS the publishers actually offer (same policy as rosbag2):
@@ -33,11 +37,17 @@ rclcpp::QoS GenericSubscriptionManager::adapt_qos(const std::string& topic_name)
 
   auto publishers = node_->get_publishers_info_by_topic(topic_name);
   if (publishers.empty()) {
+    qos.keep_last(std::min<size_t>(100, max_qos_depth_));
     return qos;
   }
 
   bool any_best_effort = false;
   bool all_transient_local = true;
+  // Depth aggregation adapted from foxglove_bridge (MIT License,
+  // Copyright (c) Foxglove Technologies Inc):
+  // sum the publishers' history depths so a burst from every publisher
+  // still fits, then clamp to [min_qos_depth, max_qos_depth].
+  size_t total_depth = 0;
   for (const auto& info : publishers) {
     const auto& profile = info.qos_profile();
     if (profile.reliability() == rclcpp::ReliabilityPolicy::BestEffort) {
@@ -46,7 +56,9 @@ rclcpp::QoS GenericSubscriptionManager::adapt_qos(const std::string& topic_name)
     if (profile.durability() != rclcpp::DurabilityPolicy::TransientLocal) {
       all_transient_local = false;
     }
+    total_depth += profile.depth();
   }
+  qos.keep_last(std::clamp(total_depth, min_qos_depth_, max_qos_depth_));
 
   // BEST_EFFORT matches both kinds of publisher; TRANSIENT_LOCAL only
   // matches if every publisher offers it.

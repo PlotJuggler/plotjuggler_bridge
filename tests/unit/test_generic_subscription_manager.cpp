@@ -21,6 +21,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstdlib>
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/imu.hpp>
 #include <thread>
@@ -28,6 +29,32 @@
 #include "pj_bridge_ros2/generic_subscription_manager.hpp"
 
 using namespace pj_bridge;
+
+namespace {
+// History depth is a purely local resource policy, not one of the
+// requested/offered QoS policies DDS discovery is required to propagate
+// (unlike reliability/durability, which affect wire compatibility). This
+// workspace's default RMW (rmw_fastrtps_cpp) does not report it — publishers
+// discovered via get_publishers_info_by_topic() always come back with depth
+// 0 / history UNKNOWN — whereas CycloneDDS does propagate it. The QoS depth
+// aggregation tests below need a real (non-mocked) discovered depth to
+// exercise adapt_qos(), so force CycloneDDS for this test binary.
+//
+// The RMW implementation is selected once per process and cached on first
+// use, so this must happen before any rclcpp::init() call anywhere in the
+// binary. Static objects across all translation units are guaranteed to be
+// constructed before main() runs (and therefore before any TEST_F body),
+// so a file-scope static works regardless of test execution order. An
+// operator's own explicit RMW_IMPLEMENTATION is still respected.
+struct ForceCycloneDdsForQosDepthTests {
+  ForceCycloneDdsForQosDepthTests() {
+    if (std::getenv("RMW_IMPLEMENTATION") == nullptr) {
+      setenv("RMW_IMPLEMENTATION", "rmw_cyclonedds_cpp", 1);
+    }
+  }
+};
+const ForceCycloneDdsForQosDepthTests force_cyclonedds_for_qos_depth_tests;
+}  // namespace
 
 class GenericSubscriptionManagerTest : public ::testing::Test {
  protected:
@@ -46,6 +73,20 @@ class GenericSubscriptionManagerTest : public ::testing::Test {
   rclcpp::Node::SharedPtr node_;
   std::unique_ptr<GenericSubscriptionManager> manager_;
 };
+
+namespace {
+// Publisher discovery is asynchronous even within a single process, so tests
+// must poll the graph rather than assume a freshly created publisher is
+// immediately visible via get_publishers_info_by_topic().
+void wait_for_publisher_count(
+    const rclcpp::Node::SharedPtr& node, const std::string& topic_name, size_t expected_count) {
+  auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  while (node->get_publishers_info_by_topic(topic_name).size() < expected_count &&
+         std::chrono::steady_clock::now() < deadline) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+}
+}  // namespace
 
 TEST_F(GenericSubscriptionManagerTest, Subscribe) {
   bool callback_called = false;
@@ -226,6 +267,9 @@ TEST_F(GenericSubscriptionManagerTest, MultipleTopicsIndependent) {
 // ---------------------------------------------------------------------------
 TEST_F(GenericSubscriptionManagerTest, AdaptsQosToBestEffortPublisher) {
   auto publisher = node_->create_publisher<sensor_msgs::msg::Imu>("/qos_be_topic", rclcpp::SensorDataQoS());
+  // Wait for discovery before subscribing so adapt_qos() sees the publisher
+  // (discovery is asynchronous and its latency varies by RMW implementation).
+  wait_for_publisher_count(node_, "/qos_be_topic", 1);
 
   std::atomic<int> received{0};
   auto callback = [&received](const std::string&, const std::shared_ptr<rclcpp::SerializedMessage>&, uint64_t) {
@@ -246,4 +290,50 @@ TEST_F(GenericSubscriptionManagerTest, AdaptsQosToBestEffortPublisher) {
   }
 
   EXPECT_GT(received.load(), 0) << "RELIABLE subscription never matches a BEST_EFFORT publisher";
+}
+
+// ---------------------------------------------------------------------------
+// QoS depth aggregation
+//
+// Depth aggregation adapted from foxglove_bridge (MIT License, Copyright (c)
+// Foxglove Technologies Inc): sum the publishers' history depths so a burst
+// from every publisher still fits, then clamp to [min_qos_depth, max_qos_depth].
+// (See the ForceCycloneDdsForQosDepthTests note above for why this test
+// binary forces CycloneDDS.)
+// ---------------------------------------------------------------------------
+
+TEST_F(GenericSubscriptionManagerTest, AdaptQosDepthMatchesSinglePublisher) {
+  auto publisher = node_->create_publisher<sensor_msgs::msg::Imu>("/qos_depth_topic1", rclcpp::QoS(10));
+  wait_for_publisher_count(node_, "/qos_depth_topic1", 1);
+
+  rclcpp::QoS qos = manager_->adapt_qos("/qos_depth_topic1");
+
+  EXPECT_EQ(qos.depth(), 10u);
+}
+
+TEST_F(GenericSubscriptionManagerTest, AdaptQosDepthSumsAcrossPublishersClampedToMax) {
+  auto publisher1 = node_->create_publisher<sensor_msgs::msg::Imu>("/qos_depth_topic2", rclcpp::QoS(60));
+  auto publisher2 = node_->create_publisher<sensor_msgs::msg::Imu>("/qos_depth_topic2", rclcpp::QoS(60));
+  wait_for_publisher_count(node_, "/qos_depth_topic2", 2);
+
+  rclcpp::QoS qos = manager_->adapt_qos("/qos_depth_topic2");
+
+  // 60 + 60 = 120, clamped to the default max_qos_depth of 100.
+  EXPECT_EQ(qos.depth(), 100u);
+}
+
+TEST_F(GenericSubscriptionManagerTest, AdaptQosDepthClampedToConfiguredMinimum) {
+  auto manager_with_min = std::make_unique<GenericSubscriptionManager>(node_, /*min_qos_depth=*/30);
+  auto publisher = node_->create_publisher<sensor_msgs::msg::Imu>("/qos_depth_topic3", rclcpp::QoS(5));
+  wait_for_publisher_count(node_, "/qos_depth_topic3", 1);
+
+  rclcpp::QoS qos = manager_with_min->adapt_qos("/qos_depth_topic3");
+
+  EXPECT_EQ(qos.depth(), 30u);
+}
+
+TEST_F(GenericSubscriptionManagerTest, AdaptQosDepthDefaultsTo100WhenNoPublishers) {
+  rclcpp::QoS qos = manager_->adapt_qos("/qos_depth_no_publishers");
+
+  EXPECT_EQ(qos.depth(), 100u);
 }

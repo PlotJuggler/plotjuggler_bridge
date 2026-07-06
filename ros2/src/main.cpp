@@ -44,17 +44,22 @@ int main(int argc, char** argv) {
   node->declare_parameter<double>("session_timeout", 10.0);
   node->declare_parameter<bool>("strip_large_messages", false);
   node->declare_parameter<std::vector<std::string>>("topic_whitelist", {".*"});
+  node->declare_parameter<int>("min_qos_depth", 1);
+  node->declare_parameter<int>("max_qos_depth", 100);
 
   int port = node->get_parameter("port").as_int();
   double publish_rate = node->get_parameter("publish_rate").as_double();
   double session_timeout = node->get_parameter("session_timeout").as_double();
   bool strip_large_messages = node->get_parameter("strip_large_messages").as_bool();
   std::vector<std::string> topic_whitelist = node->get_parameter("topic_whitelist").as_string_array();
+  int64_t min_qos_depth = node->get_parameter("min_qos_depth").as_int();
+  int64_t max_qos_depth = node->get_parameter("max_qos_depth").as_int();
 
   RCLCPP_INFO(
       node->get_logger(),
-      "Configuration: port=%d, publish_rate=%.1f Hz, session_timeout=%.1f s, strip_large_messages=%s", port,
-      publish_rate, session_timeout, strip_large_messages ? "true" : "false");
+      "Configuration: port=%d, publish_rate=%.1f Hz, session_timeout=%.1f s, strip_large_messages=%s, "
+      "min_qos_depth=%ld, max_qos_depth=%ld",
+      port, publish_rate, session_timeout, strip_large_messages ? "true" : "false", min_qos_depth, max_qos_depth);
 
   auto whitelist_result = pj_bridge::WhitelistFilter::create(topic_whitelist);
   if (!whitelist_result) {
@@ -63,10 +68,21 @@ int main(int argc, char** argv) {
     return 1;
   }
 
+  if (min_qos_depth < 0 || max_qos_depth < 0 || min_qos_depth > max_qos_depth) {
+    RCLCPP_ERROR(
+        node->get_logger(),
+        "Invalid QoS depth configuration: min_qos_depth=%ld, max_qos_depth=%ld (both must be >= 0 and "
+        "min_qos_depth <= max_qos_depth)",
+        min_qos_depth, max_qos_depth);
+    rclcpp::shutdown();
+    return 1;
+  }
+
   try {
     // Create backend components
     auto topic_source = std::make_shared<pj_bridge::Ros2TopicSource>(node);
-    auto sub_manager = std::make_shared<pj_bridge::Ros2SubscriptionManager>(node, strip_large_messages);
+    auto sub_manager = std::make_shared<pj_bridge::Ros2SubscriptionManager>(
+        node, strip_large_messages, static_cast<size_t>(min_qos_depth), static_cast<size_t>(max_qos_depth));
     auto middleware = std::make_shared<pj_bridge::WebSocketMiddleware>();
 
     // Create bridge server

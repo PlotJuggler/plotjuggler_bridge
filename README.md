@@ -39,6 +39,8 @@ independently.
 | `publish_rate` | double | 50.0 | Aggregation publish rate in Hz |
 | `session_timeout` | double | 10.0 | Client timeout duration in seconds |
 | `strip_large_messages` | bool | false | Opt-in: strip large arrays from Image, PointCloud2, LaserScan, OccupancyGrid messages |
+| `min_qos_depth` | int | 1 | ROS2 only: minimum KEEP_LAST subscription depth after aggregating publisher depths |
+| `max_qos_depth` | int | 100 | ROS2 only: maximum KEEP_LAST subscription depth after aggregating publisher depths |
 
 ## Just "Download and Run"
 
