@@ -2670,3 +2670,88 @@ TEST_F(BridgeServerTest, LastRefReleaseClearsLatchedSample) {
   EXPECT_EQ(resp_b["status"], "success");
   EXPECT_TRUE(mock_->get_binary_sends().empty());
 }
+
+// ResumeReplaysLatchedSampleForTopicSubscribedWhilePaused
+//
+// A client that subscribes to a latched topic WHILE PAUSED acquires no
+// middleware ref (and gets no replay frame). On resume it joins the
+// already-shared subscription, where DDS does not redeliver — the retained
+// sample must be replayed then: resume RESPONSE first, then exactly one
+// binary frame with the retained message.
+TEST_F(BridgeServerTest, ResumeReplaysLatchedSampleForTopicSubscribedWhilePaused) {
+  ASSERT_TRUE(server_->initialize());
+  mock_topic_source_->set_topics({{"/latched", "std_msgs/msg/String"}});
+  mock_sub_manager_->add_known_topic("/latched");
+  mock_sub_manager_->set_transient_local("/latched", true);
+
+  json sub;
+  sub["command"] = "subscribe";
+  sub["topics"] = json::array({"/latched"});
+
+  // Client A subscribes (seeds the latched retention), a message arrives
+  // and is drained — the retained sample has "aged out" of the normal
+  // buffer and lives only in the latched store.
+  mock_->push_request("client_a", sub.dump());
+  server_->process_requests();
+  mock_->pop_reply("client_a");
+
+  std::vector<uint8_t> payload = {3, 1, 4, 1, 5};
+  auto data = std::make_shared<std::vector<std::byte>>(payload.size());
+  for (size_t i = 0; i < payload.size(); ++i) {
+    (*data)[i] = static_cast<std::byte>(payload[i]);
+  }
+  mock_sub_manager_->deliver_message("/latched", data, 777);
+  server_->publish_aggregated_messages();
+  ASSERT_EQ(mock_sub_manager_->ref_count("/latched"), 1);
+
+  // Client P pauses, then subscribes to the latched topic while paused:
+  // no ref acquired, no replay frame.
+  json pause_req;
+  pause_req["command"] = "pause";
+  mock_->push_request("client_p", pause_req.dump());
+  server_->process_requests();
+  mock_->pop_reply("client_p");
+  mock_->clear_binary_sends();
+
+  mock_->push_request("client_p", sub.dump());
+  server_->process_requests();
+  json sub_resp = mock_->pop_reply("client_p");
+  ASSERT_FALSE(sub_resp.is_discarded());
+  EXPECT_EQ(sub_resp["status"], "success");
+  EXPECT_TRUE(mock_->get_binary_sends().empty());
+  ASSERT_EQ(mock_sub_manager_->ref_count("/latched"), 1);  // still only client A
+
+  // Resume: client P joins the already-shared subscription and must be
+  // replayed the retained sample — resume response FIRST, then the frame.
+  mock_->clear_send_log();
+  json resume_req;
+  resume_req["command"] = "resume";
+  mock_->push_request("client_p", resume_req.dump());
+  server_->process_requests();
+  json resume_resp = mock_->pop_reply("client_p");
+  ASSERT_FALSE(resume_resp.is_discarded());
+  EXPECT_EQ(resume_resp["status"], "ok");
+  EXPECT_FALSE(resume_resp["paused"].get<bool>());
+  EXPECT_EQ(mock_sub_manager_->ref_count("/latched"), 2);
+
+  // Exactly one binary frame, to client_p only, with the retained message.
+  auto binary_sends = mock_->get_binary_sends();
+  ASSERT_EQ(binary_sends.size(), 1u);
+  EXPECT_EQ(binary_sends[0].first, "client_p");
+  auto messages = decode_frame(binary_sends[0].second);
+  ASSERT_EQ(messages.size(), 1u);
+  EXPECT_EQ(messages[0].topic, "/latched");
+  EXPECT_EQ(messages[0].timestamp_ns, 777u);
+  EXPECT_EQ(messages[0].data, payload);
+
+  // Ordering: resume response (text) before the replay frame (binary).
+  std::vector<MockMiddleware::SendKind> p_sends;
+  for (const auto& [kind, cid] : mock_->get_send_log()) {
+    if (cid == "client_p") {
+      p_sends.push_back(kind);
+    }
+  }
+  ASSERT_EQ(p_sends.size(), 2u);
+  EXPECT_EQ(p_sends[0], MockMiddleware::SendKind::kText);
+  EXPECT_EQ(p_sends[1], MockMiddleware::SendKind::kBinary);
+}

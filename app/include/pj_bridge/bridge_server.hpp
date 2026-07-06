@@ -159,6 +159,16 @@ class BridgeServer {
   /// cleanup_mutex_ held (same requirement as unsubscribe itself).
   void release_subscription_ref(const std::string& topic_name);
 
+  /// Latched (transient_local) replay bookkeeping for a topic whose
+  /// middleware subscription ref was just (re)acquired for @p client_id —
+  /// shared by handle_subscribe and handle_resume. Records the topic's
+  /// latched flag in the message buffer and, when a retained sample is
+  /// available for replay, serializes it into a single-message binary frame
+  /// queued in pending_replays_ (flushed by process_single_request right
+  /// after the handler's response is sent). Call with cleanup_mutex_ held;
+  /// acquires only the leaf replays_mutex_ and makes no middleware calls.
+  void collect_latched_replay(const std::string& client_id, const std::string& topic_name);
+
   // Backend interfaces (owned)
   std::shared_ptr<TopicSourceInterface> topic_source_;
   std::shared_ptr<SubscriptionManagerInterface> subscription_manager_;
@@ -209,11 +219,12 @@ class BridgeServer {
   bool topics_snapshot_taken_{false};
   std::mutex topics_mutex_;
 
-  // Latched (transient_local) replay frames queued by handle_subscribe,
-  // flushed by process_single_request right AFTER the subscribe response is
-  // sent — the client must receive the response (which carries the topic's
-  // schema) before the binary frame that needs it. LEAF lock (see comment
-  // above).
+  // Latched (transient_local) replay frames queued by handle_subscribe and
+  // handle_resume (via collect_latched_replay), flushed by
+  // process_single_request right AFTER the handler's response is sent — the
+  // client must receive the response (which carries the topic's schema on
+  // subscribe) before the binary frame that needs it. LEAF lock (see
+  // comment above).
   std::unordered_map<std::string, std::vector<std::vector<uint8_t>>> pending_replays_;
   std::mutex replays_mutex_;
 };

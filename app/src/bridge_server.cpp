@@ -218,11 +218,12 @@ void BridgeServer::process_single_request(const std::vector<uint8_t>& request_da
     return;
   }
 
-  // Flush any latched-topic replay frames handle_subscribe queued for this
-  // client. Sent strictly AFTER the response so the client has the schema
-  // needed to decode them (docs/API.md: "right after the subscribe
-  // response"). Move the frames out under the leaf replays_mutex_, release
-  // it, then send — never call middleware_ while holding the lock.
+  // Flush any latched-topic replay frames the handler queued for this
+  // client (handle_subscribe or handle_resume, via collect_latched_replay).
+  // Sent strictly AFTER the response so the client has the schema needed
+  // to decode them (docs/API.md: "right after the subscribe response").
+  // Move the frames out under the leaf replays_mutex_, release it, then
+  // send — never call middleware_ while holding the lock.
   std::vector<std::vector<uint8_t>> replay_frames;
   {
     std::lock_guard<std::mutex> replays_lock(replays_mutex_);
@@ -366,12 +367,6 @@ std::string BridgeServer::handle_subscribe(const std::string& client_id, const n
     extracted_schemas[topic_name] = std::move(schema);
   }
 
-  // Latched (transient_local) topics whose retained sample should be
-  // replayed to this client. Collected under cleanup_mutex_ below but sent
-  // only after the lock is released (never call middleware_ while holding
-  // cleanup_mutex_).
-  std::vector<std::pair<std::string, BufferedMessage>> replay_candidates;
-
   // Acquire refs and record subscriptions atomically with respect to
   // pause/resume and cleanup_session (which run on other threads).
   // Invariant: a middleware ref is held iff set_ref_held(topic, true).
@@ -411,29 +406,12 @@ std::string BridgeServer::handle_subscribe(const std::string& client_id, const n
       schema_obj["definition"] = extracted_schemas[topic_name];
       schemas[topic_name] = schema_obj;
 
-      // Latched (transient_local) topic replay: the FIRST subscriber to a
-      // topic gets its retained sample delivered naturally by DDS
-      // (transient_local redelivery on the freshly created subscription).
-      // This path exists for LATER clients joining an already-shared
-      // subscription, whose sample may have aged out of MessageBuffer's
-      // normal TTL window by the time they subscribe. Only meaningful when
-      // we actually (re)established the middleware subscription this call
-      // (ref_acquired) — a paused "subscribe" creates no subscription to
-      // query. Ordering note: set_latched runs at subscribe time, so a
-      // latched topic's messages are only retained once someone has
-      // subscribed — exactly the shared-subscription case this replay
-      // serves.
+      // Latched (transient_local) topic replay bookkeeping — only
+      // meaningful when we actually (re)established the middleware
+      // subscription this call (ref_acquired): a paused "subscribe"
+      // creates no subscription to query; its replay happens on resume.
       if (ref_acquired) {
-        bool is_latched = subscription_manager_->is_transient_local(topic_name);
-        message_buffer_->set_latched(topic_name, is_latched);
-        if (is_latched) {
-          // get_latched_for_replay skips samples still sitting in the
-          // normal buffer — those reach the new subscriber through the
-          // regular publish cycle, and replaying them too would duplicate.
-          if (auto latched_msg = message_buffer_->get_latched_for_replay(topic_name)) {
-            replay_candidates.emplace_back(topic_name, *latched_msg);
-          }
-        }
+        collect_latched_replay(client_id, topic_name);
       }
 
       spdlog::info("Client '{}' subscribed to topic '{}' (type: {})", client_id, topic_name, topic_type);
@@ -446,30 +424,6 @@ std::string BridgeServer::handle_subscribe(const std::string& client_id, const n
         session_manager_->add_subscription(client_id, topic, *rate);
       }
     }
-  }
-
-  // Serialize the retained latched samples now that cleanup_mutex_ is
-  // released, but do NOT send them here: the subscribe response (which
-  // carries the topic's schema) is sent by process_single_request after
-  // this handler returns, and the client must receive it before any binary
-  // frame that needs the schema to decode. Queue the frames instead;
-  // process_single_request flushes them right after the response goes out.
-  // Each candidate becomes its own single-message binary frame (mirrors the
-  // normal aggregated-frame format so clients need no special handling).
-  // Does not touch last_sent_times_: the sample's old timestamp means it
-  // won't interfere with subsequent rate limiting.
-  if (!replay_candidates.empty()) {
-    std::vector<std::vector<uint8_t>> frames;
-    frames.reserve(replay_candidates.size());
-    for (const auto& [topic_name, latched_msg] : replay_candidates) {
-      AggregatedMessageSerializer serializer;
-      serializer.serialize_message(
-          topic_name, latched_msg.timestamp_ns, latched_msg.data->data(), latched_msg.data->size());
-      frames.push_back(serializer.finalize());
-    }
-    std::lock_guard<std::mutex> replays_lock(replays_mutex_);
-    auto& pending = pending_replays_[client_id];
-    pending.insert(pending.end(), std::make_move_iterator(frames.begin()), std::make_move_iterator(frames.end()));
   }
 
   // Build response
@@ -669,6 +623,11 @@ std::string BridgeServer::handle_resume(const std::string& client_id, const nloh
       if (subscription_manager_->subscribe(topic, type_it->second)) {
         session_manager_->set_ref_held(client_id, topic, true);
         resubscribed++;
+        // Same latched bookkeeping as handle_subscribe: a topic subscribed
+        // WHILE PAUSED acquires its first ref here, and when it joins an
+        // already-shared subscription DDS won't redeliver — the retained
+        // sample (if any) is queued and flushed after the resume response.
+        collect_latched_replay(client_id, topic);
         spdlog::debug("Re-acquired ref for topic '{}' (client '{}' resumed)", topic, client_id);
       } else {
         spdlog::warn("Topic '{}' subscription failed on resume for client '{}'", topic, client_id);
@@ -824,6 +783,53 @@ void BridgeServer::check_topic_changes() {
       middleware_->send_reply(client_id, bytes);
     }
   }
+}
+
+void BridgeServer::collect_latched_replay(const std::string& client_id, const std::string& topic_name) {
+  // The FIRST subscriber to a latched topic gets its retained sample
+  // delivered naturally by DDS (transient_local redelivery on the freshly
+  // created subscription). Replay exists for LATER clients joining an
+  // already-shared subscription — via subscribe or via resume after
+  // subscribing while paused — whose sample may have aged out of
+  // MessageBuffer's normal TTL window by then. Ordering note: set_latched
+  // runs at (re)subscribe time, so a latched topic's messages are only
+  // retained once someone has subscribed — exactly the shared-subscription
+  // case the replay serves.
+  bool is_latched = subscription_manager_->is_transient_local(topic_name);
+  message_buffer_->set_latched(topic_name, is_latched);
+  if (!is_latched) {
+    return;
+  }
+
+  // get_latched_for_replay skips samples still sitting in the normal
+  // buffer — those reach the new subscriber through the regular publish
+  // cycle, and replaying them too would duplicate.
+  auto latched_msg = message_buffer_->get_latched_for_replay(topic_name);
+  if (!latched_msg) {
+    return;
+  }
+
+  // Do NOT send here: the handler's response (which on subscribe carries
+  // the topic's schema) is sent by process_single_request after the
+  // handler returns, and the client must receive it before any binary
+  // frame that needs the schema to decode. Queue a single-message frame
+  // (same format as regular aggregated frames, so clients need no special
+  // handling); process_single_request flushes it right after the response
+  // goes out. Does not touch last_sent_times_: the sample's old timestamp
+  // means it won't interfere with subsequent rate limiting.
+  //
+  // Benign race with cleanup_session between this queueing and the flush:
+  // if the client disconnects in between, cleanup_session erases the
+  // client's pending_replays_ entry (and a failed send_reply takes that
+  // same cleanup path), so the frames are either dropped with the dead
+  // session or sent to a still-connected socket — nothing strands.
+  AggregatedMessageSerializer serializer;
+  serializer.serialize_message(
+      topic_name, latched_msg->timestamp_ns, latched_msg->data->data(), latched_msg->data->size());
+  auto frame = serializer.finalize();
+
+  std::lock_guard<std::mutex> replays_lock(replays_mutex_);
+  pending_replays_[client_id].push_back(std::move(frame));
 }
 
 void BridgeServer::release_subscription_ref(const std::string& topic_name) {

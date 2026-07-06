@@ -427,6 +427,11 @@ Configuration:
   Passing one without the other is a CLI11 parse error (`->needs()`); passing
   both enables TLS.
 
+Note that only certificate/key file *readability* is validated at startup; a
+mismatched certificate/key pair is not detected until clients connect, and
+then only surfaces as per-connection TLS handshake failures in the server
+log (IXWebSocket defers TLS setup to accept time).
+
 Example: generate a self-signed certificate and start the ROS2 backend with
 TLS enabled:
 
