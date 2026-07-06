@@ -59,9 +59,11 @@ rclcpp::QoS GenericSubscriptionManager::adapt_qos(const std::string& topic_name)
   //   the publisher uses KEEP_ALL. It contributes kFallbackDepth instead of
   //   0 — assuming the historical generous default is safer than shrinking
   //   the queue and dropping messages on high-rate topics.
-  // - The sum is saturating: each contribution is capped at max_qos_depth_
-  //   and the running total is clamped to max_qos_depth_, so it can never
-  //   wrap size_t no matter how many publishers report huge depths.
+  // - The sum is saturating: each contribution is capped at the remaining
+  //   headroom below max_qos_depth_ (total_depth <= max_qos_depth_ is a loop
+  //   invariant), so the addition is structurally incapable of wrapping
+  //   size_t no matter how many publishers report huge depths — even for
+  //   extreme max_qos_depth_ values passed via the constructor API.
   size_t total_depth = 0;
   for (const auto& info : publishers) {
     const auto& profile = info.qos_profile();
@@ -72,7 +74,8 @@ rclcpp::QoS GenericSubscriptionManager::adapt_qos(const std::string& topic_name)
       all_transient_local = false;
     }
     const size_t publisher_depth = profile.depth() > 0 ? profile.depth() : kFallbackDepth;
-    total_depth = std::min(total_depth + std::min(publisher_depth, max_qos_depth_), max_qos_depth_);
+    const size_t headroom = max_qos_depth_ - total_depth;  // total_depth <= max_qos_depth_ invariant
+    total_depth += std::min(publisher_depth, headroom);
   }
   qos.keep_last(std::clamp(total_depth, min_qos_depth_, max_qos_depth_));
 

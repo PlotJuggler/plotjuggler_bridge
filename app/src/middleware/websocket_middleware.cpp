@@ -335,10 +335,26 @@ bool WebSocketMiddleware::send_binary(const std::string& client_identity, const 
 
   // Socket buffer is over the high watermark: queue the frame instead of
   // sending it now.
+  //
+  // Note the backlog is only ever flushed from within send_binary itself: if
+  // a client's subscribed topics go quiet, queued frames sit here until the
+  // next send_binary call for that client (or its disconnect). This is
+  // deliberate — the queue is bounded, delivering stale frames on the next
+  // traffic burst is acceptable, and plotting clients care about fresh data,
+  // so a dedicated flush timer isn't worth the extra machinery.
   size_t dropped;
   uint64_t dropped_total_now;
   {
     std::lock_guard<std::mutex> lock(clients_mutex_);
+    // Re-check the client still exists: between the ws lookup above (lock
+    // released before the socket calls) and here, the disconnect callback may
+    // have erased the client AND its pending_frames_ entry. Blindly
+    // try_emplace-ing would recreate a queue for a disconnected client,
+    // stranding the frame until shutdown and skewing dropped_frame_count().
+    // Treat it like the top-of-function lookup miss: the client is gone.
+    if (clients_.find(client_identity) == clients_.end()) {
+      return false;
+    }
     auto [pending_it, inserted] = pending_frames_.try_emplace(client_identity, BoundedFrameQueue(client_backlog_size_));
     (void)inserted;
     dropped = pending_it->second.push(data);

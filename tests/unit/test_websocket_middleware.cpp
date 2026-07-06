@@ -481,6 +481,32 @@ TEST_F(WebSocketMiddlewareTest, DroppedFrameCountZeroAfterNormalTraffic) {
   std::this_thread::sleep_for(std::chrono::milliseconds(100));
 }
 
+// Regression guard for the disconnect-race fix in send_binary's enqueue path:
+// a client that is not (or no longer) in clients_ must never get a
+// pending_frames_ entry created for it. The over-watermark branch itself
+// cannot be reached from a unit test (we cannot force a real socket's
+// bufferedAmount() past 1 MiB), so this verifies the shared contract via the
+// public API: send_binary for an id absent from clients_ returns false and
+// leaves no pending state behind — dropped_frame_count() stays 0 even after
+// repeated attempts. The in-branch re-check under clients_mutex_ enforces the
+// same "client gone -> return false, no queue created" rule; only the actual
+// interleaving with a concurrent disconnect is not exercised here.
+TEST_F(WebSocketMiddlewareTest, SendBinaryToAbsentClientCreatesNoPendingState) {
+  auto result = middleware_->initialize(18098);
+  ASSERT_TRUE(result.has_value());
+
+  std::vector<uint8_t> data = {1, 2, 3};
+  for (int i = 0; i < 5; ++i) {
+    EXPECT_FALSE(middleware_->send_binary("never-connected", data));
+  }
+  EXPECT_EQ(middleware_->dropped_frame_count(), 0u);
+
+  // Shutdown folds any (erroneously) surviving per-client queues into the
+  // disconnected-clients accumulator — the count must still be zero after.
+  middleware_->shutdown();
+  EXPECT_EQ(middleware_->dropped_frame_count(), 0u);
+}
+
 TEST(WebSocketMiddlewareBacklogConstructionTest, ExplicitBacklogSizeConstructsAndInitializes) {
   WebSocketMiddleware middleware(5);
   EXPECT_EQ(middleware.dropped_frame_count(), 0u);
