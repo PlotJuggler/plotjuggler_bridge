@@ -405,6 +405,44 @@ configurable:
 - **FastDDS / RTI**: CLI flag `--client-backlog-size`, default `100`, valid
   range `1`-`1000000`.
 
+## TLS / wss://
+
+The bridge can optionally serve the WebSocket endpoint over TLS (`wss://`)
+using a server certificate + private key (OpenSSL). Client certificate
+verification is not supported — this is server-authentication only.
+
+TLS support depends on IXWebSocket having been built with OpenSSL
+(`PJ_BRIDGE_TLS=ON`, the CMake default for FetchContent builds; a
+system/conda-provided IXWebSocket must likewise have been built with TLS —
+check for `IXWEBSOCKET_USE_TLS` in its exported CMake target). If TLS is
+requested but the linked IXWebSocket lacks TLS support, the server fails to
+start with an explicit error instead of silently falling back to plaintext.
+
+Configuration:
+
+- **ROS2**: parameters `tls` (bool, default `false`), `certfile` (string,
+  default `""`), `keyfile` (string, default `""`). Setting `tls: true`
+  without both `certfile` and `keyfile` set is a startup error.
+- **FastDDS / RTI**: CLI flags `--certfile <path>` and `--keyfile <path>`.
+  Passing one without the other is a CLI11 parse error (`->needs()`); passing
+  both enables TLS.
+
+Example: generate a self-signed certificate and start the ROS2 backend with
+TLS enabled:
+
+```bash
+openssl req -x509 -newkey rsa:2048 -keyout key.pem -out cert.pem -days 365 -nodes -subj "/CN=localhost"
+
+ros2 run pj_bridge pj_bridge_ros2 --ros-args \
+  -p tls:=true -p certfile:=cert.pem -p keyfile:=key.pem
+```
+
+Clients then connect via `wss://` instead of `ws://` (e.g.
+`wss://127.0.0.1:9090`). With a self-signed certificate, the client must
+either trust the certificate explicitly or disable peer verification (e.g.
+IXWebSocket's `caFile = "NONE"`) — production deployments should use a
+certificate signed by a trusted CA instead.
+
 ## Binary Message Format
 
 Binary frames consist of a fixed 16-byte header followed by ZSTD-compressed payload.

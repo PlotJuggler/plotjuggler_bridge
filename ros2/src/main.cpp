@@ -21,6 +21,7 @@
 
 #include <chrono>
 #include <memory>
+#include <optional>
 #include <rclcpp/rclcpp.hpp>
 #include <string>
 #include <vector>
@@ -48,6 +49,9 @@ int main(int argc, char** argv) {
   node->declare_parameter<int>("max_qos_depth", 100);
   node->declare_parameter<double>("topic_poll_interval", 1.0);
   node->declare_parameter<int>("client_backlog_size", 100);
+  node->declare_parameter<bool>("tls", false);
+  node->declare_parameter<std::string>("certfile", "");
+  node->declare_parameter<std::string>("keyfile", "");
 
   int port = node->get_parameter("port").as_int();
   double publish_rate = node->get_parameter("publish_rate").as_double();
@@ -58,13 +62,22 @@ int main(int argc, char** argv) {
   int64_t max_qos_depth = node->get_parameter("max_qos_depth").as_int();
   double topic_poll_interval = node->get_parameter("topic_poll_interval").as_double();
   int64_t client_backlog_size = node->get_parameter("client_backlog_size").as_int();
+  bool tls_enabled = node->get_parameter("tls").as_bool();
+  std::string certfile = node->get_parameter("certfile").as_string();
+  std::string keyfile = node->get_parameter("keyfile").as_string();
 
   RCLCPP_INFO(
       node->get_logger(),
       "Configuration: port=%d, publish_rate=%.1f Hz, session_timeout=%.1f s, strip_large_messages=%s, "
-      "min_qos_depth=%ld, max_qos_depth=%ld, topic_poll_interval=%.1f s, client_backlog_size=%ld",
+      "min_qos_depth=%ld, max_qos_depth=%ld, topic_poll_interval=%.1f s, client_backlog_size=%ld, tls=%s",
       port, publish_rate, session_timeout, strip_large_messages ? "true" : "false", min_qos_depth, max_qos_depth,
-      topic_poll_interval, client_backlog_size);
+      topic_poll_interval, client_backlog_size, tls_enabled ? "true" : "false");
+
+  if (tls_enabled && (certfile.empty() || keyfile.empty())) {
+    RCLCPP_ERROR(node->get_logger(), "tls=true requires both 'certfile' and 'keyfile' parameters to be set");
+    rclcpp::shutdown();
+    return 1;
+  }
 
   if (topic_poll_interval < 0.0) {
     RCLCPP_ERROR(
@@ -102,7 +115,12 @@ int main(int argc, char** argv) {
     auto topic_source = std::make_shared<pj_bridge::Ros2TopicSource>(node);
     auto sub_manager = std::make_shared<pj_bridge::Ros2SubscriptionManager>(
         node, strip_large_messages, static_cast<size_t>(min_qos_depth), static_cast<size_t>(max_qos_depth));
-    auto middleware = std::make_shared<pj_bridge::WebSocketMiddleware>(static_cast<size_t>(client_backlog_size));
+    std::optional<pj_bridge::TlsConfig> tls_config;
+    if (tls_enabled) {
+      tls_config = pj_bridge::TlsConfig{certfile, keyfile};
+    }
+    auto middleware =
+        std::make_shared<pj_bridge::WebSocketMiddleware>(static_cast<size_t>(client_backlog_size), tls_config);
 
     // Create bridge server
     pj_bridge::BridgeServer server(

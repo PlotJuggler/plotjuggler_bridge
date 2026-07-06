@@ -22,13 +22,14 @@
 #include <spdlog/spdlog.h>
 
 #include <atomic>
+#include <fstream>
 #include <optional>
 #include <thread>
 
 namespace pj_bridge {
 
-WebSocketMiddleware::WebSocketMiddleware(size_t client_backlog_size)
-    : client_backlog_size_(client_backlog_size), initialized_(false) {}
+WebSocketMiddleware::WebSocketMiddleware(size_t client_backlog_size, std::optional<TlsConfig> tls)
+    : client_backlog_size_(client_backlog_size), tls_(std::move(tls)), initialized_(false) {}
 
 WebSocketMiddleware::~WebSocketMiddleware() {
   shutdown();
@@ -53,7 +54,33 @@ tl::expected<void, std::string> WebSocketMiddleware::initialize(uint16_t port) {
     return tl::unexpected<std::string>("WebSocket middleware already initialized");
   }
 
+  if (tls_.has_value()) {
+#ifndef IXWEBSOCKET_USE_TLS
+    return tl::unexpected<std::string>("TLS requested but IXWebSocket was built without TLS support");
+#else
+    std::ifstream cert_stream(tls_->certfile);
+    if (!cert_stream.good()) {
+      return tl::unexpected<std::string>("TLS certificate file not found or not readable: " + tls_->certfile);
+    }
+    std::ifstream key_stream(tls_->keyfile);
+    if (!key_stream.good()) {
+      return tl::unexpected<std::string>("TLS key file not found or not readable: " + tls_->keyfile);
+    }
+#endif
+  }
+
   server_ = std::make_shared<ix::WebSocketServer>(port, "0.0.0.0");
+
+#ifdef IXWEBSOCKET_USE_TLS
+  if (tls_.has_value()) {
+    ix::SocketTLSOptions tls_options;
+    tls_options.tls = true;
+    tls_options.certFile = tls_->certfile;
+    tls_options.keyFile = tls_->keyfile;
+    tls_options.caFile = "NONE";
+    server_->setTLSOptions(tls_options);
+  }
+#endif
 
   server_->setOnClientMessageCallback([this](
                                           std::shared_ptr<ix::ConnectionState> connection_state,

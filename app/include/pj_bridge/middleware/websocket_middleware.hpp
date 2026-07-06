@@ -26,6 +26,7 @@
 #include <cstdint>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <queue>
 #include <string>
 #include <thread>
@@ -37,9 +38,17 @@
 
 namespace pj_bridge {
 
+/// Server-side TLS configuration (certificate + private key paths). Both
+/// files are validated for existence/readability in initialize(), before any
+/// IXWebSocket TLS API is touched.
+struct TlsConfig {
+  std::string certfile;
+  std::string keyfile;
+};
+
 class WebSocketMiddleware : public MiddlewareInterface {
  public:
-  explicit WebSocketMiddleware(size_t client_backlog_size = 100);
+  explicit WebSocketMiddleware(size_t client_backlog_size = 100, std::optional<TlsConfig> tls = std::nullopt);
   ~WebSocketMiddleware() override;
 
   WebSocketMiddleware(const WebSocketMiddleware&) = delete;
@@ -89,6 +98,7 @@ class WebSocketMiddleware : public MiddlewareInterface {
   uint64_t dropped_from_disconnected_{0};
 
   size_t client_backlog_size_;
+  std::optional<TlsConfig> tls_;
 
   ConnectionCallback on_connect_;
   ConnectionCallback on_disconnect_;

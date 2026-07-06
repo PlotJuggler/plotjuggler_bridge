@@ -53,6 +53,8 @@ find_package(ZSTD REQUIRED)
 include(FetchContent)
 
 # IXWebSocket — try system/conda first, fall back to FetchContent
+option(PJ_BRIDGE_TLS "Build IXWebSocket with TLS (OpenSSL) support" ON)
+
 find_package(ixwebsocket QUIET)
 if(NOT ixwebsocket_FOUND)
   message(STATUS "IXWebSocket not found — fetching via FetchContent")
@@ -61,7 +63,10 @@ if(NOT ixwebsocket_FOUND)
     URL https://github.com/machinezone/IXWebSocket/archive/refs/tags/v11.4.6.tar.gz
     URL_HASH SHA256=c024334f8e45980836c67008979a884d6dcc5ef067dd2eb1fa7241f4c17ddc32
   )
-  set(USE_TLS OFF CACHE BOOL "" FORCE)
+  set(USE_TLS ${PJ_BRIDGE_TLS} CACHE BOOL "" FORCE)
+  if(PJ_BRIDGE_TLS)
+    set(USE_OPEN_SSL ON CACHE BOOL "" FORCE)
+  endif()
   set(USE_ZLIB ON CACHE BOOL "" FORCE)
   set(IXWEBSOCKET_INSTALL OFF CACHE BOOL "" FORCE)
   FetchContent_MakeAvailable(ixwebsocket)

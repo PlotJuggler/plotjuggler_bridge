@@ -20,6 +20,7 @@
 #include <spdlog/spdlog.h>
 
 #include <CLI/CLI.hpp>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -42,6 +43,8 @@ int main(int argc, char* argv[]) {
   std::vector<std::string> topic_whitelist{".*"};
   double topic_poll_interval = 1.0;
   int client_backlog_size = 100;
+  std::string certfile;
+  std::string keyfile;
 
   app.add_option("--domains,-d", domain_ids, "DDS domain IDs")->required()->expected(1, -1);
   app.add_option("--port,-p", port, "WebSocket port")->default_val(9090)->check(CLI::Range(1, 65535));
@@ -65,7 +68,15 @@ int main(int argc, char* argv[]) {
   // single joined string, which is not what we want here).
   app.add_option("--topic-whitelist", topic_whitelist, "Topic whitelist regex patterns (full-match, ECMAScript)");
 
+  auto certfile_opt =
+      app.add_option("--certfile", certfile, "TLS server certificate file (enables wss://, requires --keyfile)");
+  auto keyfile_opt = app.add_option("--keyfile", keyfile, "TLS private key file (enables wss://, requires --certfile)");
+  certfile_opt->needs(keyfile_opt);
+  keyfile_opt->needs(certfile_opt);
+
   CLI11_PARSE(app, argc, argv);
+
+  bool tls_enabled = !certfile.empty();
 
   spdlog::set_level(spdlog::level::from_str(log_level));
 
@@ -80,6 +91,7 @@ int main(int argc, char* argv[]) {
   spdlog::info("  Topic whitelist: {}", fmt::join(topic_whitelist, ", "));
   spdlog::info("  Topic poll interval: {:.1f} s", topic_poll_interval);
   spdlog::info("  Client backlog size: {}", client_backlog_size);
+  spdlog::info("  TLS: {}", tls_enabled ? "enabled" : "disabled");
 
   auto whitelist_result = pj_bridge::WhitelistFilter::create(topic_whitelist);
   if (!whitelist_result) {
@@ -95,7 +107,12 @@ int main(int argc, char* argv[]) {
   try {
     auto topic_source = std::make_shared<pj_bridge::DdsTopicDiscovery>(domain_ids, qos_profile);
     auto sub_manager = std::make_shared<pj_bridge::DdsSubscriptionManager>(*topic_source);
-    auto middleware = std::make_shared<pj_bridge::WebSocketMiddleware>(static_cast<size_t>(client_backlog_size));
+    std::optional<pj_bridge::TlsConfig> tls_config;
+    if (tls_enabled) {
+      tls_config = pj_bridge::TlsConfig{certfile, keyfile};
+    }
+    auto middleware =
+        std::make_shared<pj_bridge::WebSocketMiddleware>(static_cast<size_t>(client_backlog_size), tls_config);
 
     pj_bridge::BridgeServer server(
         topic_source, sub_manager, middleware, port, session_timeout, publish_rate,

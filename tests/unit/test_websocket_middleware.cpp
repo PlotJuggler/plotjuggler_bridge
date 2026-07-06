@@ -22,6 +22,8 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstdlib>
+#include <filesystem>
 #include <string>
 #include <thread>
 #include <vector>
@@ -517,6 +519,106 @@ TEST(WebSocketMiddlewareBacklogConstructionTest, ExplicitBacklogSizeConstructsAn
 
   middleware.shutdown();
 }
+
+// ---------------------------------------------------------------------------
+// Task 6 — TLS (wss://) via OpenSSL, server certificate only
+// ---------------------------------------------------------------------------
+
+TEST(WebSocketMiddlewareTlsTest, MissingCertFileFailsInitializeWithPathInMessage) {
+  pj_bridge::TlsConfig tls{"/nonexistent/cert.pem", "/nonexistent/key.pem"};
+  WebSocketMiddleware middleware(100, tls);
+
+  auto result = middleware.initialize(18099);
+  ASSERT_FALSE(result.has_value());
+  EXPECT_NE(result.error().find("/nonexistent/cert.pem"), std::string::npos)
+      << "Error message should mention the missing cert file path: " << result.error();
+}
+
+#ifdef IXWEBSOCKET_USE_TLS
+namespace {
+
+// Generates a throwaway self-signed cert/key pair under `dir` using the
+// system `openssl` binary. Returns true on success; the caller should
+// GTEST_SKIP() when this fails (missing openssl binary, sandboxed
+// environment, etc.) rather than fail the test outright.
+bool generate_self_signed_cert(const std::string& certfile, const std::string& keyfile) {
+  std::string cmd = "openssl req -x509 -newkey rsa:2048 -keyout " + keyfile + " -out " + certfile +
+                    " -days 1 -nodes -subj /CN=localhost 2>/dev/null";
+  int rc = std::system(cmd.c_str());
+  return rc == 0 && std::filesystem::exists(certfile) && std::filesystem::exists(keyfile);
+}
+
+}  // namespace
+
+TEST(WebSocketMiddlewareTlsTest, TlsRoundTrip) {
+  auto dir = std::filesystem::temp_directory_path() / "pj_bridge_tls_test";
+  std::filesystem::create_directories(dir);
+  std::string certfile = (dir / "cert.pem").string();
+  std::string keyfile = (dir / "key.pem").string();
+
+  if (!generate_self_signed_cert(certfile, keyfile)) {
+    GTEST_SKIP() << "Could not generate a self-signed certificate (openssl binary unavailable or failed)";
+  }
+
+  pj_bridge::TlsConfig tls{certfile, keyfile};
+  WebSocketMiddleware middleware(100, tls);
+
+  auto result = middleware.initialize(18199);
+  ASSERT_TRUE(result.has_value()) << (result.has_value() ? "" : result.error());
+  ASSERT_TRUE(middleware.is_ready());
+
+  ix::WebSocket client;
+  client.setUrl("wss://127.0.0.1:18199");
+
+  ix::SocketTLSOptions client_tls_options;
+  client_tls_options.caFile = "NONE";  // self-signed cert: disable peer verification
+  client.setTLSOptions(client_tls_options);
+
+  std::mutex msg_mutex;
+  std::condition_variable msg_cv;
+  std::string received_message;
+  bool message_received = false;
+
+  client.setOnMessageCallback([&](const ix::WebSocketMessagePtr& msg) {
+    if (msg->type == ix::WebSocketMessageType::Message && !msg->binary) {
+      std::lock_guard<std::mutex> lock(msg_mutex);
+      received_message = msg->str;
+      message_received = true;
+      msg_cv.notify_one();
+    }
+  });
+  client.start();
+
+  ASSERT_TRUE(wait_for_client_open(client)) << "TLS client failed to connect";
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+  const std::string test_message = "hello over wss";
+  client.send(test_message);
+
+  std::vector<uint8_t> data;
+  std::string client_id;
+  ASSERT_TRUE(poll_receive_request(middleware, data, client_id)) << "receive_request() never returned the message";
+  std::string received(data.begin(), data.end());
+  EXPECT_EQ(received, test_message);
+
+  const std::string reply_text = "reply over wss";
+  std::vector<uint8_t> reply_data(reply_text.begin(), reply_text.end());
+  EXPECT_TRUE(middleware.send_reply(client_id, reply_data));
+
+  {
+    std::unique_lock<std::mutex> lock(msg_mutex);
+    ASSERT_TRUE(msg_cv.wait_for(lock, std::chrono::seconds(2), [&] { return message_received; }))
+        << "TLS client never received the reply";
+  }
+  EXPECT_EQ(received_message, reply_text);
+
+  client.stop();
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  middleware.shutdown();
+
+  std::filesystem::remove_all(dir);
+}
+#endif  // IXWEBSOCKET_USE_TLS
 
 int main(int argc, char** argv) {
   testing::InitGoogleTest(&argc, argv);
