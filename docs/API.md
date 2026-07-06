@@ -345,6 +345,30 @@ All commands may return an error:
 
 Error codes: `INVALID_REQUEST`, `INVALID_JSON`, `UNKNOWN_COMMAND`, `ALL_SUBSCRIPTIONS_FAILED`, `INTERNAL_ERROR`.
 
+## Slow clients / backpressure
+
+If a client can't keep up with the aggregated-message stream (e.g. a slow
+network link or a busy renderer), the server never blocks the publish loop
+waiting for it and never disconnects it for falling behind — matching
+foxglove_bridge's slow-client policy. Instead, once a client's outgoing
+socket buffer exceeds a 1 MiB high watermark, new binary frames destined for
+that client are held in a small per-client queue rather than sent
+immediately. If that queue is already full, the **oldest** queued frame is
+dropped to make room for the newest one, so a lagging client always
+eventually resumes with fresh data instead of a growing backlog of stale
+frames. Queued frames are flushed, in order, as soon as the client's socket
+buffer drains back below the watermark. The JSON control-plane (requests and
+their replies, including `heartbeat`) is never affected — those messages are
+always sent immediately.
+
+The queue depth (max frames held per client before the oldest is dropped) is
+configurable:
+
+- **ROS2**: int parameter `client_backlog_size`, default `100`. Must be `> 0`;
+  the server refuses to start otherwise.
+- **FastDDS / RTI**: CLI flag `--client-backlog-size`, default `100`, valid
+  range `1`-`1000000`.
+
 ## Binary Message Format
 
 Binary frames consist of a fixed 16-byte header followed by ZSTD-compressed payload.

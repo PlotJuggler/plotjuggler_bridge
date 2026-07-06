@@ -47,6 +47,7 @@ int main(int argc, char** argv) {
   node->declare_parameter<int>("min_qos_depth", 1);
   node->declare_parameter<int>("max_qos_depth", 100);
   node->declare_parameter<double>("topic_poll_interval", 1.0);
+  node->declare_parameter<int>("client_backlog_size", 100);
 
   int port = node->get_parameter("port").as_int();
   double publish_rate = node->get_parameter("publish_rate").as_double();
@@ -56,18 +57,25 @@ int main(int argc, char** argv) {
   int64_t min_qos_depth = node->get_parameter("min_qos_depth").as_int();
   int64_t max_qos_depth = node->get_parameter("max_qos_depth").as_int();
   double topic_poll_interval = node->get_parameter("topic_poll_interval").as_double();
+  int64_t client_backlog_size = node->get_parameter("client_backlog_size").as_int();
 
   RCLCPP_INFO(
       node->get_logger(),
       "Configuration: port=%d, publish_rate=%.1f Hz, session_timeout=%.1f s, strip_large_messages=%s, "
-      "min_qos_depth=%ld, max_qos_depth=%ld, topic_poll_interval=%.1f s",
+      "min_qos_depth=%ld, max_qos_depth=%ld, topic_poll_interval=%.1f s, client_backlog_size=%ld",
       port, publish_rate, session_timeout, strip_large_messages ? "true" : "false", min_qos_depth, max_qos_depth,
-      topic_poll_interval);
+      topic_poll_interval, client_backlog_size);
 
   if (topic_poll_interval < 0.0) {
     RCLCPP_ERROR(
         node->get_logger(), "Invalid topic_poll_interval: %.1f (must be >= 0; 0 disables polling)",
         topic_poll_interval);
+    rclcpp::shutdown();
+    return 1;
+  }
+
+  if (client_backlog_size <= 0) {
+    RCLCPP_ERROR(node->get_logger(), "Invalid client_backlog_size: %ld (must be > 0)", client_backlog_size);
     rclcpp::shutdown();
     return 1;
   }
@@ -94,7 +102,7 @@ int main(int argc, char** argv) {
     auto topic_source = std::make_shared<pj_bridge::Ros2TopicSource>(node);
     auto sub_manager = std::make_shared<pj_bridge::Ros2SubscriptionManager>(
         node, strip_large_messages, static_cast<size_t>(min_qos_depth), static_cast<size_t>(max_qos_depth));
-    auto middleware = std::make_shared<pj_bridge::WebSocketMiddleware>();
+    auto middleware = std::make_shared<pj_bridge::WebSocketMiddleware>(static_cast<size_t>(client_backlog_size));
 
     // Create bridge server
     pj_bridge::BridgeServer server(

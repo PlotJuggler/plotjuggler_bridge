@@ -40,6 +40,7 @@ int main(int argc, char* argv[]) {
   bool stats_enabled = false;
   std::vector<std::string> topic_whitelist{".*"};
   double topic_poll_interval = 1.0;
+  int client_backlog_size = 100;
 
   app.add_option("--domains,-d", domain_ids, "DDS domain IDs")->required()->expected(1, -1);
   app.add_option("--port,-p", port, "WebSocket port")->default_val(9090)->check(CLI::Range(1, 65535));
@@ -51,6 +52,11 @@ int main(int argc, char* argv[]) {
          "--topic-poll-interval", topic_poll_interval,
          "Interval in seconds between topics_changed notification polls (0 disables)")
       ->default_val(1.0);
+  app.add_option(
+         "--client-backlog-size", client_backlog_size,
+         "Max frames queued per slow client before dropping the oldest (backpressure)")
+      ->default_val(100)
+      ->check(CLI::Range(1, 1000000));
   // Bound variable is already initialized to {".*"} (match everything); CLI11
   // leaves it untouched if the flag is not passed, so no default_val() is
   // needed (and default_val() on a vector<string> would round-trip through a
@@ -68,6 +74,7 @@ int main(int argc, char* argv[]) {
   spdlog::info("  Session timeout: {:.1f} s", session_timeout);
   spdlog::info("  Topic whitelist: {}", fmt::join(topic_whitelist, ", "));
   spdlog::info("  Topic poll interval: {:.1f} s", topic_poll_interval);
+  spdlog::info("  Client backlog size: {}", client_backlog_size);
 
   auto whitelist_result = pj_bridge::WhitelistFilter::create(topic_whitelist);
   if (!whitelist_result) {
@@ -83,7 +90,7 @@ int main(int argc, char* argv[]) {
   try {
     auto topic_source = std::make_shared<pj_bridge::FastDdsTopicSource>(domain_ids);
     auto sub_manager = std::make_shared<pj_bridge::FastDdsSubscriptionManager>(*topic_source);
-    auto middleware = std::make_shared<pj_bridge::WebSocketMiddleware>();
+    auto middleware = std::make_shared<pj_bridge::WebSocketMiddleware>(static_cast<size_t>(client_backlog_size));
 
     pj_bridge::BridgeServer server(
         topic_source, sub_manager, middleware, port, session_timeout, publish_rate,

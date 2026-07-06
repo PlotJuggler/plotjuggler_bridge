@@ -242,6 +242,7 @@ if(BUILD_TESTING AND ament_cmake_FOUND)
 
   ament_add_gtest(${PROJECT_NAME}_tests
     tests/unit/test_websocket_middleware.cpp
+    tests/unit/test_bounded_frame_queue.cpp
     tests/unit/test_message_buffer.cpp
     tests/unit/test_session_manager.cpp
     tests/unit/test_message_serializer.cpp

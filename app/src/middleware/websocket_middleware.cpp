@@ -22,11 +22,13 @@
 #include <spdlog/spdlog.h>
 
 #include <atomic>
+#include <optional>
 #include <thread>
 
 namespace pj_bridge {
 
-WebSocketMiddleware::WebSocketMiddleware() : initialized_(false) {}
+WebSocketMiddleware::WebSocketMiddleware(size_t client_backlog_size)
+    : client_backlog_size_(client_backlog_size), initialized_(false) {}
 
 WebSocketMiddleware::~WebSocketMiddleware() {
   shutdown();
@@ -103,6 +105,12 @@ tl::expected<void, std::string> WebSocketMiddleware::initialize(uint16_t port) {
       {
         std::lock_guard<std::mutex> clients_lock(clients_mutex_);
         clients_.erase(client_id);
+        auto pending_it = pending_frames_.find(client_id);
+        if (pending_it != pending_frames_.end()) {
+          dropped_from_disconnected_ += pending_it->second.dropped_total();
+          pending_frames_.erase(pending_it);
+        }
+        last_drop_warn_.erase(client_id);
       }
 
     } else if (msg->type == ix::WebSocketMessageType::Message) {
@@ -206,6 +214,11 @@ void WebSocketMiddleware::shutdown() {
   {
     std::lock_guard<std::mutex> clients_lock(clients_mutex_);
     clients_.clear();
+    for (const auto& entry : pending_frames_) {
+      dropped_from_disconnected_ += entry.second.dropped_total();
+    }
+    pending_frames_.clear();
+    last_drop_warn_.clear();
   }
 
   {
@@ -257,6 +270,21 @@ bool WebSocketMiddleware::send_reply(const std::string& client_identity, const s
 }
 
 bool WebSocketMiddleware::send_binary(const std::string& client_identity, const std::vector<uint8_t>& data) {
+  // Lossy-send policy adapted from foxglove_bridge (MIT License, Copyright
+  // (c) Foxglove Technologies Inc): a slow client never blocks the publisher
+  // and is never disconnected for falling behind. Instead, once its socket's
+  // outgoing buffer crosses kSocketBufferHighWatermark, new frames are queued
+  // per-client (dropping the oldest queued frame on overflow) and flushed
+  // once the buffer drains below the watermark again.
+  //
+  // IMPORTANT: clients_mutex_ is only ever held to look up state (the client
+  // handle, pending_frames_, last_drop_warn_) — never while calling into
+  // ix::WebSocket (bufferedAmount()/sendBinary()). Those calls take
+  // IXWebSocket's own internal locks, and the Open-connection handler above
+  // takes clients_mutex_ from an IXWebSocket-owned thread that already holds
+  // some of those internal locks; holding clients_mutex_ across a socket call
+  // here would form a lock-order cycle with that path (observed as a TSAN
+  // lock-order-inversion during development).
   std::shared_ptr<ix::WebSocket> ws;
   {
     std::lock_guard<std::mutex> lock(clients_mutex_);
@@ -267,9 +295,85 @@ bool WebSocketMiddleware::send_binary(const std::string& client_identity, const 
     ws = it->second;
   }
 
-  std::string binary_data(reinterpret_cast<const char*>(data.data()), data.size());
-  auto send_info = ws->sendBinary(binary_data);
-  return send_info.success;
+  if (ws->bufferedAmount() < kSocketBufferHighWatermark) {
+    // Flush any backlog first, in FIFO order, bounded to the number of
+    // frames present when this call started so a fast producer can't spin
+    // forever. Each frame is popped under the lock and sent outside it.
+    size_t to_flush = 0;
+    {
+      std::lock_guard<std::mutex> lock(clients_mutex_);
+      auto pending_it = pending_frames_.find(client_identity);
+      if (pending_it != pending_frames_.end()) {
+        to_flush = pending_it->second.size();
+      }
+    }
+
+    for (size_t i = 0; i < to_flush; ++i) {
+      std::optional<std::vector<uint8_t>> frame;
+      {
+        std::lock_guard<std::mutex> lock(clients_mutex_);
+        auto pending_it = pending_frames_.find(client_identity);
+        if (pending_it == pending_frames_.end()) {
+          break;
+        }
+        frame = pending_it->second.pop_front();
+      }
+      if (!frame) {
+        break;
+      }
+      std::string frame_data(reinterpret_cast<const char*>(frame->data()), frame->size());
+      auto send_info = ws->sendBinary(frame_data);
+      if (!send_info.success) {
+        return false;
+      }
+    }
+
+    std::string binary_data(reinterpret_cast<const char*>(data.data()), data.size());
+    auto send_info = ws->sendBinary(binary_data);
+    return send_info.success;
+  }
+
+  // Socket buffer is over the high watermark: queue the frame instead of
+  // sending it now.
+  size_t dropped;
+  uint64_t dropped_total_now;
+  {
+    std::lock_guard<std::mutex> lock(clients_mutex_);
+    auto [pending_it, inserted] = pending_frames_.try_emplace(client_identity, BoundedFrameQueue(client_backlog_size_));
+    (void)inserted;
+    dropped = pending_it->second.push(data);
+    dropped_total_now = pending_it->second.dropped_total();
+  }
+
+  if (dropped > 0) {
+    auto now = std::chrono::steady_clock::now();
+    bool should_warn;
+    {
+      std::lock_guard<std::mutex> lock(clients_mutex_);
+      auto warn_it = last_drop_warn_.find(client_identity);
+      should_warn =
+          warn_it == last_drop_warn_.end() || now - warn_it->second >= std::chrono::seconds(kDropWarnIntervalSeconds);
+      if (should_warn) {
+        last_drop_warn_[client_identity] = now;
+      }
+    }
+    if (should_warn) {
+      spdlog::warn(
+          "Slow client '{}': dropping oldest queued frame(s) ({} dropped total)", client_identity, dropped_total_now);
+    }
+  }
+
+  // The frame was accepted for later delivery, not a failure.
+  return true;
+}
+
+uint64_t WebSocketMiddleware::dropped_frame_count() const {
+  std::lock_guard<std::mutex> lock(clients_mutex_);
+  uint64_t total = dropped_from_disconnected_;
+  for (const auto& entry : pending_frames_) {
+    total += entry.second.dropped_total();
+  }
+  return total;
 }
 
 bool WebSocketMiddleware::publish_data(const std::vector<uint8_t>& data) {

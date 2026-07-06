@@ -440,6 +440,58 @@ TEST_F(WebSocketMiddlewareTest, IncomingQueueBounded) {
   std::this_thread::sleep_for(std::chrono::milliseconds(100));
 }
 
+// ---------------------------------------------------------------------------
+// Task 4 — Slow-client backpressure (bounded queue, drop-oldest)
+//
+// The drop-oldest policy itself is exercised by BoundedFrameQueue's own unit
+// tests (test_bounded_frame_queue.cpp), since forcing a real socket's
+// bufferedAmount() over the 1 MiB watermark is not realistically achievable
+// in a fast unit test. These tests instead cover the parts that only make
+// sense with a live WebSocketMiddleware: normal traffic never counts as
+// dropped, and the constructor accepts an explicit backlog size.
+// ---------------------------------------------------------------------------
+TEST_F(WebSocketMiddlewareTest, DroppedFrameCountZeroAfterNormalTraffic) {
+  auto result = middleware_->initialize(18096);
+  ASSERT_TRUE(result.has_value());
+
+  EXPECT_EQ(middleware_->dropped_frame_count(), 0u);
+
+  ix::WebSocket client;
+  client.setUrl("ws://127.0.0.1:18096");
+  client.setOnMessageCallback([](const ix::WebSocketMessagePtr& /*msg*/) {});
+  client.start();
+
+  ASSERT_TRUE(wait_for_client_open(client)) << "Client failed to connect";
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+  client.send("register");
+  std::vector<uint8_t> data;
+  std::string client_id;
+  ASSERT_TRUE(poll_receive_request(*middleware_, data, client_id));
+  ASSERT_FALSE(client_id.empty());
+
+  std::vector<uint8_t> payload = {1, 2, 3, 4};
+  for (int i = 0; i < 10; ++i) {
+    EXPECT_TRUE(middleware_->send_binary(client_id, payload));
+  }
+
+  EXPECT_EQ(middleware_->dropped_frame_count(), 0u);
+
+  client.stop();
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+}
+
+TEST(WebSocketMiddlewareBacklogConstructionTest, ExplicitBacklogSizeConstructsAndInitializes) {
+  WebSocketMiddleware middleware(5);
+  EXPECT_EQ(middleware.dropped_frame_count(), 0u);
+
+  auto result = middleware.initialize(18097);
+  ASSERT_TRUE(result.has_value());
+  EXPECT_TRUE(middleware.is_ready());
+
+  middleware.shutdown();
+}
+
 int main(int argc, char** argv) {
   testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();

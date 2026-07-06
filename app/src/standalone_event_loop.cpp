@@ -103,6 +103,7 @@ void run_standalone_event_loop(
           fmt::format("\n  Publish frequency: {:.1f} Hz", static_cast<double>(snapshot.publish_cycles) / elapsed);
       stats_msg += fmt::format(
           "\n  Sent: {:.2f} MB/s", static_cast<double>(snapshot.total_bytes_published) / elapsed / (1024.0 * 1024.0));
+      stats_msg += fmt::format("\n  Dropped frames (slow clients): {}", middleware->dropped_frame_count());
 
       spdlog::info(stats_msg);
       last_stats_print = now;
