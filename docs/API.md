@@ -235,11 +235,20 @@ later subscribers. When the last subscriber of a latched topic leaves
 with the underlying subscription: the next subscriber gets the current
 sample from DDS redelivery, never a stale copy.
 
+Replay also happens on `resume` for latched topics whose subscription
+reference is re-acquired at that point (i.e. topics that were subscribed
+while the client was paused): the replay frame is delivered right after the
+resume response, exactly like the post-subscribe case.
+
 No replay frame is sent when the retained message is still pending in the
 regular aggregation buffer — in that case the next aggregated frame delivers
 it to the new subscriber anyway, and a replay would duplicate it. Replay
 frames intentionally bypass per-topic rate limiting (`max_rate_hz`) and are
-not counted in the server's publish statistics.
+not counted in the server's publish statistics. They are, however, subject
+to the same [slow-client backpressure](#slow-clients--backpressure) queueing
+as regular aggregated frames: a replay destined for an already-slow client
+may be delayed until the next send attempt for that client (and, like any
+queued frame, can be dropped if the backlog overflows).
 
 ## Unsubscribe
 
@@ -392,10 +401,20 @@ that client are held in a small per-client queue rather than sent
 immediately. If that queue is already full, the **oldest** queued frame is
 dropped to make room for the newest one, so a lagging client always
 eventually resumes with fresh data instead of a growing backlog of stale
-frames. Queued frames are flushed, in order, as soon as the client's socket
-buffer drains back below the watermark. The JSON control-plane (requests and
-their replies, including `heartbeat`) is never affected — those messages are
-always sent immediately.
+frames. Queued frames are delivered, in order, on the **next send attempt**
+for that client once its socket buffer has drained back below the watermark
+(there is no background flush timer — if the client's topics go quiet, the
+backlog waits for the next frame destined for that client). The JSON
+control-plane (requests and their replies, including `heartbeat`) is never
+affected — those messages are always sent immediately. If a client's session
+times out server-side while its socket stays open, any backlog still queued
+for it is discarded.
+
+Frames already queued (or already sitting in the socket's send buffer) when
+an `unsubscribe` is processed may still arrive **after** the unsubscribe
+response — clients must tolerate binary messages for recently-unsubscribed
+topics. This is inherent to socket buffering, not specific to the backlog
+queue.
 
 The queue depth (max frames held per client before the oldest is dropped) is
 configurable:

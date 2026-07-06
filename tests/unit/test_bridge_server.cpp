@@ -103,7 +103,18 @@ class MockMiddleware : public MiddlewareInterface {
     on_disconnect_ = std::move(callback);
   }
 
+  void drop_pending(const std::string& client_identity) override {
+    std::lock_guard<std::mutex> lock(drop_pending_mutex_);
+    drop_pending_calls_.push_back(client_identity);
+  }
+
   // --- Test helpers ---
+
+  /// Return the client ids drop_pending() was invoked for, in call order.
+  std::vector<std::string> get_drop_pending_calls() {
+    std::lock_guard<std::mutex> lock(drop_pending_mutex_);
+    return drop_pending_calls_;
+  }
 
   /// Push a text request as if it came from a connected client.
   void push_request(const std::string& client_id, const std::string& text) {
@@ -219,6 +230,9 @@ class MockMiddleware : public MiddlewareInterface {
   std::mutex cb_mutex_;
   ConnectionCallback on_connect_;
   ConnectionCallback on_disconnect_;
+
+  std::mutex drop_pending_mutex_;
+  std::vector<std::string> drop_pending_calls_;
 };
 
 // ---------------------------------------------------------------------------
@@ -553,6 +567,44 @@ TEST_F(BridgeServerTest, CleanupSessionIdempotent) {
 
   mock_->simulate_disconnect("client_E");
   EXPECT_EQ(server_->get_active_session_count(), 0u);
+}
+
+// ---------------------------------------------------------------------------
+// 6b. CleanupSessionDropsPendingMiddlewareFrames
+//
+// When a session is destroyed server-side (heartbeat timeout or disconnect),
+// cleanup_session must tell the middleware to discard any outbound frames
+// still parked in its slow-client backpressure queue for that client —
+// otherwise a timed-out client whose socket stays open leaks its backlog,
+// and stale frames could flush into a new logical session on the same
+// connection.
+// ---------------------------------------------------------------------------
+TEST_F(BridgeServerTest, CleanupSessionDropsPendingMiddlewareFrames) {
+  ASSERT_TRUE(server_->initialize());
+
+  // Create a session via heartbeat.
+  json hb;
+  hb["command"] = "heartbeat";
+  mock_->push_request("client_DP", hb.dump());
+  server_->process_requests();
+  ASSERT_EQ(server_->get_active_session_count(), 1u);
+  EXPECT_TRUE(mock_->get_drop_pending_calls().empty());
+
+  // Disconnect triggers cleanup_session, which must invoke drop_pending for
+  // exactly this client.
+  mock_->simulate_disconnect("client_DP");
+  EXPECT_EQ(server_->get_active_session_count(), 0u);
+
+  auto calls = mock_->get_drop_pending_calls();
+  ASSERT_EQ(calls.size(), 1u);
+  EXPECT_EQ(calls[0], "client_DP");
+
+  // cleanup_session for a client without a session still drops pending
+  // middleware state (idempotent, matches drop_pending's no-op contract).
+  mock_->simulate_disconnect("client_DP");
+  calls = mock_->get_drop_pending_calls();
+  ASSERT_EQ(calls.size(), 2u);
+  EXPECT_EQ(calls[1], "client_DP");
 }
 
 // ---------------------------------------------------------------------------

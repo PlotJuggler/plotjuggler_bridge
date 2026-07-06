@@ -68,6 +68,11 @@ class MiddlewareInterface {
   /// @return true if the message was sent, false if the client is gone.
   virtual bool send_binary(const std::string& client_identity, const std::vector<uint8_t>& data) = 0;
 
+  /// Discard any queued outbound data for this client (e.g. when its session
+  /// is destroyed server-side while the socket stays open). Default no-op for
+  /// implementations without per-client outbound queues.
+  virtual void drop_pending(const std::string& /*client_identity*/) {}
+
   /// @return true if initialize() succeeded and shutdown() has not been called.
   virtual bool is_ready() const = 0;
 

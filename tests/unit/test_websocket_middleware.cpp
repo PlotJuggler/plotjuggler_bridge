@@ -509,6 +509,49 @@ TEST_F(WebSocketMiddlewareTest, SendBinaryToAbsentClientCreatesNoPendingState) {
   EXPECT_EQ(middleware_->dropped_frame_count(), 0u);
 }
 
+// drop_pending discards a client's backpressure backlog when its session is
+// destroyed server-side (heartbeat timeout) while the socket stays open. A
+// unit test cannot force the over-watermark path that populates the backlog,
+// so this verifies the reachable contract: drop_pending is a safe idempotent
+// no-op for clients with no pending state (never connected, or connected but
+// never backlogged), never skews dropped_frame_count(), and leaves a live
+// client's socket fully usable — send_binary still succeeds afterwards.
+TEST_F(WebSocketMiddlewareTest, DropPendingIsSafeNoOpAndKeepsSocketUsable) {
+  auto result = middleware_->initialize(18099);
+  ASSERT_TRUE(result.has_value());
+
+  // No such client: must not crash or create state.
+  middleware_->drop_pending("never-connected");
+  middleware_->drop_pending("never-connected");
+  EXPECT_EQ(middleware_->dropped_frame_count(), 0u);
+
+  // Connected client with an empty backlog: drop_pending must not touch the
+  // socket itself.
+  ix::WebSocket client;
+  client.setUrl("ws://127.0.0.1:18099");
+  client.setOnMessageCallback([](const ix::WebSocketMessagePtr& /*msg*/) {});
+  client.start();
+
+  ASSERT_TRUE(wait_for_client_open(client)) << "Client failed to connect";
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+  client.send("register");
+  std::vector<uint8_t> data;
+  std::string client_id;
+  ASSERT_TRUE(poll_receive_request(*middleware_, data, client_id));
+  ASSERT_FALSE(client_id.empty());
+
+  middleware_->drop_pending(client_id);
+  EXPECT_EQ(middleware_->dropped_frame_count(), 0u);
+
+  std::vector<uint8_t> payload = {1, 2, 3, 4};
+  EXPECT_TRUE(middleware_->send_binary(client_id, payload));
+  EXPECT_EQ(middleware_->dropped_frame_count(), 0u);
+
+  client.stop();
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+}
+
 TEST(WebSocketMiddlewareBacklogConstructionTest, ExplicitBacklogSizeConstructsAndInitializes) {
   WebSocketMiddleware middleware(5);
   EXPECT_EQ(middleware.dropped_frame_count(), 0u);

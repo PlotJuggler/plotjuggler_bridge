@@ -410,6 +410,21 @@ bool WebSocketMiddleware::send_binary(const std::string& client_identity, const 
   return true;
 }
 
+void WebSocketMiddleware::drop_pending(const std::string& client_identity) {
+  // The client's logical session was destroyed server-side (e.g. heartbeat
+  // timeout) while its socket may still be open. Discard its backpressure
+  // backlog so stale frames can't flush into a future session on the same
+  // connection, folding the drop count into the lifetime total. The socket
+  // itself is untouched: clients_ still owns it until the real disconnect.
+  std::lock_guard<std::mutex> lock(clients_mutex_);
+  auto pending_it = pending_frames_.find(client_identity);
+  if (pending_it != pending_frames_.end()) {
+    dropped_from_disconnected_ += pending_it->second.dropped_total();
+    pending_frames_.erase(pending_it);
+  }
+  last_drop_warn_.erase(client_identity);
+}
+
 uint64_t WebSocketMiddleware::dropped_frame_count() const {
   std::lock_guard<std::mutex> lock(clients_mutex_);
   uint64_t total = dropped_from_disconnected_;

@@ -65,6 +65,7 @@ class WebSocketMiddleware : public MiddlewareInterface {
   bool is_ready() const override;
   void set_on_connect(ConnectionCallback callback) override;
   void set_on_disconnect(ConnectionCallback callback) override;
+  void drop_pending(const std::string& client_identity) override;
 
   /// Total number of frames dropped due to slow-client backpressure, summed
   /// across all clients (currently connected and already disconnected).

@@ -845,35 +845,44 @@ void BridgeServer::release_subscription_ref(const std::string& topic_name) {
 }
 
 void BridgeServer::cleanup_session(const std::string& client_id) {
-  std::lock_guard<std::mutex> lock(cleanup_mutex_);
-
-  // Drop any undelivered latched-replay frames regardless of session state
-  // (the client is gone; leaving them queued would strand them forever).
   {
-    std::lock_guard<std::mutex> replays_lock(replays_mutex_);
-    pending_replays_.erase(client_id);
+    std::lock_guard<std::mutex> lock(cleanup_mutex_);
+
+    // Drop any undelivered latched-replay frames regardless of session state
+    // (the client is gone; leaving them queued would strand them forever).
+    {
+      std::lock_guard<std::mutex> replays_lock(replays_mutex_);
+      pending_replays_.erase(client_id);
+    }
+
+    if (session_manager_->session_exists(client_id)) {
+      // Release exactly the refs this session holds. Paused clients hold
+      // none; there is no separate paused check to race against.
+      auto held_refs = session_manager_->get_ref_held_topics(client_id);
+      for (const auto& topic : held_refs) {
+        release_subscription_ref(topic);
+        spdlog::debug("Unsubscribed client '{}' from topic '{}'", client_id, topic);
+      }
+
+      session_manager_->remove_session(client_id);
+
+      {
+        std::lock_guard<std::mutex> sent_lock(last_sent_mutex_);
+        last_sent_times_.erase(client_id);
+      }
+
+      spdlog::info("Cleaned up session for client '{}' ({} topic refs released)", client_id, held_refs.size());
+    }
   }
 
-  if (!session_manager_->session_exists(client_id)) {
-    return;
-  }
-
-  // Release exactly the refs this session holds. Paused clients hold none;
-  // there is no separate paused check to race against.
-  auto held_refs = session_manager_->get_ref_held_topics(client_id);
-  for (const auto& topic : held_refs) {
-    release_subscription_ref(topic);
-    spdlog::debug("Unsubscribed client '{}' from topic '{}'", client_id, topic);
-  }
-
-  session_manager_->remove_session(client_id);
-
-  {
-    std::lock_guard<std::mutex> sent_lock(last_sent_mutex_);
-    last_sent_times_.erase(client_id);
-  }
-
-  spdlog::info("Cleaned up session for client '{}' ({} topic refs released)", client_id, held_refs.size());
+  // Discard any frames the middleware's slow-client backpressure queue still
+  // holds for this client. On a heartbeat timeout the socket stays open, so
+  // without this a timed-out slow client parks frames indefinitely and stale
+  // data could flush into a new logical session on the same connection.
+  // Deliberately outside the cleanup_mutex_ scope: middleware calls must not
+  // run under that lock. Also deliberately unconditional (even when no
+  // session existed): drop_pending is an idempotent no-op then.
+  middleware_->drop_pending(client_id);
 }
 
 size_t BridgeServer::get_active_session_count() const {
