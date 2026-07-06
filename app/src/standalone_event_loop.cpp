@@ -49,6 +49,13 @@ void run_standalone_event_loop(
 
   spdlog::info("Bridge server initialized, entering event loop");
 
+  if (config.topic_poll_interval > 0.0) {
+    // Take the silent baseline snapshot now, before any client can connect,
+    // so topics appearing before the first poll tick are notified rather
+    // than folded into the baseline.
+    server.check_topic_changes();
+  }
+
   using clock = std::chrono::steady_clock;
   auto publish_interval =
       std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::duration<double>(1.0 / config.publish_rate));

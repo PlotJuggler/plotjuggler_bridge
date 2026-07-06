@@ -125,6 +125,10 @@ int main(int argc, char** argv) {
     // topic_poll_interval == 0 disables the pushed topic-advertisement poll.
     rclcpp::TimerBase::SharedPtr topic_poll_timer;
     if (topic_poll_interval > 0.0) {
+      // Take the silent baseline snapshot now, before any client can connect,
+      // so topics appearing before the first timer tick are notified rather
+      // than folded into the baseline.
+      server.check_topic_changes();
       topic_poll_timer = node->create_wall_timer(
           std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::duration<double>(topic_poll_interval)),
           [&server]() { server.check_topic_changes(); });
