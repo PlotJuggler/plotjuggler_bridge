@@ -17,11 +17,11 @@
  * along with pj_bridge. If not, see <https://www.gnu.org/licenses/>.
  */
 
-#include "pj_bridge/middleware/bounded_frame_queue.hpp"
-
 #include <gtest/gtest.h>
 
 #include <vector>
+
+#include "pj_bridge/middleware/bounded_frame_queue.hpp"
 
 using namespace pj_bridge;
 

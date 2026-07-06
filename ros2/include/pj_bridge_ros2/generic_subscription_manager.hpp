@@ -56,6 +56,12 @@ class GenericSubscriptionManager {
   size_t get_reference_count(const std::string& topic_name) const;
   void unsubscribe_all();
 
+  /// True when the subscription for `topic_name` was created with
+  /// TRANSIENT_LOCAL durability (i.e. every publisher discovered at
+  /// subscribe time offered it). Returns false if the topic is not
+  /// currently subscribed.
+  bool is_transient_local(const std::string& topic_name) const;
+
   // Exposed publicly for testability; computes the QoS a subscription should
   // use for `topic_name` based on the publishers currently discovered on it.
   rclcpp::QoS adapt_qos(const std::string& topic_name) const;
@@ -64,6 +70,7 @@ class GenericSubscriptionManager {
   struct SubscriptionInfo {
     std::shared_ptr<rclcpp::GenericSubscription> subscription;
     size_t reference_count;
+    bool transient_local;  ///< durability actually used for this subscription
   };
 
   rclcpp::Node::SharedPtr node_;

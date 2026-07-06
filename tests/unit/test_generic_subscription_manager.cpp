@@ -403,3 +403,35 @@ TEST_F(GenericSubscriptionManagerTest, AdaptQosDepthMixedKnownAndUnknownPublishe
 
   EXPECT_EQ(qos.depth(), 100u);
 }
+
+// ---------------------------------------------------------------------------
+// is_transient_local()
+//
+// Durability (unlike history depth) is one of the QoS policies DDS discovery
+// is required to propagate, since it affects wire compatibility — every RMW
+// reports it correctly, so these tests need no SKIP_IF_RMW_HIDES_DEPTH guard.
+// ---------------------------------------------------------------------------
+
+TEST_F(GenericSubscriptionManagerTest, IsTransientLocalTrueWhenPublisherOffersIt) {
+  auto publisher = node_->create_publisher<sensor_msgs::msg::Imu>("/latched_topic", rclcpp::QoS(1).transient_local());
+  wait_for_publisher_count(node_, "/latched_topic", 1);
+
+  auto callback = [](const std::string&, const std::shared_ptr<rclcpp::SerializedMessage>&, uint64_t) {};
+  ASSERT_TRUE(manager_->subscribe("/latched_topic", "sensor_msgs/msg/Imu", callback));
+
+  EXPECT_TRUE(manager_->is_transient_local("/latched_topic"));
+}
+
+TEST_F(GenericSubscriptionManagerTest, IsTransientLocalFalseForVolatilePublisher) {
+  auto publisher = node_->create_publisher<sensor_msgs::msg::Imu>("/volatile_topic", rclcpp::QoS(1));
+  wait_for_publisher_count(node_, "/volatile_topic", 1);
+
+  auto callback = [](const std::string&, const std::shared_ptr<rclcpp::SerializedMessage>&, uint64_t) {};
+  ASSERT_TRUE(manager_->subscribe("/volatile_topic", "sensor_msgs/msg/Imu", callback));
+
+  EXPECT_FALSE(manager_->is_transient_local("/volatile_topic"));
+}
+
+TEST_F(GenericSubscriptionManagerTest, IsTransientLocalFalseForUnsubscribedTopic) {
+  EXPECT_FALSE(manager_->is_transient_local("/never_subscribed_topic"));
+}

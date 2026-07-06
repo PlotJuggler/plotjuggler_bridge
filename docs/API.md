@@ -205,6 +205,33 @@ The `rate_limits` field is only present when at least one topic has a non-zero r
 }
 ```
 
+## Latched topics (transient_local)
+
+*ROS2 backend only, for now.*
+
+When a topic's publishers all offer `TRANSIENT_LOCAL` durability (e.g.
+`/tf_static`, `/robot_description`), the bridge treats it as **latched**. A
+brand-new subscription receives the publisher's retained sample directly
+from DDS, but the bridge's underlying middleware subscription is shared and
+reference-counted across clients — a client subscribing to a topic that
+another client is *already* subscribed to does not create a new DDS
+subscription, so it would otherwise have to wait for the next publish (which,
+for a latched topic like `/tf_static`, may never come).
+
+To cover this case, the bridge retains the most recent message for each
+latched topic outside the normal 1-second message buffer. Immediately after
+a successful `subscribe` response, the server sends one extra binary frame
+per newly-subscribed latched topic containing just that retained message —
+same [Binary Message Format](#binary-message-format) as regular aggregated
+frames, just with a single message and the original (possibly "stale")
+timestamp from when it was received. No client-side handling is required
+beyond decoding it like any other binary frame.
+
+Only the single newest sample per latched topic is retained (bounded memory
+use), and only for topics that have had at least one subscriber — the
+first subscriber's DDS-native delivery is what seeds the retained copy for
+later subscribers.
+
 ## Unsubscribe
 
 Remove topics from subscription. Only removes specified topics; other subscriptions are preserved.

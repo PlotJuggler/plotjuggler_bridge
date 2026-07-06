@@ -48,6 +48,7 @@ class Ros2SubscriptionManager : public SubscriptionManagerInterface {
   bool subscribe(const std::string& topic_name, const std::string& topic_type) override;
   bool unsubscribe(const std::string& topic_name) override;
   void unsubscribe_all() override;
+  bool is_transient_local(const std::string& topic_name) const override;
 
  private:
   GenericSubscriptionManager inner_manager_;

@@ -20,6 +20,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <cstring>
 #include <deque>
 #include <functional>
 #include <mutex>
@@ -32,6 +33,7 @@
 #include <vector>
 
 #include "pj_bridge/bridge_server.hpp"
+#include "pj_bridge/message_serializer.hpp"
 #include "pj_bridge/middleware/middleware_interface.hpp"
 #include "pj_bridge/subscription_manager_interface.hpp"
 #include "pj_bridge/topic_source_interface.hpp"
@@ -278,10 +280,40 @@ class MockSubscriptionManager : public SubscriptionManagerInterface {
     ref_counts_.clear();
   }
 
+  bool is_transient_local(const std::string& topic_name) const override {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return transient_local_topics_.count(topic_name) > 0;
+  }
+
   // Test helpers
   void add_known_topic(const std::string& topic_name) {
     std::lock_guard<std::mutex> lock(mutex_);
     known_topics_.insert(topic_name);
+  }
+
+  // Mark a topic as reporting TRANSIENT_LOCAL durability from is_transient_local().
+  void set_transient_local(const std::string& topic_name, bool transient_local) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (transient_local) {
+      transient_local_topics_.insert(topic_name);
+    } else {
+      transient_local_topics_.erase(topic_name);
+    }
+  }
+
+  // Simulate a message arriving on `topic_name`, invoking the callback
+  // registered via set_message_callback() — exactly as the real backend
+  // would when a middleware message is received.
+  void deliver_message(
+      const std::string& topic_name, std::shared_ptr<std::vector<std::byte>> data, uint64_t timestamp_ns) {
+    MessageCallback cb;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      cb = callback_;
+    }
+    if (cb) {
+      cb(topic_name, std::move(data), timestamp_ns);
+    }
   }
 
   bool is_subscribed(const std::string& topic_name) const {
@@ -313,8 +345,60 @@ class MockSubscriptionManager : public SubscriptionManagerInterface {
   MessageCallback callback_;
   std::unordered_set<std::string> known_topics_;
   std::unordered_map<std::string, int> ref_counts_;
+  std::unordered_set<std::string> transient_local_topics_;
   bool underflow_detected_{false};
 };
+
+// ---------------------------------------------------------------------------
+// decode_frame — test helper to parse a binary aggregated-message frame
+// (16-byte header + ZSTD-compressed payload) back into its messages, mirroring
+// the wire format documented in docs/API.md and produced by
+// AggregatedMessageSerializer::finalize().
+// ---------------------------------------------------------------------------
+struct DecodedMessage {
+  std::string topic;
+  uint64_t timestamp_ns;
+  std::vector<uint8_t> data;
+};
+
+std::vector<DecodedMessage> decode_frame(const std::vector<uint8_t>& frame) {
+  std::vector<DecodedMessage> result;
+  if (frame.size() < 16) {
+    return result;
+  }
+
+  uint32_t message_count = 0;
+  std::memcpy(&message_count, frame.data() + 4, sizeof(message_count));
+
+  std::vector<uint8_t> compressed(frame.begin() + 16, frame.end());
+  std::vector<uint8_t> payload;
+  AggregatedMessageSerializer::decompress_zstd(compressed, payload);
+
+  size_t offset = 0;
+  for (uint32_t i = 0; i < message_count; ++i) {
+    uint16_t topic_len = 0;
+    std::memcpy(&topic_len, payload.data() + offset, sizeof(topic_len));
+    offset += sizeof(topic_len);
+
+    std::string topic(payload.begin() + offset, payload.begin() + offset + topic_len);
+    offset += topic_len;
+
+    uint64_t timestamp_ns = 0;
+    std::memcpy(&timestamp_ns, payload.data() + offset, sizeof(timestamp_ns));
+    offset += sizeof(timestamp_ns);
+
+    uint32_t data_len = 0;
+    std::memcpy(&data_len, payload.data() + offset, sizeof(data_len));
+    offset += sizeof(data_len);
+
+    std::vector<uint8_t> data(payload.begin() + offset, payload.begin() + offset + data_len);
+    offset += data_len;
+
+    result.push_back(DecodedMessage{std::move(topic), timestamp_ns, std::move(data)});
+  }
+
+  return result;
+}
 
 // ---------------------------------------------------------------------------
 // Test fixture
@@ -2340,4 +2424,102 @@ TEST_F(BridgeServerTest, UnsubscribeTopicUpdatesStopsNotifications) {
 
   auto replies = mock_->get_replies("client_x");
   EXPECT_TRUE(replies.empty());
+}
+
+// ---------------------------------------------------------------------------
+// Latched (transient_local) topic replay
+//
+// A late subscriber joining an already-shared middleware subscription for a
+// latched topic must be immediately replayed the most recent message, even
+// after it has aged out of the normal 1-second message buffer. The FIRST
+// subscriber gets its sample naturally from DDS (transient_local
+// redelivery), so this replay path exists specifically for LATER clients.
+// ---------------------------------------------------------------------------
+
+// LatchedTopicReplaysToLateSubscriberOnly
+TEST_F(BridgeServerTest, LatchedTopicReplaysToLateSubscriberOnly) {
+  ASSERT_TRUE(server_->initialize());
+  mock_topic_source_->set_topics({{"/latched", "std_msgs/msg/String"}});
+  mock_sub_manager_->add_known_topic("/latched");
+  mock_sub_manager_->set_transient_local("/latched", true);
+
+  json sub;
+  sub["command"] = "subscribe";
+  sub["topics"] = json::array({"/latched"});
+
+  // Client A subscribes first (the "first subscriber" — no retained sample
+  // exists yet, so no replay frame is sent).
+  mock_->push_request("client_a", sub.dump());
+  server_->process_requests();
+  json resp_a = mock_->pop_reply("client_a");
+  ASSERT_FALSE(resp_a.is_discarded());
+  EXPECT_EQ(resp_a["status"], "success");
+  EXPECT_TRUE(mock_->get_binary_sends().empty());
+
+  // A message arrives on the latched topic.
+  std::vector<uint8_t> payload = {10, 20, 30, 40};
+  auto data = std::make_shared<std::vector<std::byte>>(payload.size());
+  for (size_t i = 0; i < payload.size(); ++i) {
+    (*data)[i] = static_cast<std::byte>(payload[i]);
+  }
+  mock_sub_manager_->deliver_message("/latched", data, 12345);
+
+  // Drain the normal message buffer, simulating the message aging out of
+  // the regular publish cycle (it is delivered to client_a here).
+  server_->publish_aggregated_messages();
+  mock_->clear_binary_sends();
+
+  // Client B subscribes later, joining the already-shared subscription.
+  mock_->push_request("client_b", sub.dump());
+  server_->process_requests();
+  json resp_b = mock_->pop_reply("client_b");
+  ASSERT_FALSE(resp_b.is_discarded());
+  EXPECT_EQ(resp_b["status"], "success");
+
+  // Exactly one binary frame, sent only to client_b, containing the
+  // retained message.
+  auto binary_sends = mock_->get_binary_sends();
+  ASSERT_EQ(binary_sends.size(), 1u);
+  EXPECT_EQ(binary_sends[0].first, "client_b");
+
+  auto messages = decode_frame(binary_sends[0].second);
+  ASSERT_EQ(messages.size(), 1u);
+  EXPECT_EQ(messages[0].topic, "/latched");
+  EXPECT_EQ(messages[0].timestamp_ns, 12345u);
+  EXPECT_EQ(messages[0].data, payload);
+}
+
+// SubscribeToNonLatchedTopicSendsNoImmediateFrame
+TEST_F(BridgeServerTest, SubscribeToNonLatchedTopicSendsNoImmediateFrame) {
+  ASSERT_TRUE(server_->initialize());
+  mock_topic_source_->set_topics({{"/plain", "std_msgs/msg/String"}});
+  mock_sub_manager_->add_known_topic("/plain");
+  // Not marked transient_local.
+
+  json sub;
+  sub["command"] = "subscribe";
+  sub["topics"] = json::array({"/plain"});
+
+  mock_->push_request("client_a", sub.dump());
+  server_->process_requests();
+  mock_->pop_reply("client_a");
+
+  std::vector<uint8_t> payload = {1, 2, 3};
+  auto data = std::make_shared<std::vector<std::byte>>(payload.size());
+  for (size_t i = 0; i < payload.size(); ++i) {
+    (*data)[i] = static_cast<std::byte>(payload[i]);
+  }
+  mock_sub_manager_->deliver_message("/plain", data, 999);
+  server_->publish_aggregated_messages();
+  mock_->clear_binary_sends();
+
+  // A second, late client subscribing to a non-latched topic must not
+  // receive any immediate replay frame.
+  mock_->push_request("client_b", sub.dump());
+  server_->process_requests();
+  json resp_b = mock_->pop_reply("client_b");
+  ASSERT_FALSE(resp_b.is_discarded());
+  EXPECT_EQ(resp_b["status"], "success");
+
+  EXPECT_TRUE(mock_->get_binary_sends().empty());
 }

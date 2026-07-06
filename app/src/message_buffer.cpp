@@ -41,7 +41,33 @@ void MessageBuffer::add_message(
   msg.received_at_ns = now_ns();
   msg.data = std::move(data);
 
+  if (latched_topics_.count(topic_name) > 0) {
+    // Retain a copy of the newest sample (shared_ptr copy — cheap, no deep
+    // copy of the payload) for latched-topic replay. This store is exempt
+    // from TTL cleanup and from move_messages().
+    latched_last_[topic_name] = msg;
+  }
+
   topic_buffers_[topic_name].push_back(std::move(msg));
+}
+
+void MessageBuffer::set_latched(const std::string& topic_name, bool latched) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (latched) {
+    latched_topics_.insert(topic_name);
+  } else {
+    latched_topics_.erase(topic_name);
+    latched_last_.erase(topic_name);
+  }
+}
+
+std::optional<BufferedMessage> MessageBuffer::get_latched(const std::string& topic_name) const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  auto it = latched_last_.find(topic_name);
+  if (it == latched_last_.end()) {
+    return std::nullopt;
+  }
+  return it->second;
 }
 
 void MessageBuffer::move_messages(std::unordered_map<std::string, std::deque<BufferedMessage>>& out_messages) {
@@ -53,6 +79,8 @@ void MessageBuffer::move_messages(std::unordered_map<std::string, std::deque<Buf
 void MessageBuffer::clear() {
   std::lock_guard<std::mutex> lock(mutex_);
   topic_buffers_.clear();
+  latched_topics_.clear();
+  latched_last_.clear();
 }
 
 size_t MessageBuffer::size() const {

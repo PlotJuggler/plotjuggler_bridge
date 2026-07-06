@@ -105,9 +105,12 @@ bool GenericSubscriptionManager::subscribe(
       callback(topic_name, msg, receive_time);
     };
 
-    auto subscription = node_->create_generic_subscription(topic_name, topic_type, adapt_qos(topic_name), sub_callback);
+    rclcpp::QoS qos = adapt_qos(topic_name);
+    bool transient_local = (qos.durability() == rclcpp::DurabilityPolicy::TransientLocal);
 
-    subscriptions_[topic_name] = SubscriptionInfo{subscription, 1};
+    auto subscription = node_->create_generic_subscription(topic_name, topic_type, qos, sub_callback);
+
+    subscriptions_[topic_name] = SubscriptionInfo{subscription, 1, transient_local};
 
     return true;
   } catch (const std::exception& e) {
@@ -158,6 +161,15 @@ size_t GenericSubscriptionManager::get_reference_count(const std::string& topic_
 void GenericSubscriptionManager::unsubscribe_all() {
   std::lock_guard<std::mutex> lock(mutex_);
   subscriptions_.clear();
+}
+
+bool GenericSubscriptionManager::is_transient_local(const std::string& topic_name) const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  auto it = subscriptions_.find(topic_name);
+  if (it == subscriptions_.end()) {
+    return false;
+  }
+  return it->second.transient_local;
 }
 
 }  // namespace pj_bridge

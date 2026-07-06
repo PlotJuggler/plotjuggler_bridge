@@ -78,4 +78,8 @@ void Ros2SubscriptionManager::unsubscribe_all() {
   inner_manager_.unsubscribe_all();
 }
 
+bool Ros2SubscriptionManager::is_transient_local(const std::string& topic_name) const {
+  return inner_manager_.is_transient_local(topic_name);
+}
+
 }  // namespace pj_bridge
