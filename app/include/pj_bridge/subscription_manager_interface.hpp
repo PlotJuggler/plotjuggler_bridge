@@ -81,6 +81,13 @@ class SubscriptionManagerInterface {
   virtual bool is_transient_local(const std::string& /*topic_name*/) const {
     return false;
   }
+
+  /// True while the topic has at least one active reference (i.e. the
+  /// underlying middleware subscription exists). Backends that don't track
+  /// this return false.
+  virtual bool is_subscribed(const std::string& /*topic_name*/) const {
+    return false;
+  }
 };
 
 }  // namespace pj_bridge

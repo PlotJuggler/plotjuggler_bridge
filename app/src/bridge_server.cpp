@@ -212,7 +212,28 @@ void BridgeServer::process_single_request(const std::vector<uint8_t>& request_da
   std::vector<uint8_t> response_data(response.begin(), response.end());
   if (!middleware_->send_reply(client_id, response_data)) {
     spdlog::warn("Failed to send response to client '{}', cleaning up session", client_id);
+    // cleanup_session drops any replay frames handle_subscribe queued for
+    // this client (they must never be delivered without the response).
     cleanup_session(client_id);
+    return;
+  }
+
+  // Flush any latched-topic replay frames handle_subscribe queued for this
+  // client. Sent strictly AFTER the response so the client has the schema
+  // needed to decode them (docs/API.md: "right after the subscribe
+  // response"). Move the frames out under the leaf replays_mutex_, release
+  // it, then send — never call middleware_ while holding the lock.
+  std::vector<std::vector<uint8_t>> replay_frames;
+  {
+    std::lock_guard<std::mutex> replays_lock(replays_mutex_);
+    auto it = pending_replays_.find(client_id);
+    if (it != pending_replays_.end()) {
+      replay_frames = std::move(it->second);
+      pending_replays_.erase(it);
+    }
+  }
+  for (const auto& frame : replay_frames) {
+    middleware_->send_binary(client_id, frame);
   }
 }
 
@@ -379,7 +400,7 @@ std::string BridgeServer::handle_subscribe(const std::string& client_id, const n
       if (!session_manager_->add_subscription(client_id, topic_name, rate)) {
         spdlog::warn("Session gone for client '{}', rolling back subscribe for '{}'", client_id, topic_name);
         if (ref_acquired) {
-          subscription_manager_->unsubscribe(topic_name);
+          release_subscription_ref(topic_name);
         }
         continue;
       }
@@ -406,7 +427,10 @@ std::string BridgeServer::handle_subscribe(const std::string& client_id, const n
         bool is_latched = subscription_manager_->is_transient_local(topic_name);
         message_buffer_->set_latched(topic_name, is_latched);
         if (is_latched) {
-          if (auto latched_msg = message_buffer_->get_latched(topic_name)) {
+          // get_latched_for_replay skips samples still sitting in the
+          // normal buffer — those reach the new subscriber through the
+          // regular publish cycle, and replaying them too would duplicate.
+          if (auto latched_msg = message_buffer_->get_latched_for_replay(topic_name)) {
             replay_candidates.emplace_back(topic_name, *latched_msg);
           }
         }
@@ -424,16 +448,28 @@ std::string BridgeServer::handle_subscribe(const std::string& client_id, const n
     }
   }
 
-  // Replay retained latched samples to this client now that cleanup_mutex_
-  // is released. Each candidate becomes its own single-message binary frame
-  // (mirrors the normal aggregated-frame format so clients need no special
-  // handling). Does not touch last_sent_times_: the sample's old timestamp
-  // means it won't interfere with subsequent rate limiting.
-  for (const auto& [topic_name, latched_msg] : replay_candidates) {
-    AggregatedMessageSerializer serializer;
-    serializer.serialize_message(
-        topic_name, latched_msg.timestamp_ns, latched_msg.data->data(), latched_msg.data->size());
-    middleware_->send_binary(client_id, serializer.finalize());
+  // Serialize the retained latched samples now that cleanup_mutex_ is
+  // released, but do NOT send them here: the subscribe response (which
+  // carries the topic's schema) is sent by process_single_request after
+  // this handler returns, and the client must receive it before any binary
+  // frame that needs the schema to decode. Queue the frames instead;
+  // process_single_request flushes them right after the response goes out.
+  // Each candidate becomes its own single-message binary frame (mirrors the
+  // normal aggregated-frame format so clients need no special handling).
+  // Does not touch last_sent_times_: the sample's old timestamp means it
+  // won't interfere with subsequent rate limiting.
+  if (!replay_candidates.empty()) {
+    std::vector<std::vector<uint8_t>> frames;
+    frames.reserve(replay_candidates.size());
+    for (const auto& [topic_name, latched_msg] : replay_candidates) {
+      AggregatedMessageSerializer serializer;
+      serializer.serialize_message(
+          topic_name, latched_msg.timestamp_ns, latched_msg.data->data(), latched_msg.data->size());
+      frames.push_back(serializer.finalize());
+    }
+    std::lock_guard<std::mutex> replays_lock(replays_mutex_);
+    auto& pending = pending_replays_[client_id];
+    pending.insert(pending.end(), std::make_move_iterator(frames.begin()), std::make_move_iterator(frames.end()));
   }
 
   // Build response
@@ -504,7 +540,7 @@ std::string BridgeServer::handle_unsubscribe(const std::string& client_id, const
         // Release the middleware ref only if this session actually holds one
         // (a paused client's refs were already released by pause).
         if (held_refs.count(topic_name) > 0) {
-          subscription_manager_->unsubscribe(topic_name);
+          release_subscription_ref(topic_name);
         }
         session_manager_->remove_subscription(client_id, topic_name);
         current_subs.erase(topic_name);
@@ -566,7 +602,7 @@ std::string BridgeServer::handle_pause(const std::string& client_id, const nlohm
     // Release exactly the refs this session holds
     auto held_refs = session_manager_->get_ref_held_topics(client_id);
     for (const auto& topic : held_refs) {
-      subscription_manager_->unsubscribe(topic);
+      release_subscription_ref(topic);
       session_manager_->set_ref_held(client_id, topic, false);
       spdlog::debug("Released ref for topic '{}' (client '{}' paused)", topic, client_id);
     }
@@ -790,8 +826,27 @@ void BridgeServer::check_topic_changes() {
   }
 }
 
+void BridgeServer::release_subscription_ref(const std::string& topic_name) {
+  subscription_manager_->unsubscribe(topic_name);
+  // When the last ref is released the middleware subscription is destroyed.
+  // Clear the topic's latched state with it: the retained sample would go
+  // stale, and the NEXT subscriber creates a fresh middleware subscription
+  // that receives the current sample via DDS transient_local redelivery —
+  // replaying the stale copy before it would deliver out-of-date data.
+  if (!subscription_manager_->is_subscribed(topic_name) && message_buffer_) {
+    message_buffer_->set_latched(topic_name, false);
+  }
+}
+
 void BridgeServer::cleanup_session(const std::string& client_id) {
   std::lock_guard<std::mutex> lock(cleanup_mutex_);
+
+  // Drop any undelivered latched-replay frames regardless of session state
+  // (the client is gone; leaving them queued would strand them forever).
+  {
+    std::lock_guard<std::mutex> replays_lock(replays_mutex_);
+    pending_replays_.erase(client_id);
+  }
 
   if (!session_manager_->session_exists(client_id)) {
     return;
@@ -801,7 +856,7 @@ void BridgeServer::cleanup_session(const std::string& client_id) {
   // there is no separate paused check to race against.
   auto held_refs = session_manager_->get_ref_held_topics(client_id);
   for (const auto& topic : held_refs) {
-    subscription_manager_->unsubscribe(topic);
+    release_subscription_ref(topic);
     spdlog::debug("Unsubscribed client '{}' from topic '{}'", client_id, topic);
   }
 

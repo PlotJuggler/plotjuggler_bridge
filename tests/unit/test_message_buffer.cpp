@@ -473,3 +473,40 @@ TEST_F(MessageBufferTest, ClearAlsoClearsLatchedStorage) {
   buffer_.add_message("/t", 2, create_test_data({4, 5, 6}));
   EXPECT_FALSE(buffer_.get_latched("/t").has_value());
 }
+
+TEST_F(MessageBufferTest, GetLatchedForReplaySkipsWhileSampleStillBuffered) {
+  buffer_.set_latched("/t", true);
+  buffer_.add_message("/t", 1, create_test_data({1, 2, 3}));
+
+  // The sample is still in the normal buffer: the regular publish cycle
+  // will deliver it, so the replay accessor must return nothing (a replay
+  // now would duplicate the message). The raw accessor still sees it.
+  EXPECT_FALSE(buffer_.get_latched_for_replay("/t").has_value());
+  EXPECT_TRUE(buffer_.get_latched("/t").has_value());
+
+  // Once drained by move_messages, the retained copy becomes replayable.
+  std::unordered_map<std::string, std::deque<BufferedMessage>> messages;
+  buffer_.move_messages(messages);
+  auto replay = buffer_.get_latched_for_replay("/t");
+  ASSERT_TRUE(replay.has_value());
+  EXPECT_EQ(extract_data(replay->data), (std::vector<uint8_t>{1, 2, 3}));
+}
+
+TEST_F(MessageBufferTest, GetLatchedForReplayAvailableAfterTtlEviction) {
+  uint64_t fake_now = 10'000'000'000ULL;
+  MessageBuffer buffer(MessageBuffer::kDefaultMaxMessageAgeNs, [&fake_now]() { return fake_now; });
+
+  buffer.set_latched("/t", true);
+  buffer.add_message("/t", 1, create_test_data({4, 5, 6}));
+  EXPECT_FALSE(buffer.get_latched_for_replay("/t").has_value());
+
+  // TTL eviction (triggered by an add on another topic) removes the sample
+  // from the normal buffer without draining it to any client — the
+  // retained copy must then be available for replay.
+  fake_now += 2'000'000'000ULL;
+  buffer.add_message("/other", 2, create_test_data({9}));
+
+  auto replay = buffer.get_latched_for_replay("/t");
+  ASSERT_TRUE(replay.has_value());
+  EXPECT_EQ(extract_data(replay->data), (std::vector<uint8_t>{4, 5, 6}));
+}

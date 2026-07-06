@@ -92,6 +92,14 @@ class MessageBuffer {
   /// topic is not latched or no sample has been retained yet.
   std::optional<BufferedMessage> get_latched(const std::string& topic_name) const;
 
+  /// Like get_latched(), but additionally returns nullopt while the topic
+  /// still has messages in the normal buffer. In that case the upcoming
+  /// publish cycle will deliver the sample to the new subscriber anyway —
+  /// replaying it would produce a duplicate. Replay is only needed for
+  /// samples that already left the normal buffer (drained by
+  /// move_messages() or TTL-evicted).
+  std::optional<BufferedMessage> get_latched_for_replay(const std::string& topic_name) const;
+
  private:
   mutable std::mutex mutex_;
   std::unordered_map<std::string, std::deque<BufferedMessage>> topic_buffers_;

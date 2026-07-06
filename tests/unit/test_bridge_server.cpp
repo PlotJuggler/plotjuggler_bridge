@@ -72,6 +72,7 @@ class MockMiddleware : public MiddlewareInterface {
   }
 
   bool send_reply(const std::string& client_identity, const std::vector<uint8_t>& data) override {
+    log_send(SendKind::kText, client_identity);
     std::lock_guard<std::mutex> lock(reply_mutex_);
     replies_.emplace_back(client_identity, data);
     return true;
@@ -82,6 +83,7 @@ class MockMiddleware : public MiddlewareInterface {
   }
 
   bool send_binary(const std::string& client_identity, const std::vector<uint8_t>& data) override {
+    log_send(SendKind::kBinary, client_identity);
     std::lock_guard<std::mutex> lock(binary_mutex_);
     binary_sends_.emplace_back(client_identity, data);
     return true;
@@ -178,7 +180,28 @@ class MockMiddleware : public MiddlewareInterface {
     replies_.clear();
   }
 
+  /// Kind of frame recorded in the combined send log.
+  enum class SendKind { kText, kBinary };
+
+  /// Combined, ordered log of every send_reply/send_binary call
+  /// (kind, client_id) — lets tests assert relative ordering across the
+  /// two send types.
+  std::vector<std::pair<SendKind, std::string>> get_send_log() {
+    std::lock_guard<std::mutex> lock(send_log_mutex_);
+    return send_log_;
+  }
+
+  void clear_send_log() {
+    std::lock_guard<std::mutex> lock(send_log_mutex_);
+    send_log_.clear();
+  }
+
  private:
+  void log_send(SendKind kind, const std::string& client_identity) {
+    std::lock_guard<std::mutex> lock(send_log_mutex_);
+    send_log_.emplace_back(kind, client_identity);
+  }
+
   bool ready_{false};
 
   std::mutex queue_mutex_;
@@ -189,6 +212,9 @@ class MockMiddleware : public MiddlewareInterface {
 
   std::mutex binary_mutex_;
   std::vector<std::pair<std::string, std::vector<uint8_t>>> binary_sends_;
+
+  std::mutex send_log_mutex_;
+  std::vector<std::pair<SendKind, std::string>> send_log_;
 
   std::mutex cb_mutex_;
   ConnectionCallback on_connect_;
@@ -316,7 +342,9 @@ class MockSubscriptionManager : public SubscriptionManagerInterface {
     }
   }
 
-  bool is_subscribed(const std::string& topic_name) const {
+  // Overrides the interface default (false): reports true while the topic
+  // holds at least one ref, mirroring the real backend managers.
+  bool is_subscribed(const std::string& topic_name) const override {
     std::lock_guard<std::mutex> lock(mutex_);
     auto it = ref_counts_.find(topic_name);
     return it != ref_counts_.end() && it->second > 0;
@@ -2468,6 +2496,7 @@ TEST_F(BridgeServerTest, LatchedTopicReplaysToLateSubscriberOnly) {
   // the regular publish cycle (it is delivered to client_a here).
   server_->publish_aggregated_messages();
   mock_->clear_binary_sends();
+  mock_->clear_send_log();
 
   // Client B subscribes later, joining the already-shared subscription.
   mock_->push_request("client_b", sub.dump());
@@ -2487,6 +2516,19 @@ TEST_F(BridgeServerTest, LatchedTopicReplaysToLateSubscriberOnly) {
   EXPECT_EQ(messages[0].topic, "/latched");
   EXPECT_EQ(messages[0].timestamp_ns, 12345u);
   EXPECT_EQ(messages[0].data, payload);
+
+  // Ordering: the subscribe RESPONSE (text, carrying the schema needed to
+  // decode) must reach client_b BEFORE the replay binary frame.
+  auto send_log = mock_->get_send_log();
+  std::vector<MockMiddleware::SendKind> b_sends;
+  for (const auto& [kind, cid] : send_log) {
+    if (cid == "client_b") {
+      b_sends.push_back(kind);
+    }
+  }
+  ASSERT_EQ(b_sends.size(), 2u);
+  EXPECT_EQ(b_sends[0], MockMiddleware::SendKind::kText);
+  EXPECT_EQ(b_sends[1], MockMiddleware::SendKind::kBinary);
 }
 
 // SubscribeToNonLatchedTopicSendsNoImmediateFrame
@@ -2521,5 +2563,110 @@ TEST_F(BridgeServerTest, SubscribeToNonLatchedTopicSendsNoImmediateFrame) {
   ASSERT_FALSE(resp_b.is_discarded());
   EXPECT_EQ(resp_b["status"], "success");
 
+  EXPECT_TRUE(mock_->get_binary_sends().empty());
+}
+
+// LatchedReplaySkippedWhileSampleStillBuffered
+//
+// If the retained sample is still sitting in the normal message buffer (it
+// arrived recently and has not been drained yet), the regular publish cycle
+// will deliver it to the new subscriber anyway — a replay frame would
+// duplicate it, so none must be sent.
+TEST_F(BridgeServerTest, LatchedReplaySkippedWhileSampleStillBuffered) {
+  ASSERT_TRUE(server_->initialize());
+  mock_topic_source_->set_topics({{"/latched", "std_msgs/msg/String"}});
+  mock_sub_manager_->add_known_topic("/latched");
+  mock_sub_manager_->set_transient_local("/latched", true);
+
+  json sub;
+  sub["command"] = "subscribe";
+  sub["topics"] = json::array({"/latched"});
+
+  // Client A subscribes, then a message arrives — but the buffer is NOT
+  // drained before client B subscribes.
+  mock_->push_request("client_a", sub.dump());
+  server_->process_requests();
+  mock_->pop_reply("client_a");
+
+  std::vector<uint8_t> payload = {7, 8, 9};
+  auto data = std::make_shared<std::vector<std::byte>>(payload.size());
+  for (size_t i = 0; i < payload.size(); ++i) {
+    (*data)[i] = static_cast<std::byte>(payload[i]);
+  }
+  mock_sub_manager_->deliver_message("/latched", data, 555);
+  mock_->clear_binary_sends();
+
+  // Client B subscribes while the sample is still in the normal buffer:
+  // no replay frame.
+  mock_->push_request("client_b", sub.dump());
+  server_->process_requests();
+  json resp_b = mock_->pop_reply("client_b");
+  ASSERT_FALSE(resp_b.is_discarded());
+  EXPECT_EQ(resp_b["status"], "success");
+  EXPECT_TRUE(mock_->get_binary_sends().empty());
+
+  // The regular publish cycle then delivers the sample to client B (and A)
+  // through the normal aggregated path — exactly once, no duplicate.
+  server_->publish_aggregated_messages();
+  bool b_received_via_normal_path = false;
+  for (const auto& [cid, frame] : mock_->get_binary_sends()) {
+    if (cid != "client_b") {
+      continue;
+    }
+    auto messages = decode_frame(frame);
+    ASSERT_EQ(messages.size(), 1u);
+    EXPECT_EQ(messages[0].topic, "/latched");
+    EXPECT_EQ(messages[0].data, payload);
+    EXPECT_FALSE(b_received_via_normal_path) << "duplicate frame for client_b";
+    b_received_via_normal_path = true;
+  }
+  EXPECT_TRUE(b_received_via_normal_path);
+}
+
+// LastRefReleaseClearsLatchedSample
+//
+// When the last reference to a latched topic is released, the middleware
+// subscription is destroyed and the retained sample goes stale. It must be
+// cleared: the NEXT subscriber creates a fresh middleware subscription that
+// receives the current sample via DDS transient_local redelivery, and must
+// NOT be replayed the stale copy first.
+TEST_F(BridgeServerTest, LastRefReleaseClearsLatchedSample) {
+  ASSERT_TRUE(server_->initialize());
+  mock_topic_source_->set_topics({{"/latched", "std_msgs/msg/String"}});
+  mock_sub_manager_->add_known_topic("/latched");
+  mock_sub_manager_->set_transient_local("/latched", true);
+
+  json sub;
+  sub["command"] = "subscribe";
+  sub["topics"] = json::array({"/latched"});
+
+  // Client A subscribes; a message arrives and is drained (retained copy
+  // now lives only in the latched store).
+  mock_->push_request("client_a", sub.dump());
+  server_->process_requests();
+  mock_->pop_reply("client_a");
+
+  auto data = std::make_shared<std::vector<std::byte>>(3, std::byte{42});
+  mock_sub_manager_->deliver_message("/latched", data, 111);
+  server_->publish_aggregated_messages();
+
+  // Client A unsubscribes — last ref, subscription destroyed, latched
+  // state cleared.
+  json unsub;
+  unsub["command"] = "unsubscribe";
+  unsub["topics"] = json::array({"/latched"});
+  mock_->push_request("client_a", unsub.dump());
+  server_->process_requests();
+  mock_->pop_reply("client_a");
+  ASSERT_EQ(mock_sub_manager_->ref_count("/latched"), 0);
+  mock_->clear_binary_sends();
+
+  // A NEW subscriber gets NO replay frame (the retained sample was
+  // cleared; DDS redelivery on the fresh subscription covers it).
+  mock_->push_request("client_b", sub.dump());
+  server_->process_requests();
+  json resp_b = mock_->pop_reply("client_b");
+  ASSERT_FALSE(resp_b.is_discarded());
+  EXPECT_EQ(resp_b["status"], "success");
   EXPECT_TRUE(mock_->get_binary_sends().empty());
 }

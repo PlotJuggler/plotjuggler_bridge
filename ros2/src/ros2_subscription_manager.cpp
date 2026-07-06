@@ -82,4 +82,8 @@ bool Ros2SubscriptionManager::is_transient_local(const std::string& topic_name) 
   return inner_manager_.is_transient_local(topic_name);
 }
 
+bool Ros2SubscriptionManager::is_subscribed(const std::string& topic_name) const {
+  return inner_manager_.is_subscribed(topic_name);
+}
+
 }  // namespace pj_bridge

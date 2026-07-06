@@ -230,7 +230,16 @@ beyond decoding it like any other binary frame.
 Only the single newest sample per latched topic is retained (bounded memory
 use), and only for topics that have had at least one subscriber — the
 first subscriber's DDS-native delivery is what seeds the retained copy for
-later subscribers.
+later subscribers. When the last subscriber of a latched topic leaves
+(unsubscribe, pause, or disconnect), the retained sample is discarded along
+with the underlying subscription: the next subscriber gets the current
+sample from DDS redelivery, never a stale copy.
+
+No replay frame is sent when the retained message is still pending in the
+regular aggregation buffer — in that case the next aggregated frame delivers
+it to the new subscriber anyway, and a replay would duplicate it. Replay
+frames intentionally bypass per-topic rate limiting (`max_rate_hz`) and are
+not counted in the server's publish statistics.
 
 ## Unsubscribe
 

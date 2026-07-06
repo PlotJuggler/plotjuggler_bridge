@@ -70,6 +70,24 @@ std::optional<BufferedMessage> MessageBuffer::get_latched(const std::string& top
   return it->second;
 }
 
+std::optional<BufferedMessage> MessageBuffer::get_latched_for_replay(const std::string& topic_name) const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  auto it = latched_last_.find(topic_name);
+  if (it == latched_last_.end()) {
+    return std::nullopt;
+  }
+  // While the topic still has messages in the normal buffer, the retained
+  // sample is (or is older than) one of them, and the upcoming publish
+  // cycle will deliver it to the new subscriber via the regular aggregated
+  // path — a replay would duplicate it. Empty deques are erased by both
+  // cleanup and move_messages(), so presence means undelivered messages.
+  auto buf_it = topic_buffers_.find(topic_name);
+  if (buf_it != topic_buffers_.end() && !buf_it->second.empty()) {
+    return std::nullopt;
+  }
+  return it->second;
+}
+
 void MessageBuffer::move_messages(std::unordered_map<std::string, std::deque<BufferedMessage>>& out_messages) {
   std::lock_guard<std::mutex> lock(mutex_);
   out_messages = std::move(topic_buffers_);

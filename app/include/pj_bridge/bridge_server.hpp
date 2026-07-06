@@ -151,6 +151,14 @@ class BridgeServer {
   void inject_response_fields(nlohmann::json& response, const nlohmann::json& request) const;
   void cleanup_session(const std::string& client_id);
 
+  /// Release one middleware subscription ref for @p topic_name. When the
+  /// last ref is gone (subscription destroyed), also clears the topic's
+  /// latched state in the message buffer: a stale retained sample must not
+  /// be replayed to the next fresh subscriber, who receives the current
+  /// sample from DDS transient_local redelivery instead. Call with
+  /// cleanup_mutex_ held (same requirement as unsubscribe itself).
+  void release_subscription_ref(const std::string& topic_name);
+
   // Backend interfaces (owned)
   std::shared_ptr<TopicSourceInterface> topic_source_;
   std::shared_ptr<SubscriptionManagerInterface> subscription_manager_;
@@ -186,6 +194,9 @@ class BridgeServer {
   // call middleware_ or session_manager_ (or acquire any other lock in this
   // class) while holding topics_mutex_ — release it before sending
   // notifications.
+  // replays_mutex_ is likewise a LEAF lock: it only guards pending_replays_
+  // map accesses. Never hold it while acquiring any other lock or calling
+  // middleware_ — move the frames out, release, then send.
   std::mutex cleanup_mutex_;
 
   // Per-client per-topic last-sent timestamp (nanoseconds) for rate limiting
@@ -197,6 +208,14 @@ class BridgeServer {
   std::unordered_map<std::string, std::string> known_topics_;
   bool topics_snapshot_taken_{false};
   std::mutex topics_mutex_;
+
+  // Latched (transient_local) replay frames queued by handle_subscribe,
+  // flushed by process_single_request right AFTER the subscribe response is
+  // sent — the client must receive the response (which carries the topic's
+  // schema) before the binary frame that needs it. LEAF lock (see comment
+  // above).
+  std::unordered_map<std::string, std::vector<std::vector<uint8_t>>> pending_replays_;
+  std::mutex replays_mutex_;
 };
 
 }  // namespace pj_bridge
