@@ -37,7 +37,9 @@ namespace pj_bridge {
  */
 class Ros2SubscriptionManager : public SubscriptionManagerInterface {
  public:
-  explicit Ros2SubscriptionManager(rclcpp::Node::SharedPtr node, bool strip_large_messages = false);
+  explicit Ros2SubscriptionManager(
+      rclcpp::Node::SharedPtr node, bool strip_large_messages = false, size_t min_qos_depth = 1,
+      size_t max_qos_depth = 100);
 
   Ros2SubscriptionManager(const Ros2SubscriptionManager&) = delete;
   Ros2SubscriptionManager& operator=(const Ros2SubscriptionManager&) = delete;
@@ -46,6 +48,8 @@ class Ros2SubscriptionManager : public SubscriptionManagerInterface {
   bool subscribe(const std::string& topic_name, const std::string& topic_type) override;
   bool unsubscribe(const std::string& topic_name) override;
   void unsubscribe_all() override;
+  bool is_transient_local(const std::string& topic_name) const override;
+  bool is_subscribed(const std::string& topic_name) const override;
 
  private:
   GenericSubscriptionManager inner_manager_;

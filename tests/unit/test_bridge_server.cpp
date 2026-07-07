@@ -20,6 +20,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <cstring>
 #include <deque>
 #include <functional>
 #include <mutex>
@@ -32,9 +33,11 @@
 #include <vector>
 
 #include "pj_bridge/bridge_server.hpp"
+#include "pj_bridge/message_serializer.hpp"
 #include "pj_bridge/middleware/middleware_interface.hpp"
 #include "pj_bridge/subscription_manager_interface.hpp"
 #include "pj_bridge/topic_source_interface.hpp"
+#include "pj_bridge/whitelist_filter.hpp"
 #include "tl/expected.hpp"
 
 using json = nlohmann::json;
@@ -69,6 +72,7 @@ class MockMiddleware : public MiddlewareInterface {
   }
 
   bool send_reply(const std::string& client_identity, const std::vector<uint8_t>& data) override {
+    log_send(SendKind::kText, client_identity);
     std::lock_guard<std::mutex> lock(reply_mutex_);
     replies_.emplace_back(client_identity, data);
     return true;
@@ -79,6 +83,7 @@ class MockMiddleware : public MiddlewareInterface {
   }
 
   bool send_binary(const std::string& client_identity, const std::vector<uint8_t>& data) override {
+    log_send(SendKind::kBinary, client_identity);
     std::lock_guard<std::mutex> lock(binary_mutex_);
     binary_sends_.emplace_back(client_identity, data);
     return true;
@@ -98,7 +103,18 @@ class MockMiddleware : public MiddlewareInterface {
     on_disconnect_ = std::move(callback);
   }
 
+  void drop_pending(const std::string& client_identity) override {
+    std::lock_guard<std::mutex> lock(drop_pending_mutex_);
+    drop_pending_calls_.push_back(client_identity);
+  }
+
   // --- Test helpers ---
+
+  /// Return the client ids drop_pending() was invoked for, in call order.
+  std::vector<std::string> get_drop_pending_calls() {
+    std::lock_guard<std::mutex> lock(drop_pending_mutex_);
+    return drop_pending_calls_;
+  }
 
   /// Push a text request as if it came from a connected client.
   void push_request(const std::string& client_id, const std::string& text) {
@@ -156,7 +172,47 @@ class MockMiddleware : public MiddlewareInterface {
     binary_sends_.clear();
   }
 
+  /// Return all replies sent to a given client, in send order (parsed JSON).
+  std::vector<json> get_replies(const std::string& client_id) {
+    std::lock_guard<std::mutex> lock(reply_mutex_);
+    std::vector<json> result;
+    for (const auto& [cid, data] : replies_) {
+      if (cid == client_id) {
+        std::string text(data.begin(), data.end());
+        result.push_back(json::parse(text, nullptr, false));
+      }
+    }
+    return result;
+  }
+
+  /// Discard all recorded replies (useful to isolate a subsequent action's output).
+  void clear_replies() {
+    std::lock_guard<std::mutex> lock(reply_mutex_);
+    replies_.clear();
+  }
+
+  /// Kind of frame recorded in the combined send log.
+  enum class SendKind { kText, kBinary };
+
+  /// Combined, ordered log of every send_reply/send_binary call
+  /// (kind, client_id) — lets tests assert relative ordering across the
+  /// two send types.
+  std::vector<std::pair<SendKind, std::string>> get_send_log() {
+    std::lock_guard<std::mutex> lock(send_log_mutex_);
+    return send_log_;
+  }
+
+  void clear_send_log() {
+    std::lock_guard<std::mutex> lock(send_log_mutex_);
+    send_log_.clear();
+  }
+
  private:
+  void log_send(SendKind kind, const std::string& client_identity) {
+    std::lock_guard<std::mutex> lock(send_log_mutex_);
+    send_log_.emplace_back(kind, client_identity);
+  }
+
   bool ready_{false};
 
   std::mutex queue_mutex_;
@@ -168,9 +224,15 @@ class MockMiddleware : public MiddlewareInterface {
   std::mutex binary_mutex_;
   std::vector<std::pair<std::string, std::vector<uint8_t>>> binary_sends_;
 
+  std::mutex send_log_mutex_;
+  std::vector<std::pair<SendKind, std::string>> send_log_;
+
   std::mutex cb_mutex_;
   ConnectionCallback on_connect_;
   ConnectionCallback on_disconnect_;
+
+  std::mutex drop_pending_mutex_;
+  std::vector<std::string> drop_pending_calls_;
 };
 
 // ---------------------------------------------------------------------------
@@ -258,13 +320,45 @@ class MockSubscriptionManager : public SubscriptionManagerInterface {
     ref_counts_.clear();
   }
 
+  bool is_transient_local(const std::string& topic_name) const override {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return transient_local_topics_.count(topic_name) > 0;
+  }
+
   // Test helpers
   void add_known_topic(const std::string& topic_name) {
     std::lock_guard<std::mutex> lock(mutex_);
     known_topics_.insert(topic_name);
   }
 
-  bool is_subscribed(const std::string& topic_name) const {
+  // Mark a topic as reporting TRANSIENT_LOCAL durability from is_transient_local().
+  void set_transient_local(const std::string& topic_name, bool transient_local) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (transient_local) {
+      transient_local_topics_.insert(topic_name);
+    } else {
+      transient_local_topics_.erase(topic_name);
+    }
+  }
+
+  // Simulate a message arriving on `topic_name`, invoking the callback
+  // registered via set_message_callback() — exactly as the real backend
+  // would when a middleware message is received.
+  void deliver_message(
+      const std::string& topic_name, std::shared_ptr<std::vector<std::byte>> data, uint64_t timestamp_ns) {
+    MessageCallback cb;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      cb = callback_;
+    }
+    if (cb) {
+      cb(topic_name, std::move(data), timestamp_ns);
+    }
+  }
+
+  // Overrides the interface default (false): reports true while the topic
+  // holds at least one ref, mirroring the real backend managers.
+  bool is_subscribed(const std::string& topic_name) const override {
     std::lock_guard<std::mutex> lock(mutex_);
     auto it = ref_counts_.find(topic_name);
     return it != ref_counts_.end() && it->second > 0;
@@ -293,8 +387,60 @@ class MockSubscriptionManager : public SubscriptionManagerInterface {
   MessageCallback callback_;
   std::unordered_set<std::string> known_topics_;
   std::unordered_map<std::string, int> ref_counts_;
+  std::unordered_set<std::string> transient_local_topics_;
   bool underflow_detected_{false};
 };
+
+// ---------------------------------------------------------------------------
+// decode_frame — test helper to parse a binary aggregated-message frame
+// (16-byte header + ZSTD-compressed payload) back into its messages, mirroring
+// the wire format documented in docs/API.md and produced by
+// AggregatedMessageSerializer::finalize().
+// ---------------------------------------------------------------------------
+struct DecodedMessage {
+  std::string topic;
+  uint64_t timestamp_ns;
+  std::vector<uint8_t> data;
+};
+
+std::vector<DecodedMessage> decode_frame(const std::vector<uint8_t>& frame) {
+  std::vector<DecodedMessage> result;
+  if (frame.size() < 16) {
+    return result;
+  }
+
+  uint32_t message_count = 0;
+  std::memcpy(&message_count, frame.data() + 4, sizeof(message_count));
+
+  std::vector<uint8_t> compressed(frame.begin() + 16, frame.end());
+  std::vector<uint8_t> payload;
+  AggregatedMessageSerializer::decompress_zstd(compressed, payload);
+
+  size_t offset = 0;
+  for (uint32_t i = 0; i < message_count; ++i) {
+    uint16_t topic_len = 0;
+    std::memcpy(&topic_len, payload.data() + offset, sizeof(topic_len));
+    offset += sizeof(topic_len);
+
+    std::string topic(payload.begin() + offset, payload.begin() + offset + topic_len);
+    offset += topic_len;
+
+    uint64_t timestamp_ns = 0;
+    std::memcpy(&timestamp_ns, payload.data() + offset, sizeof(timestamp_ns));
+    offset += sizeof(timestamp_ns);
+
+    uint32_t data_len = 0;
+    std::memcpy(&data_len, payload.data() + offset, sizeof(data_len));
+    offset += sizeof(data_len);
+
+    std::vector<uint8_t> data(payload.begin() + offset, payload.begin() + offset + data_len);
+    offset += data_len;
+
+    result.push_back(DecodedMessage{std::move(topic), timestamp_ns, std::move(data)});
+  }
+
+  return result;
+}
 
 // ---------------------------------------------------------------------------
 // Test fixture
@@ -421,6 +567,44 @@ TEST_F(BridgeServerTest, CleanupSessionIdempotent) {
 
   mock_->simulate_disconnect("client_E");
   EXPECT_EQ(server_->get_active_session_count(), 0u);
+}
+
+// ---------------------------------------------------------------------------
+// 6b. CleanupSessionDropsPendingMiddlewareFrames
+//
+// When a session is destroyed server-side (heartbeat timeout or disconnect),
+// cleanup_session must tell the middleware to discard any outbound frames
+// still parked in its slow-client backpressure queue for that client —
+// otherwise a timed-out client whose socket stays open leaks its backlog,
+// and stale frames could flush into a new logical session on the same
+// connection.
+// ---------------------------------------------------------------------------
+TEST_F(BridgeServerTest, CleanupSessionDropsPendingMiddlewareFrames) {
+  ASSERT_TRUE(server_->initialize());
+
+  // Create a session via heartbeat.
+  json hb;
+  hb["command"] = "heartbeat";
+  mock_->push_request("client_DP", hb.dump());
+  server_->process_requests();
+  ASSERT_EQ(server_->get_active_session_count(), 1u);
+  EXPECT_TRUE(mock_->get_drop_pending_calls().empty());
+
+  // Disconnect triggers cleanup_session, which must invoke drop_pending for
+  // exactly this client.
+  mock_->simulate_disconnect("client_DP");
+  EXPECT_EQ(server_->get_active_session_count(), 0u);
+
+  auto calls = mock_->get_drop_pending_calls();
+  ASSERT_EQ(calls.size(), 1u);
+  EXPECT_EQ(calls[0], "client_DP");
+
+  // cleanup_session for a client without a session still drops pending
+  // middleware state (idempotent, matches drop_pending's no-op contract).
+  mock_->simulate_disconnect("client_DP");
+  calls = mock_->get_drop_pending_calls();
+  ASSERT_EQ(calls.size(), 2u);
+  EXPECT_EQ(calls[1], "client_DP");
 }
 
 // ---------------------------------------------------------------------------
@@ -2002,4 +2186,624 @@ TEST_F(BridgeServerTest, SubscribeAcceptsEmptySchemaDefinition) {
   ASSERT_TRUE(response["schemas"].contains("/trigger"));
   EXPECT_EQ(response["schemas"]["/trigger"]["definition"], "");
   EXPECT_EQ(mock_sub_manager_->ref_count("/trigger"), 1);
+}
+
+// ---------------------------------------------------------------------------
+// Topic whitelist filtering
+// ---------------------------------------------------------------------------
+
+// GetTopicsOmitsNonWhitelistedTopics
+TEST_F(BridgeServerTest, GetTopicsOmitsNonWhitelistedTopics) {
+  auto whitelist_result = WhitelistFilter::create({"/allowed.*"});
+  ASSERT_TRUE(whitelist_result.has_value());
+  server_ = std::make_unique<BridgeServer>(
+      mock_topic_source_, mock_sub_manager_, mock_, 19999, 10.0, 50.0, whitelist_result.value());
+  ASSERT_TRUE(server_->initialize());
+
+  mock_topic_source_->set_topics({{"/allowed/foo", "std_msgs/msg/String"}, {"/blocked", "std_msgs/msg/String"}});
+
+  json req;
+  req["command"] = "get_topics";
+  mock_->push_request("client_wl_get_topics", req.dump());
+  server_->process_requests();
+
+  json reply = mock_->pop_reply("client_wl_get_topics");
+  ASSERT_FALSE(reply.is_discarded());
+  EXPECT_EQ(reply["status"], "success");
+  ASSERT_TRUE(reply["topics"].is_array());
+  ASSERT_EQ(reply["topics"].size(), 1u);
+  EXPECT_EQ(reply["topics"][0]["name"], "/allowed/foo");
+}
+
+// SubscribeToNonWhitelistedTopicFailsAllSubscriptionsFailed
+TEST_F(BridgeServerTest, SubscribeToNonWhitelistedTopicFailsAllSubscriptionsFailed) {
+  auto whitelist_result = WhitelistFilter::create({"/allowed.*"});
+  ASSERT_TRUE(whitelist_result.has_value());
+  server_ = std::make_unique<BridgeServer>(
+      mock_topic_source_, mock_sub_manager_, mock_, 19999, 10.0, 50.0, whitelist_result.value());
+  ASSERT_TRUE(server_->initialize());
+
+  mock_topic_source_->set_topics({{"/blocked", "std_msgs/msg/String"}});
+  mock_sub_manager_->add_known_topic("/blocked");
+
+  json sub;
+  sub["command"] = "subscribe";
+  sub["topics"] = json::array({"/blocked"});
+  mock_->push_request("client_wl_blocked", sub.dump());
+  server_->process_requests();
+
+  json reply = mock_->pop_reply("client_wl_blocked");
+  ASSERT_FALSE(reply.is_discarded());
+  EXPECT_EQ(reply["status"], "error");
+  EXPECT_EQ(reply["error_code"], "ALL_SUBSCRIPTIONS_FAILED");
+  ASSERT_TRUE(reply.contains("failures"));
+  ASSERT_FALSE(reply["failures"].empty());
+  EXPECT_EQ(reply["failures"][0]["topic"], "/blocked");
+  EXPECT_EQ(reply["failures"][0]["reason"], "Topic not whitelisted");
+  EXPECT_EQ(mock_sub_manager_->ref_count("/blocked"), 0);
+}
+
+// SubscribeMixedWhitelistedAndNonWhitelistedTopicsPartialSuccess
+TEST_F(BridgeServerTest, SubscribeMixedWhitelistedAndNonWhitelistedTopicsPartialSuccess) {
+  auto whitelist_result = WhitelistFilter::create({"/allowed.*"});
+  ASSERT_TRUE(whitelist_result.has_value());
+  server_ = std::make_unique<BridgeServer>(
+      mock_topic_source_, mock_sub_manager_, mock_, 19999, 10.0, 50.0, whitelist_result.value());
+  ASSERT_TRUE(server_->initialize());
+
+  mock_topic_source_->set_topics({{"/allowed/foo", "std_msgs/msg/String"}, {"/blocked", "std_msgs/msg/String"}});
+  mock_sub_manager_->add_known_topic("/allowed/foo");
+  mock_sub_manager_->add_known_topic("/blocked");
+
+  json sub;
+  sub["command"] = "subscribe";
+  sub["topics"] = json::array({"/allowed/foo", "/blocked"});
+  mock_->push_request("client_wl_mixed", sub.dump());
+  server_->process_requests();
+
+  json reply = mock_->pop_reply("client_wl_mixed");
+  ASSERT_FALSE(reply.is_discarded());
+  EXPECT_EQ(reply["status"], "partial_success");
+  ASSERT_TRUE(reply["schemas"].contains("/allowed/foo"));
+  ASSERT_TRUE(reply.contains("failures"));
+
+  bool found_blocked_failure = false;
+  for (const auto& failure : reply["failures"]) {
+    if (failure["topic"] == "/blocked") {
+      EXPECT_EQ(failure["reason"], "Topic not whitelisted");
+      found_blocked_failure = true;
+    }
+  }
+  EXPECT_TRUE(found_blocked_failure);
+  EXPECT_EQ(mock_sub_manager_->ref_count("/allowed/foo"), 1);
+  EXPECT_EQ(mock_sub_manager_->ref_count("/blocked"), 0);
+}
+
+// ---------------------------------------------------------------------------
+// Pushed topic advertisement (subscribe/unsubscribe_topic_updates, check_topic_changes)
+// ---------------------------------------------------------------------------
+
+// SubscribeTopicUpdatesReturnsOkTrue
+TEST_F(BridgeServerTest, SubscribeTopicUpdatesReturnsOkTrue) {
+  ASSERT_TRUE(server_->initialize());
+
+  json req;
+  req["command"] = "subscribe_topic_updates";
+  req["id"] = "tu1";
+  mock_->push_request("client_tu_1", req.dump());
+  server_->process_requests();
+
+  json reply = mock_->pop_reply("client_tu_1");
+  ASSERT_FALSE(reply.is_discarded());
+  EXPECT_EQ(reply["status"], "ok");
+  EXPECT_TRUE(reply["topic_updates"].get<bool>());
+  EXPECT_EQ(reply["id"], "tu1");
+  EXPECT_TRUE(reply.contains("protocol_version"));
+
+  // Repeated call is idempotent — same result.
+  mock_->push_request("client_tu_1", req.dump());
+  server_->process_requests();
+  json reply2 = mock_->pop_reply("client_tu_1");
+  ASSERT_FALSE(reply2.is_discarded());
+  EXPECT_EQ(reply2["status"], "ok");
+  EXPECT_TRUE(reply2["topic_updates"].get<bool>());
+}
+
+// UnsubscribeTopicUpdatesReturnsOkFalse
+TEST_F(BridgeServerTest, UnsubscribeTopicUpdatesReturnsOkFalse) {
+  ASSERT_TRUE(server_->initialize());
+
+  json req;
+  req["command"] = "unsubscribe_topic_updates";
+  req["id"] = "tu2";
+  mock_->push_request("client_tu_2", req.dump());
+  server_->process_requests();
+
+  json reply = mock_->pop_reply("client_tu_2");
+  ASSERT_FALSE(reply.is_discarded());
+  EXPECT_EQ(reply["status"], "ok");
+  EXPECT_FALSE(reply["topic_updates"].get<bool>());
+  EXPECT_EQ(reply["id"], "tu2");
+  EXPECT_TRUE(reply.contains("protocol_version"));
+
+  // Repeated call is idempotent — same result.
+  mock_->push_request("client_tu_2", req.dump());
+  server_->process_requests();
+  json reply2 = mock_->pop_reply("client_tu_2");
+  ASSERT_FALSE(reply2.is_discarded());
+  EXPECT_EQ(reply2["status"], "ok");
+  EXPECT_FALSE(reply2["topic_updates"].get<bool>());
+}
+
+// CheckTopicChangesFirstCallSendsNothing
+TEST_F(BridgeServerTest, CheckTopicChangesFirstCallSendsNothing) {
+  ASSERT_TRUE(server_->initialize());
+  mock_topic_source_->set_topics({{"/a", "std_msgs/msg/String"}});
+
+  json sub;
+  sub["command"] = "subscribe_topic_updates";
+  mock_->push_request("client_first", sub.dump());
+  server_->process_requests();
+  mock_->clear_replies();
+
+  server_->check_topic_changes();
+
+  auto replies = mock_->get_replies("client_first");
+  EXPECT_TRUE(replies.empty());
+}
+
+// CheckTopicChangesNotifiesAddedTopicOnlyToOptedInClient
+TEST_F(BridgeServerTest, CheckTopicChangesNotifiesAddedTopicOnlyToOptedInClient) {
+  ASSERT_TRUE(server_->initialize());
+  mock_topic_source_->set_topics({{"/a", "std_msgs/msg/String"}});
+
+  json sub;
+  sub["command"] = "subscribe_topic_updates";
+  mock_->push_request("client_opted_in", sub.dump());
+  server_->process_requests();
+
+  json hb;
+  hb["command"] = "heartbeat";
+  mock_->push_request("client_plain", hb.dump());
+  server_->process_requests();
+
+  server_->check_topic_changes();  // first call: snapshot only, sends nothing
+  mock_->clear_replies();
+
+  mock_topic_source_->set_topics({{"/a", "std_msgs/msg/String"}, {"/b", "sensor_msgs/msg/Imu"}});
+  server_->check_topic_changes();
+
+  auto opted_in_replies = mock_->get_replies("client_opted_in");
+  ASSERT_EQ(opted_in_replies.size(), 1u);
+  json notif = opted_in_replies[0];
+  EXPECT_EQ(notif["notification"], "topics_changed");
+  EXPECT_TRUE(notif.contains("protocol_version"));
+  ASSERT_TRUE(notif["removed"].empty());
+  ASSERT_EQ(notif["added"].size(), 1u);
+  EXPECT_EQ(notif["added"][0]["name"], "/b");
+  EXPECT_EQ(notif["added"][0]["type"], "sensor_msgs/msg/Imu");
+
+  auto plain_replies = mock_->get_replies("client_plain");
+  EXPECT_TRUE(plain_replies.empty());
+}
+
+// CheckTopicChangesNotifiesRemovedTopic
+TEST_F(BridgeServerTest, CheckTopicChangesNotifiesRemovedTopic) {
+  ASSERT_TRUE(server_->initialize());
+  mock_topic_source_->set_topics({{"/a", "std_msgs/msg/String"}, {"/b", "std_msgs/msg/String"}});
+
+  json sub;
+  sub["command"] = "subscribe_topic_updates";
+  mock_->push_request("client_opted_in", sub.dump());
+  server_->process_requests();
+
+  server_->check_topic_changes();  // snapshot
+  mock_->clear_replies();
+
+  mock_topic_source_->remove_topic("/b");
+  server_->check_topic_changes();
+
+  auto replies = mock_->get_replies("client_opted_in");
+  ASSERT_EQ(replies.size(), 1u);
+  json notif = replies[0];
+  ASSERT_TRUE(notif["added"].empty());
+  ASSERT_EQ(notif["removed"].size(), 1u);
+  EXPECT_EQ(notif["removed"][0], "/b");
+}
+
+// CheckTopicChangesNoChangeSendsNothing
+TEST_F(BridgeServerTest, CheckTopicChangesNoChangeSendsNothing) {
+  ASSERT_TRUE(server_->initialize());
+  mock_topic_source_->set_topics({{"/a", "std_msgs/msg/String"}});
+
+  json sub;
+  sub["command"] = "subscribe_topic_updates";
+  mock_->push_request("client_opted_in", sub.dump());
+  server_->process_requests();
+
+  server_->check_topic_changes();  // snapshot
+  mock_->clear_replies();
+
+  server_->check_topic_changes();  // nothing changed
+
+  auto replies = mock_->get_replies("client_opted_in");
+  EXPECT_TRUE(replies.empty());
+}
+
+// CheckTopicChangesIgnoresNonWhitelistedTopics
+TEST_F(BridgeServerTest, CheckTopicChangesIgnoresNonWhitelistedTopics) {
+  auto whitelist_result = WhitelistFilter::create({"/allowed.*"});
+  ASSERT_TRUE(whitelist_result.has_value());
+  server_ = std::make_unique<BridgeServer>(
+      mock_topic_source_, mock_sub_manager_, mock_, 19999, 10.0, 50.0, whitelist_result.value());
+  ASSERT_TRUE(server_->initialize());
+
+  mock_topic_source_->set_topics({{"/allowed/foo", "std_msgs/msg/String"}});
+
+  json sub;
+  sub["command"] = "subscribe_topic_updates";
+  mock_->push_request("client_wl", sub.dump());
+  server_->process_requests();
+
+  server_->check_topic_changes();  // snapshot
+  mock_->clear_replies();
+
+  mock_topic_source_->set_topics({{"/allowed/foo", "std_msgs/msg/String"}, {"/blocked", "std_msgs/msg/String"}});
+  server_->check_topic_changes();
+
+  auto replies = mock_->get_replies("client_wl");
+  EXPECT_TRUE(replies.empty());
+}
+
+// CheckTopicChangesTypeChangeAppearsInBothAddedAndRemoved
+TEST_F(BridgeServerTest, CheckTopicChangesTypeChangeAppearsInBothAddedAndRemoved) {
+  ASSERT_TRUE(server_->initialize());
+  mock_topic_source_->set_topics({{"/a", "std_msgs/msg/String"}});
+
+  json sub;
+  sub["command"] = "subscribe_topic_updates";
+  mock_->push_request("client_opted_in", sub.dump());
+  server_->process_requests();
+
+  server_->check_topic_changes();  // snapshot
+  mock_->clear_replies();
+
+  mock_topic_source_->set_topics({{"/a", "std_msgs/msg/Header"}});
+  server_->check_topic_changes();
+
+  auto replies = mock_->get_replies("client_opted_in");
+  ASSERT_EQ(replies.size(), 1u);
+  json notif = replies[0];
+  ASSERT_EQ(notif["removed"].size(), 1u);
+  EXPECT_EQ(notif["removed"][0], "/a");
+  ASSERT_EQ(notif["added"].size(), 1u);
+  EXPECT_EQ(notif["added"][0]["name"], "/a");
+  EXPECT_EQ(notif["added"][0]["type"], "std_msgs/msg/Header");
+}
+
+// UnsubscribeTopicUpdatesStopsNotifications
+TEST_F(BridgeServerTest, UnsubscribeTopicUpdatesStopsNotifications) {
+  ASSERT_TRUE(server_->initialize());
+  mock_topic_source_->set_topics({{"/a", "std_msgs/msg/String"}});
+
+  json sub;
+  sub["command"] = "subscribe_topic_updates";
+  mock_->push_request("client_x", sub.dump());
+  server_->process_requests();
+
+  server_->check_topic_changes();  // snapshot
+
+  json unsub;
+  unsub["command"] = "unsubscribe_topic_updates";
+  mock_->push_request("client_x", unsub.dump());
+  server_->process_requests();
+  mock_->clear_replies();
+
+  mock_topic_source_->set_topics({{"/a", "std_msgs/msg/String"}, {"/b", "std_msgs/msg/String"}});
+  server_->check_topic_changes();
+
+  auto replies = mock_->get_replies("client_x");
+  EXPECT_TRUE(replies.empty());
+}
+
+// ---------------------------------------------------------------------------
+// Latched (transient_local) topic replay
+//
+// A late subscriber joining an already-shared middleware subscription for a
+// latched topic must be immediately replayed the most recent message, even
+// after it has aged out of the normal 1-second message buffer. The FIRST
+// subscriber gets its sample naturally from DDS (transient_local
+// redelivery), so this replay path exists specifically for LATER clients.
+// ---------------------------------------------------------------------------
+
+// LatchedTopicReplaysToLateSubscriberOnly
+TEST_F(BridgeServerTest, LatchedTopicReplaysToLateSubscriberOnly) {
+  ASSERT_TRUE(server_->initialize());
+  mock_topic_source_->set_topics({{"/latched", "std_msgs/msg/String"}});
+  mock_sub_manager_->add_known_topic("/latched");
+  mock_sub_manager_->set_transient_local("/latched", true);
+
+  json sub;
+  sub["command"] = "subscribe";
+  sub["topics"] = json::array({"/latched"});
+
+  // Client A subscribes first (the "first subscriber" — no retained sample
+  // exists yet, so no replay frame is sent).
+  mock_->push_request("client_a", sub.dump());
+  server_->process_requests();
+  json resp_a = mock_->pop_reply("client_a");
+  ASSERT_FALSE(resp_a.is_discarded());
+  EXPECT_EQ(resp_a["status"], "success");
+  EXPECT_TRUE(mock_->get_binary_sends().empty());
+
+  // A message arrives on the latched topic.
+  std::vector<uint8_t> payload = {10, 20, 30, 40};
+  auto data = std::make_shared<std::vector<std::byte>>(payload.size());
+  for (size_t i = 0; i < payload.size(); ++i) {
+    (*data)[i] = static_cast<std::byte>(payload[i]);
+  }
+  mock_sub_manager_->deliver_message("/latched", data, 12345);
+
+  // Drain the normal message buffer, simulating the message aging out of
+  // the regular publish cycle (it is delivered to client_a here).
+  server_->publish_aggregated_messages();
+  mock_->clear_binary_sends();
+  mock_->clear_send_log();
+
+  // Client B subscribes later, joining the already-shared subscription.
+  mock_->push_request("client_b", sub.dump());
+  server_->process_requests();
+  json resp_b = mock_->pop_reply("client_b");
+  ASSERT_FALSE(resp_b.is_discarded());
+  EXPECT_EQ(resp_b["status"], "success");
+
+  // Exactly one binary frame, sent only to client_b, containing the
+  // retained message.
+  auto binary_sends = mock_->get_binary_sends();
+  ASSERT_EQ(binary_sends.size(), 1u);
+  EXPECT_EQ(binary_sends[0].first, "client_b");
+
+  auto messages = decode_frame(binary_sends[0].second);
+  ASSERT_EQ(messages.size(), 1u);
+  EXPECT_EQ(messages[0].topic, "/latched");
+  EXPECT_EQ(messages[0].timestamp_ns, 12345u);
+  EXPECT_EQ(messages[0].data, payload);
+
+  // Ordering: the subscribe RESPONSE (text, carrying the schema needed to
+  // decode) must reach client_b BEFORE the replay binary frame.
+  auto send_log = mock_->get_send_log();
+  std::vector<MockMiddleware::SendKind> b_sends;
+  for (const auto& [kind, cid] : send_log) {
+    if (cid == "client_b") {
+      b_sends.push_back(kind);
+    }
+  }
+  ASSERT_EQ(b_sends.size(), 2u);
+  EXPECT_EQ(b_sends[0], MockMiddleware::SendKind::kText);
+  EXPECT_EQ(b_sends[1], MockMiddleware::SendKind::kBinary);
+}
+
+// SubscribeToNonLatchedTopicSendsNoImmediateFrame
+TEST_F(BridgeServerTest, SubscribeToNonLatchedTopicSendsNoImmediateFrame) {
+  ASSERT_TRUE(server_->initialize());
+  mock_topic_source_->set_topics({{"/plain", "std_msgs/msg/String"}});
+  mock_sub_manager_->add_known_topic("/plain");
+  // Not marked transient_local.
+
+  json sub;
+  sub["command"] = "subscribe";
+  sub["topics"] = json::array({"/plain"});
+
+  mock_->push_request("client_a", sub.dump());
+  server_->process_requests();
+  mock_->pop_reply("client_a");
+
+  std::vector<uint8_t> payload = {1, 2, 3};
+  auto data = std::make_shared<std::vector<std::byte>>(payload.size());
+  for (size_t i = 0; i < payload.size(); ++i) {
+    (*data)[i] = static_cast<std::byte>(payload[i]);
+  }
+  mock_sub_manager_->deliver_message("/plain", data, 999);
+  server_->publish_aggregated_messages();
+  mock_->clear_binary_sends();
+
+  // A second, late client subscribing to a non-latched topic must not
+  // receive any immediate replay frame.
+  mock_->push_request("client_b", sub.dump());
+  server_->process_requests();
+  json resp_b = mock_->pop_reply("client_b");
+  ASSERT_FALSE(resp_b.is_discarded());
+  EXPECT_EQ(resp_b["status"], "success");
+
+  EXPECT_TRUE(mock_->get_binary_sends().empty());
+}
+
+// LatchedReplaySkippedWhileSampleStillBuffered
+//
+// If the retained sample is still sitting in the normal message buffer (it
+// arrived recently and has not been drained yet), the regular publish cycle
+// will deliver it to the new subscriber anyway — a replay frame would
+// duplicate it, so none must be sent.
+TEST_F(BridgeServerTest, LatchedReplaySkippedWhileSampleStillBuffered) {
+  ASSERT_TRUE(server_->initialize());
+  mock_topic_source_->set_topics({{"/latched", "std_msgs/msg/String"}});
+  mock_sub_manager_->add_known_topic("/latched");
+  mock_sub_manager_->set_transient_local("/latched", true);
+
+  json sub;
+  sub["command"] = "subscribe";
+  sub["topics"] = json::array({"/latched"});
+
+  // Client A subscribes, then a message arrives — but the buffer is NOT
+  // drained before client B subscribes.
+  mock_->push_request("client_a", sub.dump());
+  server_->process_requests();
+  mock_->pop_reply("client_a");
+
+  std::vector<uint8_t> payload = {7, 8, 9};
+  auto data = std::make_shared<std::vector<std::byte>>(payload.size());
+  for (size_t i = 0; i < payload.size(); ++i) {
+    (*data)[i] = static_cast<std::byte>(payload[i]);
+  }
+  mock_sub_manager_->deliver_message("/latched", data, 555);
+  mock_->clear_binary_sends();
+
+  // Client B subscribes while the sample is still in the normal buffer:
+  // no replay frame.
+  mock_->push_request("client_b", sub.dump());
+  server_->process_requests();
+  json resp_b = mock_->pop_reply("client_b");
+  ASSERT_FALSE(resp_b.is_discarded());
+  EXPECT_EQ(resp_b["status"], "success");
+  EXPECT_TRUE(mock_->get_binary_sends().empty());
+
+  // The regular publish cycle then delivers the sample to client B (and A)
+  // through the normal aggregated path — exactly once, no duplicate.
+  server_->publish_aggregated_messages();
+  bool b_received_via_normal_path = false;
+  for (const auto& [cid, frame] : mock_->get_binary_sends()) {
+    if (cid != "client_b") {
+      continue;
+    }
+    auto messages = decode_frame(frame);
+    ASSERT_EQ(messages.size(), 1u);
+    EXPECT_EQ(messages[0].topic, "/latched");
+    EXPECT_EQ(messages[0].data, payload);
+    EXPECT_FALSE(b_received_via_normal_path) << "duplicate frame for client_b";
+    b_received_via_normal_path = true;
+  }
+  EXPECT_TRUE(b_received_via_normal_path);
+}
+
+// LastRefReleaseClearsLatchedSample
+//
+// When the last reference to a latched topic is released, the middleware
+// subscription is destroyed and the retained sample goes stale. It must be
+// cleared: the NEXT subscriber creates a fresh middleware subscription that
+// receives the current sample via DDS transient_local redelivery, and must
+// NOT be replayed the stale copy first.
+TEST_F(BridgeServerTest, LastRefReleaseClearsLatchedSample) {
+  ASSERT_TRUE(server_->initialize());
+  mock_topic_source_->set_topics({{"/latched", "std_msgs/msg/String"}});
+  mock_sub_manager_->add_known_topic("/latched");
+  mock_sub_manager_->set_transient_local("/latched", true);
+
+  json sub;
+  sub["command"] = "subscribe";
+  sub["topics"] = json::array({"/latched"});
+
+  // Client A subscribes; a message arrives and is drained (retained copy
+  // now lives only in the latched store).
+  mock_->push_request("client_a", sub.dump());
+  server_->process_requests();
+  mock_->pop_reply("client_a");
+
+  auto data = std::make_shared<std::vector<std::byte>>(3, std::byte{42});
+  mock_sub_manager_->deliver_message("/latched", data, 111);
+  server_->publish_aggregated_messages();
+
+  // Client A unsubscribes — last ref, subscription destroyed, latched
+  // state cleared.
+  json unsub;
+  unsub["command"] = "unsubscribe";
+  unsub["topics"] = json::array({"/latched"});
+  mock_->push_request("client_a", unsub.dump());
+  server_->process_requests();
+  mock_->pop_reply("client_a");
+  ASSERT_EQ(mock_sub_manager_->ref_count("/latched"), 0);
+  mock_->clear_binary_sends();
+
+  // A NEW subscriber gets NO replay frame (the retained sample was
+  // cleared; DDS redelivery on the fresh subscription covers it).
+  mock_->push_request("client_b", sub.dump());
+  server_->process_requests();
+  json resp_b = mock_->pop_reply("client_b");
+  ASSERT_FALSE(resp_b.is_discarded());
+  EXPECT_EQ(resp_b["status"], "success");
+  EXPECT_TRUE(mock_->get_binary_sends().empty());
+}
+
+// ResumeReplaysLatchedSampleForTopicSubscribedWhilePaused
+//
+// A client that subscribes to a latched topic WHILE PAUSED acquires no
+// middleware ref (and gets no replay frame). On resume it joins the
+// already-shared subscription, where DDS does not redeliver — the retained
+// sample must be replayed then: resume RESPONSE first, then exactly one
+// binary frame with the retained message.
+TEST_F(BridgeServerTest, ResumeReplaysLatchedSampleForTopicSubscribedWhilePaused) {
+  ASSERT_TRUE(server_->initialize());
+  mock_topic_source_->set_topics({{"/latched", "std_msgs/msg/String"}});
+  mock_sub_manager_->add_known_topic("/latched");
+  mock_sub_manager_->set_transient_local("/latched", true);
+
+  json sub;
+  sub["command"] = "subscribe";
+  sub["topics"] = json::array({"/latched"});
+
+  // Client A subscribes (seeds the latched retention), a message arrives
+  // and is drained — the retained sample has "aged out" of the normal
+  // buffer and lives only in the latched store.
+  mock_->push_request("client_a", sub.dump());
+  server_->process_requests();
+  mock_->pop_reply("client_a");
+
+  std::vector<uint8_t> payload = {3, 1, 4, 1, 5};
+  auto data = std::make_shared<std::vector<std::byte>>(payload.size());
+  for (size_t i = 0; i < payload.size(); ++i) {
+    (*data)[i] = static_cast<std::byte>(payload[i]);
+  }
+  mock_sub_manager_->deliver_message("/latched", data, 777);
+  server_->publish_aggregated_messages();
+  ASSERT_EQ(mock_sub_manager_->ref_count("/latched"), 1);
+
+  // Client P pauses, then subscribes to the latched topic while paused:
+  // no ref acquired, no replay frame.
+  json pause_req;
+  pause_req["command"] = "pause";
+  mock_->push_request("client_p", pause_req.dump());
+  server_->process_requests();
+  mock_->pop_reply("client_p");
+  mock_->clear_binary_sends();
+
+  mock_->push_request("client_p", sub.dump());
+  server_->process_requests();
+  json sub_resp = mock_->pop_reply("client_p");
+  ASSERT_FALSE(sub_resp.is_discarded());
+  EXPECT_EQ(sub_resp["status"], "success");
+  EXPECT_TRUE(mock_->get_binary_sends().empty());
+  ASSERT_EQ(mock_sub_manager_->ref_count("/latched"), 1);  // still only client A
+
+  // Resume: client P joins the already-shared subscription and must be
+  // replayed the retained sample — resume response FIRST, then the frame.
+  mock_->clear_send_log();
+  json resume_req;
+  resume_req["command"] = "resume";
+  mock_->push_request("client_p", resume_req.dump());
+  server_->process_requests();
+  json resume_resp = mock_->pop_reply("client_p");
+  ASSERT_FALSE(resume_resp.is_discarded());
+  EXPECT_EQ(resume_resp["status"], "ok");
+  EXPECT_FALSE(resume_resp["paused"].get<bool>());
+  EXPECT_EQ(mock_sub_manager_->ref_count("/latched"), 2);
+
+  // Exactly one binary frame, to client_p only, with the retained message.
+  auto binary_sends = mock_->get_binary_sends();
+  ASSERT_EQ(binary_sends.size(), 1u);
+  EXPECT_EQ(binary_sends[0].first, "client_p");
+  auto messages = decode_frame(binary_sends[0].second);
+  ASSERT_EQ(messages.size(), 1u);
+  EXPECT_EQ(messages[0].topic, "/latched");
+  EXPECT_EQ(messages[0].timestamp_ns, 777u);
+  EXPECT_EQ(messages[0].data, payload);
+
+  // Ordering: resume response (text) before the replay frame (binary).
+  std::vector<MockMiddleware::SendKind> p_sends;
+  for (const auto& [kind, cid] : mock_->get_send_log()) {
+    if (cid == "client_p") {
+      p_sends.push_back(kind);
+    }
+  }
+  ASSERT_EQ(p_sends.size(), 2u);
+  EXPECT_EQ(p_sends[0], MockMiddleware::SendKind::kText);
+  EXPECT_EQ(p_sends[1], MockMiddleware::SendKind::kBinary);
 }

@@ -27,6 +27,10 @@
 
   <test_depend>ament_cmake_gtest</test_depend>
   <test_depend>geometry_msgs</test_depend>
+  <!-- The QoS depth aggregation tests force RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+       (the default rmw_fastrtps_cpp does not propagate publisher history depth
+       through discovery). -->
+  <test_depend>rmw_cyclonedds_cpp</test_depend>
 
   <export>
     <build_type>ament_cmake</build_type>

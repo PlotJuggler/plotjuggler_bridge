@@ -32,6 +32,8 @@ struct StandaloneConfig {
   double publish_rate;
   double session_timeout;
   bool stats_enabled;
+  /// Interval in seconds between check_topic_changes() polls. 0 disables polling.
+  double topic_poll_interval = 1.0;
 };
 
 /// Runs the standalone event loop until SIGINT/SIGTERM.

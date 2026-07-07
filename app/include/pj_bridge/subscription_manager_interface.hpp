@@ -74,6 +74,20 @@ class SubscriptionManagerInterface {
   /// Unsubscribe from all topics, destroying all underlying subscriptions.
   /// Called during shutdown.
   virtual void unsubscribe_all() = 0;
+
+  /// True when every publisher of the topic offers TRANSIENT_LOCAL durability
+  /// (detected at subscribe time). Backends without this information return
+  /// false; the result is only meaningful while the topic is subscribed.
+  virtual bool is_transient_local(const std::string& /*topic_name*/) const {
+    return false;
+  }
+
+  /// True while the topic has at least one active reference (i.e. the
+  /// underlying middleware subscription exists). Backends that don't track
+  /// this return false.
+  virtual bool is_subscribed(const std::string& /*topic_name*/) const {
+    return false;
+  }
 };
 
 }  // namespace pj_bridge

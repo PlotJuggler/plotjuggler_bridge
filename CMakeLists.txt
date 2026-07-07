@@ -53,6 +53,8 @@ find_package(ZSTD REQUIRED)
 include(FetchContent)
 
 # IXWebSocket — try system/conda first, fall back to FetchContent
+option(PJ_BRIDGE_TLS "Build IXWebSocket with TLS (OpenSSL) support" ON)
+
 find_package(ixwebsocket QUIET)
 if(NOT ixwebsocket_FOUND)
   message(STATUS "IXWebSocket not found — fetching via FetchContent")
@@ -61,7 +63,10 @@ if(NOT ixwebsocket_FOUND)
     URL https://github.com/machinezone/IXWebSocket/archive/refs/tags/v11.4.6.tar.gz
     URL_HASH SHA256=c024334f8e45980836c67008979a884d6dcc5ef067dd2eb1fa7241f4c17ddc32
   )
-  set(USE_TLS OFF CACHE BOOL "" FORCE)
+  set(USE_TLS ${PJ_BRIDGE_TLS} CACHE BOOL "" FORCE)
+  if(PJ_BRIDGE_TLS)
+    set(USE_OPEN_SSL ON CACHE BOOL "" FORCE)
+  endif()
   set(USE_ZLIB ON CACHE BOOL "" FORCE)
   set(IXWEBSOCKET_INSTALL OFF CACHE BOOL "" FORCE)
   FetchContent_MakeAvailable(ixwebsocket)
@@ -93,6 +98,7 @@ add_library(pj_bridge_app STATIC
   app/src/message_serializer.cpp
   app/src/bridge_server.cpp
   app/src/standalone_event_loop.cpp
+  app/src/whitelist_filter.cpp
 )
 
 target_include_directories(pj_bridge_app PUBLIC
@@ -241,11 +247,13 @@ if(BUILD_TESTING AND ament_cmake_FOUND)
 
   ament_add_gtest(${PROJECT_NAME}_tests
     tests/unit/test_websocket_middleware.cpp
+    tests/unit/test_bounded_frame_queue.cpp
     tests/unit/test_message_buffer.cpp
     tests/unit/test_session_manager.cpp
     tests/unit/test_message_serializer.cpp
     tests/unit/test_bridge_server.cpp
     tests/unit/test_protocol_constants.cpp
+    tests/unit/test_whitelist_filter.cpp
     tests/unit/test_topic_discovery.cpp
     tests/unit/test_schema_extractor.cpp
     tests/unit/test_generic_subscription_manager.cpp

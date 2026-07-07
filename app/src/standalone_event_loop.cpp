@@ -49,12 +49,20 @@ void run_standalone_event_loop(
 
   spdlog::info("Bridge server initialized, entering event loop");
 
+  if (config.topic_poll_interval > 0.0) {
+    // Take the silent baseline snapshot now, before any client can connect,
+    // so topics appearing before the first poll tick are notified rather
+    // than folded into the baseline.
+    server.check_topic_changes();
+  }
+
   using clock = std::chrono::steady_clock;
   auto publish_interval =
       std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::duration<double>(1.0 / config.publish_rate));
   auto last_publish = clock::now();
   auto last_timeout_check = clock::now();
   auto last_stats_print = clock::now();
+  auto last_topic_poll = clock::now();
 
   while (!g_shutdown.load()) {
     server.process_requests();
@@ -69,6 +77,13 @@ void run_standalone_event_loop(
     if (now - last_timeout_check >= std::chrono::seconds(1)) {
       server.check_session_timeouts();
       last_timeout_check = now;
+    }
+
+    if (config.topic_poll_interval > 0.0 &&
+        now - last_topic_poll >= std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                     std::chrono::duration<double>(config.topic_poll_interval))) {
+      server.check_topic_changes();
+      last_topic_poll = now;
     }
 
     if (config.stats_enabled && now - last_stats_print >= std::chrono::seconds(5)) {
@@ -88,6 +103,7 @@ void run_standalone_event_loop(
           fmt::format("\n  Publish frequency: {:.1f} Hz", static_cast<double>(snapshot.publish_cycles) / elapsed);
       stats_msg += fmt::format(
           "\n  Sent: {:.2f} MB/s", static_cast<double>(snapshot.total_bytes_published) / elapsed / (1024.0 * 1024.0));
+      stats_msg += fmt::format("\n  Dropped frames (slow clients): {}", middleware->dropped_frame_count());
 
       spdlog::info(stats_msg);
       last_stats_print = now;

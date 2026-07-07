@@ -47,7 +47,8 @@ using Ros2MessageCallback =
  */
 class GenericSubscriptionManager {
  public:
-  explicit GenericSubscriptionManager(rclcpp::Node::SharedPtr node);
+  explicit GenericSubscriptionManager(
+      rclcpp::Node::SharedPtr node, size_t min_qos_depth = 1, size_t max_qos_depth = 100);
 
   bool subscribe(const std::string& topic_name, const std::string& topic_type, Ros2MessageCallback callback);
   bool unsubscribe(const std::string& topic_name);
@@ -55,15 +56,26 @@ class GenericSubscriptionManager {
   size_t get_reference_count(const std::string& topic_name) const;
   void unsubscribe_all();
 
- private:
+  /// True when the subscription for `topic_name` was created with
+  /// TRANSIENT_LOCAL durability (i.e. every publisher discovered at
+  /// subscribe time offered it). Returns false if the topic is not
+  /// currently subscribed.
+  bool is_transient_local(const std::string& topic_name) const;
+
+  // Exposed publicly for testability; computes the QoS a subscription should
+  // use for `topic_name` based on the publishers currently discovered on it.
   rclcpp::QoS adapt_qos(const std::string& topic_name) const;
 
+ private:
   struct SubscriptionInfo {
     std::shared_ptr<rclcpp::GenericSubscription> subscription;
     size_t reference_count;
+    bool transient_local;  ///< durability actually used for this subscription
   };
 
   rclcpp::Node::SharedPtr node_;
+  size_t min_qos_depth_;
+  size_t max_qos_depth_;
   mutable std::mutex mutex_;
   std::unordered_map<std::string, SubscriptionInfo> subscriptions_;
 };

@@ -60,13 +60,14 @@ double clamp_rate_hz(double rate_hz) {
 BridgeServer::BridgeServer(
     std::shared_ptr<TopicSourceInterface> topic_source,
     std::shared_ptr<SubscriptionManagerInterface> subscription_manager, std::shared_ptr<MiddlewareInterface> middleware,
-    int port, double session_timeout, double publish_rate)
+    int port, double session_timeout, double publish_rate, WhitelistFilter whitelist)
     : topic_source_(std::move(topic_source)),
       subscription_manager_(std::move(subscription_manager)),
       middleware_(std::move(middleware)),
       port_(port),
       session_timeout_(session_timeout),
       publish_rate_(publish_rate),
+      whitelist_(std::move(whitelist)),
       initialized_(false),
       total_messages_published_(0),
       total_bytes_published_(0),
@@ -191,6 +192,10 @@ void BridgeServer::process_single_request(const std::vector<uint8_t>& request_da
         response = handle_pause(client_id, request_json);
       } else if (command == "resume") {
         response = handle_resume(client_id, request_json);
+      } else if (command == "subscribe_topic_updates") {
+        response = handle_subscribe_topic_updates(client_id, request_json);
+      } else if (command == "unsubscribe_topic_updates") {
+        response = handle_unsubscribe_topic_updates(client_id, request_json);
       } else {
         response = create_error_response("UNKNOWN_COMMAND", "Unknown command: " + command, request_json);
       }
@@ -207,7 +212,29 @@ void BridgeServer::process_single_request(const std::vector<uint8_t>& request_da
   std::vector<uint8_t> response_data(response.begin(), response.end());
   if (!middleware_->send_reply(client_id, response_data)) {
     spdlog::warn("Failed to send response to client '{}', cleaning up session", client_id);
+    // cleanup_session drops any replay frames handle_subscribe queued for
+    // this client (they must never be delivered without the response).
     cleanup_session(client_id);
+    return;
+  }
+
+  // Flush any latched-topic replay frames the handler queued for this
+  // client (handle_subscribe or handle_resume, via collect_latched_replay).
+  // Sent strictly AFTER the response so the client has the schema needed
+  // to decode them (docs/API.md: "right after the subscribe response").
+  // Move the frames out under the leaf replays_mutex_, release it, then
+  // send — never call middleware_ while holding the lock.
+  std::vector<std::vector<uint8_t>> replay_frames;
+  {
+    std::lock_guard<std::mutex> replays_lock(replays_mutex_);
+    auto it = pending_replays_.find(client_id);
+    if (it != pending_replays_.end()) {
+      replay_frames = std::move(it->second);
+      pending_replays_.erase(it);
+    }
+  }
+  for (const auto& frame : replay_frames) {
+    middleware_->send_binary(client_id, frame);
   }
 }
 
@@ -225,16 +252,21 @@ std::string BridgeServer::handle_get_topics(const std::string& client_id, const 
   response["status"] = "success";
   response["topics"] = json::array();
 
+  size_t returned_count = 0;
   for (const auto& topic : topics) {
+    if (!whitelist_.matches(topic.name)) {
+      continue;
+    }
     json topic_entry;
     topic_entry["name"] = topic.name;
     topic_entry["type"] = topic.type;
     response["topics"].push_back(topic_entry);
+    returned_count++;
   }
 
   inject_response_fields(response, request);
 
-  spdlog::info("Returning {} topics to client '{}'", topics.size(), client_id);
+  spdlog::info("Returning {} topics to client '{}'", returned_count, client_id);
 
   return response.dump();
 }
@@ -297,6 +329,15 @@ std::string BridgeServer::handle_subscribe(const std::string& client_id, const n
   std::unordered_map<std::string, std::string> extracted_schemas;
 
   for (const auto& topic_name : topics_to_add) {
+    if (!whitelist_.matches(topic_name)) {
+      spdlog::warn("Client '{}' requested non-whitelisted topic '{}'", client_id, topic_name);
+      json failure;
+      failure["topic"] = topic_name;
+      failure["reason"] = "Topic not whitelisted";
+      failures.push_back(failure);
+      continue;
+    }
+
     if (topic_types.find(topic_name) == topic_types.end()) {
       spdlog::warn("Client '{}' requested non-existent topic '{}'", client_id, topic_name);
       json failure;
@@ -354,7 +395,7 @@ std::string BridgeServer::handle_subscribe(const std::string& client_id, const n
       if (!session_manager_->add_subscription(client_id, topic_name, rate)) {
         spdlog::warn("Session gone for client '{}', rolling back subscribe for '{}'", client_id, topic_name);
         if (ref_acquired) {
-          subscription_manager_->unsubscribe(topic_name);
+          release_subscription_ref(topic_name);
         }
         continue;
       }
@@ -364,6 +405,14 @@ std::string BridgeServer::handle_subscribe(const std::string& client_id, const n
       schema_obj["encoding"] = topic_source_->schema_encoding();
       schema_obj["definition"] = extracted_schemas[topic_name];
       schemas[topic_name] = schema_obj;
+
+      // Latched (transient_local) topic replay bookkeeping — only
+      // meaningful when we actually (re)established the middleware
+      // subscription this call (ref_acquired): a paused "subscribe"
+      // creates no subscription to query; its replay happens on resume.
+      if (ref_acquired) {
+        collect_latched_replay(client_id, topic_name);
+      }
 
       spdlog::info("Client '{}' subscribed to topic '{}' (type: {})", client_id, topic_name, topic_type);
     }
@@ -445,7 +494,7 @@ std::string BridgeServer::handle_unsubscribe(const std::string& client_id, const
         // Release the middleware ref only if this session actually holds one
         // (a paused client's refs were already released by pause).
         if (held_refs.count(topic_name) > 0) {
-          subscription_manager_->unsubscribe(topic_name);
+          release_subscription_ref(topic_name);
         }
         session_manager_->remove_subscription(client_id, topic_name);
         current_subs.erase(topic_name);
@@ -507,7 +556,7 @@ std::string BridgeServer::handle_pause(const std::string& client_id, const nlohm
     // Release exactly the refs this session holds
     auto held_refs = session_manager_->get_ref_held_topics(client_id);
     for (const auto& topic : held_refs) {
-      subscription_manager_->unsubscribe(topic);
+      release_subscription_ref(topic);
       session_manager_->set_ref_held(client_id, topic, false);
       spdlog::debug("Released ref for topic '{}' (client '{}' paused)", topic, client_id);
     }
@@ -574,6 +623,11 @@ std::string BridgeServer::handle_resume(const std::string& client_id, const nloh
       if (subscription_manager_->subscribe(topic, type_it->second)) {
         session_manager_->set_ref_held(client_id, topic, true);
         resubscribed++;
+        // Same latched bookkeeping as handle_subscribe: a topic subscribed
+        // WHILE PAUSED acquires its first ref here, and when it joins an
+        // already-shared subscription DDS won't redeliver — the retained
+        // sample (if any) is queued and flushed after the resume response.
+        collect_latched_replay(client_id, topic);
         spdlog::debug("Re-acquired ref for topic '{}' (client '{}' resumed)", topic, client_id);
       } else {
         spdlog::warn("Topic '{}' subscription failed on resume for client '{}'", topic, client_id);
@@ -591,6 +645,43 @@ std::string BridgeServer::handle_resume(const std::string& client_id, const nloh
   if (!failed_topics.empty()) {
     response["unavailable_topics"] = failed_topics;
   }
+  inject_response_fields(response, request);
+  return response.dump();
+}
+
+std::string BridgeServer::handle_subscribe_topic_updates(const std::string& client_id, const nlohmann::json& request) {
+  if (!session_manager_->session_exists(client_id)) {
+    session_manager_->create_session(client_id);
+    spdlog::info("Created new session for client '{}'", client_id);
+  }
+
+  session_manager_->update_heartbeat(client_id);
+  session_manager_->set_topic_updates(client_id, true);
+
+  spdlog::debug("Client '{}' subscribed to topic updates", client_id);
+
+  json response;
+  response["status"] = "ok";
+  response["topic_updates"] = true;
+  inject_response_fields(response, request);
+  return response.dump();
+}
+
+std::string BridgeServer::handle_unsubscribe_topic_updates(
+    const std::string& client_id, const nlohmann::json& request) {
+  if (!session_manager_->session_exists(client_id)) {
+    session_manager_->create_session(client_id);
+    spdlog::info("Created new session for client '{}'", client_id);
+  }
+
+  session_manager_->update_heartbeat(client_id);
+  session_manager_->set_topic_updates(client_id, false);
+
+  spdlog::debug("Client '{}' unsubscribed from topic updates", client_id);
+
+  json response;
+  response["status"] = "ok";
+  response["topic_updates"] = false;
   inject_response_fields(response, request);
   return response.dump();
 }
@@ -626,29 +717,172 @@ void BridgeServer::check_session_timeouts() {
   }
 }
 
-void BridgeServer::cleanup_session(const std::string& client_id) {
-  std::lock_guard<std::mutex> lock(cleanup_mutex_);
-
-  if (!session_manager_->session_exists(client_id)) {
+void BridgeServer::check_topic_changes() {
+  if (!initialized_) {
     return;
   }
 
-  // Release exactly the refs this session holds. Paused clients hold none;
-  // there is no separate paused check to race against.
-  auto held_refs = session_manager_->get_ref_held_topics(client_id);
-  for (const auto& topic : held_refs) {
-    subscription_manager_->unsubscribe(topic);
-    spdlog::debug("Unsubscribed client '{}' from topic '{}'", client_id, topic);
+  std::unordered_map<std::string, std::string> current_topics;
+  for (const auto& topic : topic_source_->get_topics()) {
+    if (!whitelist_.matches(topic.name)) {
+      continue;
+    }
+    current_topics[topic.name] = topic.type;
   }
 
-  session_manager_->remove_session(client_id);
+  json added = json::array();
+  json removed = json::array();
 
   {
-    std::lock_guard<std::mutex> sent_lock(last_sent_mutex_);
-    last_sent_times_.erase(client_id);
+    std::lock_guard<std::mutex> lock(topics_mutex_);
+
+    if (!topics_snapshot_taken_) {
+      known_topics_ = std::move(current_topics);
+      topics_snapshot_taken_ = true;
+      return;
+    }
+
+    for (const auto& [name, type] : current_topics) {
+      auto it = known_topics_.find(name);
+      if (it == known_topics_.end() || it->second != type) {
+        json entry;
+        entry["name"] = name;
+        entry["type"] = type;
+        added.push_back(entry);
+      }
+    }
+
+    for (const auto& [name, type] : known_topics_) {
+      auto it = current_topics.find(name);
+      if (it == current_topics.end() || it->second != type) {
+        removed.push_back(name);
+      }
+    }
+
+    known_topics_ = std::move(current_topics);
+  }  // topics_mutex_ released here — never send notifications while holding it
+
+  if (added.empty() && removed.empty()) {
+    return;
   }
 
-  spdlog::info("Cleaned up session for client '{}' ({} topic refs released)", client_id, held_refs.size());
+  json notification;
+  notification["notification"] = "topics_changed";
+  notification["added"] = added;
+  notification["removed"] = removed;
+  notification["protocol_version"] = kProtocolVersion;
+
+  std::vector<uint8_t> bytes;
+  {
+    std::string text = notification.dump();
+    bytes.assign(text.begin(), text.end());
+  }
+
+  for (const auto& client_id : session_manager_->get_active_sessions()) {
+    if (session_manager_->wants_topic_updates(client_id)) {
+      middleware_->send_reply(client_id, bytes);
+    }
+  }
+}
+
+void BridgeServer::collect_latched_replay(const std::string& client_id, const std::string& topic_name) {
+  // The FIRST subscriber to a latched topic gets its retained sample
+  // delivered naturally by DDS (transient_local redelivery on the freshly
+  // created subscription). Replay exists for LATER clients joining an
+  // already-shared subscription — via subscribe or via resume after
+  // subscribing while paused — whose sample may have aged out of
+  // MessageBuffer's normal TTL window by then. Ordering note: set_latched
+  // runs at (re)subscribe time, so a latched topic's messages are only
+  // retained once someone has subscribed — exactly the shared-subscription
+  // case the replay serves.
+  bool is_latched = subscription_manager_->is_transient_local(topic_name);
+  message_buffer_->set_latched(topic_name, is_latched);
+  if (!is_latched) {
+    return;
+  }
+
+  // get_latched_for_replay skips samples still sitting in the normal
+  // buffer — those reach the new subscriber through the regular publish
+  // cycle, and replaying them too would duplicate.
+  auto latched_msg = message_buffer_->get_latched_for_replay(topic_name);
+  if (!latched_msg) {
+    return;
+  }
+
+  // Do NOT send here: the handler's response (which on subscribe carries
+  // the topic's schema) is sent by process_single_request after the
+  // handler returns, and the client must receive it before any binary
+  // frame that needs the schema to decode. Queue a single-message frame
+  // (same format as regular aggregated frames, so clients need no special
+  // handling); process_single_request flushes it right after the response
+  // goes out. Does not touch last_sent_times_: the sample's old timestamp
+  // means it won't interfere with subsequent rate limiting.
+  //
+  // Benign race with cleanup_session between this queueing and the flush:
+  // if the client disconnects in between, cleanup_session erases the
+  // client's pending_replays_ entry (and a failed send_reply takes that
+  // same cleanup path), so the frames are either dropped with the dead
+  // session or sent to a still-connected socket — nothing strands.
+  AggregatedMessageSerializer serializer;
+  serializer.serialize_message(
+      topic_name, latched_msg->timestamp_ns, latched_msg->data->data(), latched_msg->data->size());
+  auto frame = serializer.finalize();
+
+  std::lock_guard<std::mutex> replays_lock(replays_mutex_);
+  pending_replays_[client_id].push_back(std::move(frame));
+}
+
+void BridgeServer::release_subscription_ref(const std::string& topic_name) {
+  subscription_manager_->unsubscribe(topic_name);
+  // When the last ref is released the middleware subscription is destroyed.
+  // Clear the topic's latched state with it: the retained sample would go
+  // stale, and the NEXT subscriber creates a fresh middleware subscription
+  // that receives the current sample via DDS transient_local redelivery —
+  // replaying the stale copy before it would deliver out-of-date data.
+  if (!subscription_manager_->is_subscribed(topic_name) && message_buffer_) {
+    message_buffer_->set_latched(topic_name, false);
+  }
+}
+
+void BridgeServer::cleanup_session(const std::string& client_id) {
+  {
+    std::lock_guard<std::mutex> lock(cleanup_mutex_);
+
+    // Drop any undelivered latched-replay frames regardless of session state
+    // (the client is gone; leaving them queued would strand them forever).
+    {
+      std::lock_guard<std::mutex> replays_lock(replays_mutex_);
+      pending_replays_.erase(client_id);
+    }
+
+    if (session_manager_->session_exists(client_id)) {
+      // Release exactly the refs this session holds. Paused clients hold
+      // none; there is no separate paused check to race against.
+      auto held_refs = session_manager_->get_ref_held_topics(client_id);
+      for (const auto& topic : held_refs) {
+        release_subscription_ref(topic);
+        spdlog::debug("Unsubscribed client '{}' from topic '{}'", client_id, topic);
+      }
+
+      session_manager_->remove_session(client_id);
+
+      {
+        std::lock_guard<std::mutex> sent_lock(last_sent_mutex_);
+        last_sent_times_.erase(client_id);
+      }
+
+      spdlog::info("Cleaned up session for client '{}' ({} topic refs released)", client_id, held_refs.size());
+    }
+  }
+
+  // Discard any frames the middleware's slow-client backpressure queue still
+  // holds for this client. On a heartbeat timeout the socket stays open, so
+  // without this a timed-out slow client parks frames indefinitely and stale
+  // data could flush into a new logical session on the same connection.
+  // Deliberately outside the cleanup_mutex_ scope: middleware calls must not
+  // run under that lock. Also deliberately unconditional (even when no
+  // session existed): drop_pending is an idempotent no-op then.
+  middleware_->drop_pending(client_id);
 }
 
 size_t BridgeServer::get_active_session_count() const {

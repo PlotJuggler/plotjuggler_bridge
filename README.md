@@ -23,6 +23,12 @@ independently.
 - **Multi-Client Support**: Multiple clients can connect simultaneously with shared subscriptions
 - **Runtime Schema Discovery**: Automatic extraction of message schemas from installed ROS2 packages on the server side.
 - **Large Message Stripping** (opt-in): Optional stripping of large array fields (Image, PointCloud2, LaserScan, OccupancyGrid) to reduce bandwidth while preserving metadata. Disabled by default — full message data is forwarded; enable with `strip_large_messages:=true` for low-bandwidth links
+- **Topic Whitelist**: Restrict which topics are visible/subscribable via full-match regex patterns (`topic_whitelist` / `--topic-whitelist`), mirroring foxglove_bridge's option of the same name
+- **QoS Depth Heuristics** (ROS2 only): KEEP_LAST subscription depth is derived from the discovered publishers' depths and clamped to a configurable `[min_qos_depth, max_qos_depth]` range
+- **Pushed Topic Advertisement** (opt-in): Clients can subscribe to a `topics_changed` notification instead of polling `get_topics`, at a configurable `topic_poll_interval`
+- **Slow-Client Backpressure**: A bounded, drop-oldest per-client send queue (`client_backlog_size`) keeps a lagging client from blocking the publish loop or growing an unbounded backlog, instead of disconnecting it
+- **Latched Topic Replay** (ROS2 only): New subscribers to a `TRANSIENT_LOCAL` topic (e.g. `/tf_static`) immediately receive the retained last message instead of waiting for the next publish
+- **TLS / `wss://`** (opt-in): Serve the WebSocket endpoint over TLS with a server certificate + private key (`tls`/`--certfile`+`--keyfile`); clients connect via `wss://` instead of `ws://`
 
 ## CI Status
 
@@ -33,12 +39,39 @@ independently.
 
 ## Configuration Parameters
 
+### ROS2 (via `--ros-args -p`)
+
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `port` | int | 9090 | WebSocket server port |
 | `publish_rate` | double | 50.0 | Aggregation publish rate in Hz |
 | `session_timeout` | double | 10.0 | Client timeout duration in seconds |
 | `strip_large_messages` | bool | false | Opt-in: strip large arrays from Image, PointCloud2, LaserScan, OccupancyGrid messages |
+| `topic_whitelist` | string array | `[".*"]` | Full-match regex patterns (ECMAScript) restricting visible/subscribable topics |
+| `min_qos_depth` | int | 1 | ROS2 only: minimum KEEP_LAST subscription depth after aggregating publisher depths |
+| `max_qos_depth` | int | 100 | ROS2 only: maximum KEEP_LAST subscription depth after aggregating publisher depths |
+| `topic_poll_interval` | double | 1.0 | Seconds between `topics_changed` notification polls; `0` disables polling |
+| `client_backlog_size` | int | 100 | Max binary frames queued per slow client before the oldest is dropped (must be `> 0`) |
+| `tls` | bool | false | Enable TLS (`wss://`); requires `certfile` and `keyfile` |
+| `certfile` | string | `""` | TLS server certificate file |
+| `keyfile` | string | `""` | TLS private key file |
+
+### FastDDS / RTI (via CLI flags)
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--domains`, `-d` | int list | (required) | DDS domain IDs |
+| `--port`, `-p` | int | 9090 | WebSocket server port |
+| `--publish-rate` | double | 50.0 | Aggregation publish rate in Hz |
+| `--session-timeout` | double | 10.0 | Client timeout duration in seconds |
+| `--log-level` | string | `info` | Log level (trace, debug, info, warn, error) |
+| `--stats` | flag | off | Print statistics every 5 seconds |
+| `--topic-whitelist` | string list | `.*` | Full-match regex patterns (ECMAScript), repeatable |
+| `--topic-poll-interval` | double | 1.0 | Seconds between `topics_changed` notification polls; `0` disables polling |
+| `--client-backlog-size` | int | 100 | Max binary frames queued per slow client before the oldest is dropped (range `1`-`1000000`) |
+| `--certfile` | string | (none) | TLS server certificate file; enables `wss://`, requires `--keyfile` |
+| `--keyfile` | string | (none) | TLS private key file; enables `wss://`, requires `--certfile` |
+| `--qos-profile` | string | (none) | RTI only: QoS profile XML file path |
 
 ## Just "Download and Run"
 
@@ -72,6 +105,8 @@ chmod +x pj_bridge_ros2-humble-x86_64.AppImage
 ## Build Instructions
 
 All dependencies (spdlog, nlohmann_json, ZSTD) are provided by the dependency manager. IXWebSocket is resolved via `find_package` first, with a FetchContent fallback for colcon builds. Only `tl::expected` is vendored.
+
+TLS (`wss://`) support depends on IXWebSocket being built with OpenSSL. The CMake option `PJ_BRIDGE_TLS` (default `ON`) controls this for the FetchContent path (`-DPJ_BRIDGE_TLS=OFF` to disable); a system/conda-provided IXWebSocket must likewise have been built with TLS. See [docs/API.md](docs/API.md#tls--wss) for details.
 
 ### ROS2 — Pixi
 

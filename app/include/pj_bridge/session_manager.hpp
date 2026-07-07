@@ -39,6 +39,9 @@ struct Session {
   std::chrono::steady_clock::time_point last_heartbeat;
   std::chrono::steady_clock::time_point created_at;
   bool paused{false};
+  /// True if this session opted in to server-initiated `topics_changed`
+  /// notifications via the `subscribe_topic_updates` command.
+  bool topic_updates{false};
 };
 
 class SessionManager {
@@ -59,6 +62,8 @@ class SessionManager {
   bool session_exists(const std::string& client_id) const;
   bool set_paused(const std::string& client_id, bool paused);
   bool is_paused(const std::string& client_id) const;
+  bool set_topic_updates(const std::string& client_id, bool enabled);
+  bool wants_topic_updates(const std::string& client_id) const;
   bool set_ref_held(const std::string& client_id, const std::string& topic, bool held);
   std::unordered_set<std::string> get_ref_held_topics(const std::string& client_id) const;
 

@@ -324,6 +324,30 @@ TEST_F(SessionManagerTest, PausedStatePreservedAcrossHeartbeats) {
   EXPECT_TRUE(manager_.is_paused("client1"));
 }
 
+TEST_F(SessionManagerTest, SessionStartsWithTopicUpdatesDisabled) {
+  EXPECT_TRUE(manager_.create_session("client1"));
+
+  EXPECT_FALSE(manager_.wants_topic_updates("client1"));
+}
+
+TEST_F(SessionManagerTest, SetTopicUpdatesChangesState) {
+  EXPECT_TRUE(manager_.create_session("client1"));
+
+  EXPECT_TRUE(manager_.set_topic_updates("client1", true));
+  EXPECT_TRUE(manager_.wants_topic_updates("client1"));
+
+  EXPECT_TRUE(manager_.set_topic_updates("client1", false));
+  EXPECT_FALSE(manager_.wants_topic_updates("client1"));
+}
+
+TEST_F(SessionManagerTest, SetTopicUpdatesReturnsFalseForNonexistentSession) {
+  EXPECT_FALSE(manager_.set_topic_updates("nonexistent", true));
+}
+
+TEST_F(SessionManagerTest, WantsTopicUpdatesReturnsFalseForNonexistentSession) {
+  EXPECT_FALSE(manager_.wants_topic_updates("nonexistent"));
+}
+
 TEST_F(SessionManagerTest, ThreadSafety) {
   SessionManager thread_manager(10.0);
   constexpr int kNumThreads = 10;

@@ -19,11 +19,15 @@
 
 #include "pj_bridge_ros2/generic_subscription_manager.hpp"
 
+#include <algorithm>
+
 #include "pj_bridge/time_utils.hpp"
 
 namespace pj_bridge {
 
-GenericSubscriptionManager::GenericSubscriptionManager(rclcpp::Node::SharedPtr node) : node_(node) {}
+GenericSubscriptionManager::GenericSubscriptionManager(
+    rclcpp::Node::SharedPtr node, size_t min_qos_depth, size_t max_qos_depth)
+    : node_(node), min_qos_depth_(min_qos_depth), max_qos_depth_(max_qos_depth) {}
 
 rclcpp::QoS GenericSubscriptionManager::adapt_qos(const std::string& topic_name) const {
   // Match the QoS the publishers actually offer (same policy as rosbag2):
@@ -31,13 +35,36 @@ rclcpp::QoS GenericSubscriptionManager::adapt_qos(const std::string& topic_name)
   // topics!) and a VOLATILE one misses latched (TRANSIENT_LOCAL) samples.
   rclcpp::QoS qos(100);
 
+  // Historical default depth, also used as the per-publisher fallback when a
+  // publisher's depth is unknown (see below).
+  constexpr size_t kFallbackDepth = 100;
+
   auto publishers = node_->get_publishers_info_by_topic(topic_name);
   if (publishers.empty()) {
+    // No info yet → same fallback the per-publisher rule below uses.
+    qos.keep_last(std::min(kFallbackDepth, max_qos_depth_));
     return qos;
   }
 
   bool any_best_effort = false;
   bool all_transient_local = true;
+  // Depth aggregation adapted from foxglove_bridge (MIT License,
+  // Copyright (c) Foxglove Technologies Inc):
+  // sum the publishers' history depths so a burst from every publisher
+  // still fits, then clamp to [min_qos_depth, max_qos_depth].
+  //
+  // Deviations from foxglove_bridge:
+  // - A publisher reporting depth 0 means the RMW didn't propagate depth
+  //   through discovery (e.g. rmw_fastrtps_cpp reports 0 for everyone) or
+  //   the publisher uses KEEP_ALL. It contributes kFallbackDepth instead of
+  //   0 — assuming the historical generous default is safer than shrinking
+  //   the queue and dropping messages on high-rate topics.
+  // - The sum is saturating: each contribution is capped at the remaining
+  //   headroom below max_qos_depth_ (total_depth <= max_qos_depth_ is a loop
+  //   invariant), so the addition is structurally incapable of wrapping
+  //   size_t no matter how many publishers report huge depths — even for
+  //   extreme max_qos_depth_ values passed via the constructor API.
+  size_t total_depth = 0;
   for (const auto& info : publishers) {
     const auto& profile = info.qos_profile();
     if (profile.reliability() == rclcpp::ReliabilityPolicy::BestEffort) {
@@ -46,7 +73,11 @@ rclcpp::QoS GenericSubscriptionManager::adapt_qos(const std::string& topic_name)
     if (profile.durability() != rclcpp::DurabilityPolicy::TransientLocal) {
       all_transient_local = false;
     }
+    const size_t publisher_depth = profile.depth() > 0 ? profile.depth() : kFallbackDepth;
+    const size_t headroom = max_qos_depth_ - total_depth;  // total_depth <= max_qos_depth_ invariant
+    total_depth += std::min(publisher_depth, headroom);
   }
+  qos.keep_last(std::clamp(total_depth, min_qos_depth_, max_qos_depth_));
 
   // BEST_EFFORT matches both kinds of publisher; TRANSIENT_LOCAL only
   // matches if every publisher offers it.
@@ -77,9 +108,12 @@ bool GenericSubscriptionManager::subscribe(
       callback(topic_name, msg, receive_time);
     };
 
-    auto subscription = node_->create_generic_subscription(topic_name, topic_type, adapt_qos(topic_name), sub_callback);
+    rclcpp::QoS qos = adapt_qos(topic_name);
+    bool transient_local = (qos.durability() == rclcpp::DurabilityPolicy::TransientLocal);
 
-    subscriptions_[topic_name] = SubscriptionInfo{subscription, 1};
+    auto subscription = node_->create_generic_subscription(topic_name, topic_type, qos, sub_callback);
+
+    subscriptions_[topic_name] = SubscriptionInfo{subscription, 1, transient_local};
 
     return true;
   } catch (const std::exception& e) {
@@ -130,6 +164,15 @@ size_t GenericSubscriptionManager::get_reference_count(const std::string& topic_
 void GenericSubscriptionManager::unsubscribe_all() {
   std::lock_guard<std::mutex> lock(mutex_);
   subscriptions_.clear();
+}
+
+bool GenericSubscriptionManager::is_transient_local(const std::string& topic_name) const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  auto it = subscriptions_.find(topic_name);
+  if (it == subscriptions_.end()) {
+    return false;
+  }
+  return it->second.transient_local;
 }
 
 }  // namespace pj_bridge

@@ -41,7 +41,51 @@ void MessageBuffer::add_message(
   msg.received_at_ns = now_ns();
   msg.data = std::move(data);
 
+  if (latched_topics_.count(topic_name) > 0) {
+    // Retain a copy of the newest sample (shared_ptr copy — cheap, no deep
+    // copy of the payload) for latched-topic replay. This store is exempt
+    // from TTL cleanup and from move_messages().
+    latched_last_[topic_name] = msg;
+  }
+
   topic_buffers_[topic_name].push_back(std::move(msg));
+}
+
+void MessageBuffer::set_latched(const std::string& topic_name, bool latched) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (latched) {
+    latched_topics_.insert(topic_name);
+  } else {
+    latched_topics_.erase(topic_name);
+    latched_last_.erase(topic_name);
+  }
+}
+
+std::optional<BufferedMessage> MessageBuffer::get_latched(const std::string& topic_name) const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  auto it = latched_last_.find(topic_name);
+  if (it == latched_last_.end()) {
+    return std::nullopt;
+  }
+  return it->second;
+}
+
+std::optional<BufferedMessage> MessageBuffer::get_latched_for_replay(const std::string& topic_name) const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  auto it = latched_last_.find(topic_name);
+  if (it == latched_last_.end()) {
+    return std::nullopt;
+  }
+  // While the topic still has messages in the normal buffer, the retained
+  // sample is (or is older than) one of them, and the upcoming publish
+  // cycle will deliver it to the new subscriber via the regular aggregated
+  // path — a replay would duplicate it. Empty deques are erased by both
+  // cleanup and move_messages(), so presence means undelivered messages.
+  auto buf_it = topic_buffers_.find(topic_name);
+  if (buf_it != topic_buffers_.end() && !buf_it->second.empty()) {
+    return std::nullopt;
+  }
+  return it->second;
 }
 
 void MessageBuffer::move_messages(std::unordered_map<std::string, std::deque<BufferedMessage>>& out_messages) {
@@ -53,6 +97,8 @@ void MessageBuffer::move_messages(std::unordered_map<std::string, std::deque<Buf
 void MessageBuffer::clear() {
   std::lock_guard<std::mutex> lock(mutex_);
   topic_buffers_.clear();
+  latched_topics_.clear();
+  latched_last_.clear();
 }
 
 size_t MessageBuffer::size() const {

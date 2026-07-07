@@ -31,6 +31,7 @@
 #include "pj_bridge/session_manager.hpp"
 #include "pj_bridge/subscription_manager_interface.hpp"
 #include "pj_bridge/topic_source_interface.hpp"
+#include "pj_bridge/whitelist_filter.hpp"
 
 namespace pj_bridge {
 
@@ -63,12 +64,13 @@ class BridgeServer {
    * @param port Server port (default: 9090)
    * @param session_timeout Session timeout in seconds (default: 10.0)
    * @param publish_rate Message aggregation publish rate in Hz (default: 50.0)
+   * @param whitelist Topic whitelist filter (default: matches everything)
    */
   explicit BridgeServer(
       std::shared_ptr<TopicSourceInterface> topic_source,
       std::shared_ptr<SubscriptionManagerInterface> subscription_manager,
       std::shared_ptr<MiddlewareInterface> middleware, int port = 9090, double session_timeout = 10.0,
-      double publish_rate = 50.0);
+      double publish_rate = 50.0, WhitelistFilter whitelist = {});
 
   /// Shuts down middleware before members are destroyed, preventing
   /// disconnect callbacks from firing into a partially destroyed object.
@@ -107,6 +109,18 @@ class BridgeServer {
   void check_session_timeouts();
 
   /**
+   * @brief Check whether the (whitelist-filtered) topic set has changed and
+   * notify opted-in clients
+   *
+   * Called externally by the event loop (e.g. every topic_poll_interval
+   * seconds). The first call after construction only takes a snapshot and
+   * sends nothing; subsequent calls diff against that snapshot and send a
+   * `topics_changed` notification (added/removed) to every session that
+   * called `subscribe_topic_updates`, but only when the diff is non-empty.
+   */
+  void check_topic_changes();
+
+  /**
    * @brief Get the number of active client sessions
    */
   size_t get_active_session_count() const;
@@ -130,10 +144,30 @@ class BridgeServer {
   std::string handle_heartbeat(const std::string& client_id, const nlohmann::json& request);
   std::string handle_pause(const std::string& client_id, const nlohmann::json& request);
   std::string handle_resume(const std::string& client_id, const nlohmann::json& request);
+  std::string handle_subscribe_topic_updates(const std::string& client_id, const nlohmann::json& request);
+  std::string handle_unsubscribe_topic_updates(const std::string& client_id, const nlohmann::json& request);
   std::string create_error_response(
       const std::string& error_code, const std::string& message, const nlohmann::json& request) const;
   void inject_response_fields(nlohmann::json& response, const nlohmann::json& request) const;
   void cleanup_session(const std::string& client_id);
+
+  /// Release one middleware subscription ref for @p topic_name. When the
+  /// last ref is gone (subscription destroyed), also clears the topic's
+  /// latched state in the message buffer: a stale retained sample must not
+  /// be replayed to the next fresh subscriber, who receives the current
+  /// sample from DDS transient_local redelivery instead. Call with
+  /// cleanup_mutex_ held (same requirement as unsubscribe itself).
+  void release_subscription_ref(const std::string& topic_name);
+
+  /// Latched (transient_local) replay bookkeeping for a topic whose
+  /// middleware subscription ref was just (re)acquired for @p client_id —
+  /// shared by handle_subscribe and handle_resume. Records the topic's
+  /// latched flag in the message buffer and, when a retained sample is
+  /// available for replay, serializes it into a single-message binary frame
+  /// queued in pending_replays_ (flushed by process_single_request right
+  /// after the handler's response is sent). Call with cleanup_mutex_ held;
+  /// acquires only the leaf replays_mutex_ and makes no middleware calls.
+  void collect_latched_replay(const std::string& client_id, const std::string& topic_name);
 
   // Backend interfaces (owned)
   std::shared_ptr<TopicSourceInterface> topic_source_;
@@ -148,6 +182,7 @@ class BridgeServer {
   int port_;
   double session_timeout_;
   double publish_rate_;
+  WhitelistFilter whitelist_;
 
   // State
   std::atomic<bool> initialized_;
@@ -164,11 +199,34 @@ class BridgeServer {
   //   cleanup_mutex_ > last_sent_mutex_ > stats_mutex_
   // SessionManager::mutex_ may be acquired while holding any of these.
   // Never acquire a higher-order lock while holding a lower-order one.
+  // topics_mutex_ is a LEAF lock: it is held only to compute the
+  // added/removed diff and swap in the new known_topics_ snapshot. Never
+  // call middleware_ or session_manager_ (or acquire any other lock in this
+  // class) while holding topics_mutex_ — release it before sending
+  // notifications.
+  // replays_mutex_ is likewise a LEAF lock: it only guards pending_replays_
+  // map accesses. Never hold it while acquiring any other lock or calling
+  // middleware_ — move the frames out, release, then send.
   std::mutex cleanup_mutex_;
 
   // Per-client per-topic last-sent timestamp (nanoseconds) for rate limiting
   std::unordered_map<std::string, std::unordered_map<std::string, uint64_t>> last_sent_times_;
   std::mutex last_sent_mutex_;
+
+  // Whitelist-filtered topic name -> type snapshot, used by check_topic_changes()
+  // to detect additions/removals/type-changes. LEAF lock (see comment above).
+  std::unordered_map<std::string, std::string> known_topics_;
+  bool topics_snapshot_taken_{false};
+  std::mutex topics_mutex_;
+
+  // Latched (transient_local) replay frames queued by handle_subscribe and
+  // handle_resume (via collect_latched_replay), flushed by
+  // process_single_request right AFTER the handler's response is sent — the
+  // client must receive the response (which carries the topic's schema on
+  // subscribe) before the binary frame that needs it. LEAF lock (see
+  // comment above).
+  std::unordered_map<std::string, std::vector<std::vector<uint8_t>>> pending_replays_;
+  std::mutex replays_mutex_;
 };
 
 }  // namespace pj_bridge

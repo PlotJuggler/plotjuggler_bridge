@@ -25,8 +25,10 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace pj_bridge {
@@ -78,11 +80,39 @@ class MessageBuffer {
   /// Return the total number of messages across all topics.
   size_t size() const;
 
+  /// Mark (or unmark) @p topic_name as latched (transient_local). While a
+  /// topic is latched, add_message() additionally retains its newest sample
+  /// in a TTL-exempt, one-entry-per-topic store so that later subscribers to
+  /// an already-shared subscription can be replayed the current value even
+  /// after it has aged out of the normal buffer. Setting latched to false
+  /// erases the retained sample.
+  void set_latched(const std::string& topic_name, bool latched);
+
+  /// Return the retained latched sample for @p topic_name, or nullopt if the
+  /// topic is not latched or no sample has been retained yet.
+  std::optional<BufferedMessage> get_latched(const std::string& topic_name) const;
+
+  /// Like get_latched(), but additionally returns nullopt while the topic
+  /// still has messages in the normal buffer. In that case the upcoming
+  /// publish cycle will deliver the sample to the new subscriber anyway —
+  /// replaying it would produce a duplicate. Replay is only needed for
+  /// samples that already left the normal buffer (drained by
+  /// move_messages() or TTL-evicted).
+  std::optional<BufferedMessage> get_latched_for_replay(const std::string& topic_name) const;
+
  private:
   mutable std::mutex mutex_;
   std::unordered_map<std::string, std::deque<BufferedMessage>> topic_buffers_;
   uint64_t max_message_age_ns_;
   ClockFn clock_fn_;
+
+  // Latched (transient_local) topic support: topics currently flagged as
+  // latched, and the single newest retained sample per latched topic.
+  // Bounded at one message per latched topic; entries otherwise persist for
+  // the lifetime of the process (not TTL-cleaned, not drained by
+  // move_messages()).
+  std::unordered_set<std::string> latched_topics_;
+  std::unordered_map<std::string, BufferedMessage> latched_last_;
 
   uint64_t now_ns() const;
   void cleanup_old_messages();

@@ -20,11 +20,13 @@
 #include <spdlog/spdlog.h>
 
 #include <CLI/CLI.hpp>
+#include <optional>
 #include <string>
 #include <vector>
 
 #include "pj_bridge/middleware/websocket_middleware.hpp"
 #include "pj_bridge/standalone_event_loop.hpp"
+#include "pj_bridge/whitelist_filter.hpp"
 #include "pj_bridge_fastdds/fastdds_subscription_manager.hpp"
 #include "pj_bridge_fastdds/fastdds_topic_source.hpp"
 
@@ -37,6 +39,11 @@ int main(int argc, char* argv[]) {
   double session_timeout = 10.0;
   std::string log_level = "info";
   bool stats_enabled = false;
+  std::vector<std::string> topic_whitelist{".*"};
+  double topic_poll_interval = 1.0;
+  int client_backlog_size = 100;
+  std::string certfile;
+  std::string keyfile;
 
   app.add_option("--domains,-d", domain_ids, "DDS domain IDs")->required()->expected(1, -1);
   app.add_option("--port,-p", port, "WebSocket port")->default_val(9090)->check(CLI::Range(1, 65535));
@@ -44,8 +51,30 @@ int main(int argc, char* argv[]) {
   app.add_option("--session-timeout", session_timeout, "Session timeout in seconds")->default_val(10.0);
   app.add_option("--log-level", log_level, "Log level (trace, debug, info, warn, error)")->default_val("info");
   app.add_flag("--stats", stats_enabled, "Print statistics every 5 seconds");
+  app.add_option(
+         "--topic-poll-interval", topic_poll_interval,
+         "Interval in seconds between topics_changed notification polls (0 disables)")
+      ->default_val(1.0);
+  app.add_option(
+         "--client-backlog-size", client_backlog_size,
+         "Max frames queued per slow client before dropping the oldest (backpressure)")
+      ->default_val(100)
+      ->check(CLI::Range(1, 1000000));
+  // Bound variable is already initialized to {".*"} (match everything); CLI11
+  // leaves it untouched if the flag is not passed, so no default_val() is
+  // needed (and default_val() on a vector<string> would round-trip through a
+  // single joined string, which is not what we want here).
+  app.add_option("--topic-whitelist", topic_whitelist, "Topic whitelist regex patterns (full-match, ECMAScript)");
+
+  auto certfile_opt =
+      app.add_option("--certfile", certfile, "TLS server certificate file (enables wss://, requires --keyfile)");
+  auto keyfile_opt = app.add_option("--keyfile", keyfile, "TLS private key file (enables wss://, requires --certfile)");
+  certfile_opt->needs(keyfile_opt);
+  keyfile_opt->needs(certfile_opt);
 
   CLI11_PARSE(app, argc, argv);
+
+  bool tls_enabled = !certfile.empty();
 
   spdlog::set_level(spdlog::level::from_str(log_level));
 
@@ -54,16 +83,38 @@ int main(int argc, char* argv[]) {
   spdlog::info("  Port: {}", port);
   spdlog::info("  Publish rate: {:.1f} Hz", publish_rate);
   spdlog::info("  Session timeout: {:.1f} s", session_timeout);
+  spdlog::info("  Topic whitelist: {}", fmt::join(topic_whitelist, ", "));
+  spdlog::info("  Topic poll interval: {:.1f} s", topic_poll_interval);
+  spdlog::info("  Client backlog size: {}", client_backlog_size);
+  spdlog::info("  TLS: {}", tls_enabled ? "enabled" : "disabled");
+
+  auto whitelist_result = pj_bridge::WhitelistFilter::create(topic_whitelist);
+  if (!whitelist_result) {
+    spdlog::error("Invalid --topic-whitelist: {}", whitelist_result.error());
+    return 1;
+  }
+
+  if (topic_poll_interval < 0.0) {
+    spdlog::error("Invalid --topic-poll-interval: {:.1f} (must be >= 0; 0 disables polling)", topic_poll_interval);
+    return 1;
+  }
 
   try {
     auto topic_source = std::make_shared<pj_bridge::FastDdsTopicSource>(domain_ids);
     auto sub_manager = std::make_shared<pj_bridge::FastDdsSubscriptionManager>(*topic_source);
-    auto middleware = std::make_shared<pj_bridge::WebSocketMiddleware>();
+    std::optional<pj_bridge::TlsConfig> tls_config;
+    if (tls_enabled) {
+      tls_config = pj_bridge::TlsConfig{certfile, keyfile};
+    }
+    auto middleware =
+        std::make_shared<pj_bridge::WebSocketMiddleware>(static_cast<size_t>(client_backlog_size), tls_config);
 
-    pj_bridge::BridgeServer server(topic_source, sub_manager, middleware, port, session_timeout, publish_rate);
+    pj_bridge::BridgeServer server(
+        topic_source, sub_manager, middleware, port, session_timeout, publish_rate,
+        std::move(whitelist_result.value()));
 
     pj_bridge::run_standalone_event_loop(
-        server, sub_manager, middleware, {port, publish_rate, session_timeout, stats_enabled});
+        server, sub_manager, middleware, {port, publish_rate, session_timeout, stats_enabled, topic_poll_interval});
   } catch (const std::exception& e) {
     spdlog::error("Fatal error: {}", e.what());
     return 1;

@@ -397,3 +397,116 @@ TEST_F(MessageBufferTest, ExpiredMessagesStillPurgedWithInjectedClock) {
   // The first message is stale and must be gone; the new one remains
   EXPECT_EQ(buffer.size(), 1);
 }
+
+// ---------------------------------------------------------------------------
+// Latched (transient_local) topic support
+//
+// A latched topic retains its newest sample outside the normal TTL/move_messages
+// path so that late subscribers to an already-shared subscription can be
+// replayed the current value even after it has aged out of the buffer.
+// ---------------------------------------------------------------------------
+
+TEST_F(MessageBufferTest, LatchedMessageSurvivesTtlAndMoveMessages) {
+  uint64_t fake_now = 10'000'000'000ULL;
+  MessageBuffer buffer(MessageBuffer::kDefaultMaxMessageAgeNs, [&fake_now]() { return fake_now; });
+
+  buffer.set_latched("/t", true);
+
+  std::vector<uint8_t> data = {1, 2, 3};
+  buffer.add_message("/t", 1, create_test_data(data));
+
+  // Advance the clock well past the 1 s TTL and add a message on another
+  // topic to trigger cleanup of the (non-latched) deque path.
+  fake_now += 2'000'000'000ULL;
+  buffer.add_message("/other", 2, create_test_data({9}));
+
+  // Drain everything via move_messages — the latched store must not be
+  // touched by this call.
+  std::unordered_map<std::string, std::deque<BufferedMessage>> messages;
+  buffer.move_messages(messages);
+
+  auto latched = buffer.get_latched("/t");
+  ASSERT_TRUE(latched.has_value());
+  EXPECT_EQ(extract_data(latched->data), data);
+}
+
+TEST_F(MessageBufferTest, GetLatchedReturnsNewestMessage) {
+  buffer_.set_latched("/t", true);
+
+  buffer_.add_message("/t", 1, create_test_data({1, 1, 1}));
+  buffer_.add_message("/t", 2, create_test_data({2, 2, 2}));
+
+  auto latched = buffer_.get_latched("/t");
+  ASSERT_TRUE(latched.has_value());
+  EXPECT_EQ(extract_data(latched->data), (std::vector<uint8_t>{2, 2, 2}));
+  EXPECT_EQ(latched->timestamp_ns, 2u);
+}
+
+TEST_F(MessageBufferTest, SetLatchedFalseClearsRetainedEntry) {
+  buffer_.set_latched("/t", true);
+  buffer_.add_message("/t", 1, create_test_data({1, 2, 3}));
+  ASSERT_TRUE(buffer_.get_latched("/t").has_value());
+
+  buffer_.set_latched("/t", false);
+  EXPECT_FALSE(buffer_.get_latched("/t").has_value());
+
+  // Once unlatched, further messages are not retained either.
+  buffer_.add_message("/t", 2, create_test_data({4, 5, 6}));
+  EXPECT_FALSE(buffer_.get_latched("/t").has_value());
+}
+
+TEST_F(MessageBufferTest, NonLatchedTopicHasNoRetainedMessage) {
+  buffer_.add_message("/plain", 1, create_test_data({1, 2, 3}));
+  EXPECT_FALSE(buffer_.get_latched("/plain").has_value());
+}
+
+TEST_F(MessageBufferTest, ClearAlsoClearsLatchedStorage) {
+  buffer_.set_latched("/t", true);
+  buffer_.add_message("/t", 1, create_test_data({1, 2, 3}));
+  ASSERT_TRUE(buffer_.get_latched("/t").has_value());
+
+  buffer_.clear();
+  EXPECT_FALSE(buffer_.get_latched("/t").has_value());
+
+  // Latching config was cleared too: a message added post-clear (without a
+  // fresh set_latched call) is not retained.
+  buffer_.add_message("/t", 2, create_test_data({4, 5, 6}));
+  EXPECT_FALSE(buffer_.get_latched("/t").has_value());
+}
+
+TEST_F(MessageBufferTest, GetLatchedForReplaySkipsWhileSampleStillBuffered) {
+  buffer_.set_latched("/t", true);
+  buffer_.add_message("/t", 1, create_test_data({1, 2, 3}));
+
+  // The sample is still in the normal buffer: the regular publish cycle
+  // will deliver it, so the replay accessor must return nothing (a replay
+  // now would duplicate the message). The raw accessor still sees it.
+  EXPECT_FALSE(buffer_.get_latched_for_replay("/t").has_value());
+  EXPECT_TRUE(buffer_.get_latched("/t").has_value());
+
+  // Once drained by move_messages, the retained copy becomes replayable.
+  std::unordered_map<std::string, std::deque<BufferedMessage>> messages;
+  buffer_.move_messages(messages);
+  auto replay = buffer_.get_latched_for_replay("/t");
+  ASSERT_TRUE(replay.has_value());
+  EXPECT_EQ(extract_data(replay->data), (std::vector<uint8_t>{1, 2, 3}));
+}
+
+TEST_F(MessageBufferTest, GetLatchedForReplayAvailableAfterTtlEviction) {
+  uint64_t fake_now = 10'000'000'000ULL;
+  MessageBuffer buffer(MessageBuffer::kDefaultMaxMessageAgeNs, [&fake_now]() { return fake_now; });
+
+  buffer.set_latched("/t", true);
+  buffer.add_message("/t", 1, create_test_data({4, 5, 6}));
+  EXPECT_FALSE(buffer.get_latched_for_replay("/t").has_value());
+
+  // TTL eviction (triggered by an add on another topic) removes the sample
+  // from the normal buffer without draining it to any client — the
+  // retained copy must then be available for replay.
+  fake_now += 2'000'000'000ULL;
+  buffer.add_message("/other", 2, create_test_data({9}));
+
+  auto replay = buffer.get_latched_for_replay("/t");
+  ASSERT_TRUE(replay.has_value());
+  EXPECT_EQ(extract_data(replay->data), (std::vector<uint8_t>{4, 5, 6}));
+}

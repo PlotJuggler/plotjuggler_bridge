@@ -19,11 +19,10 @@
 
 #include <gtest/gtest.h>
 
-#include <rclcpp/rclcpp.hpp>
-#include <sensor_msgs/msg/image.hpp>
-
 #include <atomic>
 #include <chrono>
+#include <rclcpp/rclcpp.hpp>
+#include <sensor_msgs/msg/image.hpp>
 #include <thread>
 
 #include "pj_bridge_ros2/ros2_subscription_manager.hpp"

@@ -26,8 +26,9 @@
 
 namespace pj_bridge {
 
-Ros2SubscriptionManager::Ros2SubscriptionManager(rclcpp::Node::SharedPtr node, bool strip_large_messages)
-    : inner_manager_(node), strip_large_messages_(strip_large_messages) {}
+Ros2SubscriptionManager::Ros2SubscriptionManager(
+    rclcpp::Node::SharedPtr node, bool strip_large_messages, size_t min_qos_depth, size_t max_qos_depth)
+    : inner_manager_(node, min_qos_depth, max_qos_depth), strip_large_messages_(strip_large_messages) {}
 
 void Ros2SubscriptionManager::set_message_callback(MessageCallback callback) {
   std::lock_guard<std::mutex> lock(callback_mutex_);
@@ -75,6 +76,14 @@ bool Ros2SubscriptionManager::unsubscribe(const std::string& topic_name) {
 
 void Ros2SubscriptionManager::unsubscribe_all() {
   inner_manager_.unsubscribe_all();
+}
+
+bool Ros2SubscriptionManager::is_transient_local(const std::string& topic_name) const {
+  return inner_manager_.is_transient_local(topic_name);
+}
+
+bool Ros2SubscriptionManager::is_subscribed(const std::string& topic_name) const {
+  return inner_manager_.is_subscribed(topic_name);
 }
 
 }  // namespace pj_bridge

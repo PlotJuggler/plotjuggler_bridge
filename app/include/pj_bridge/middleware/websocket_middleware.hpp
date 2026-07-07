@@ -22,21 +22,33 @@
 #include <ixwebsocket/IXWebSocketServer.h>
 
 #include <atomic>
+#include <chrono>
+#include <cstdint>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <queue>
 #include <string>
 #include <thread>
 #include <unordered_map>
 #include <vector>
 
+#include "pj_bridge/middleware/bounded_frame_queue.hpp"
 #include "pj_bridge/middleware/middleware_interface.hpp"
 
 namespace pj_bridge {
 
+/// Server-side TLS configuration (certificate + private key paths). Both
+/// files are validated for existence/readability in initialize(), before any
+/// IXWebSocket TLS API is touched.
+struct TlsConfig {
+  std::string certfile;
+  std::string keyfile;
+};
+
 class WebSocketMiddleware : public MiddlewareInterface {
  public:
-  WebSocketMiddleware();
+  explicit WebSocketMiddleware(size_t client_backlog_size = 100, std::optional<TlsConfig> tls = std::nullopt);
   ~WebSocketMiddleware() override;
 
   WebSocketMiddleware(const WebSocketMiddleware&) = delete;
@@ -53,6 +65,11 @@ class WebSocketMiddleware : public MiddlewareInterface {
   bool is_ready() const override;
   void set_on_connect(ConnectionCallback callback) override;
   void set_on_disconnect(ConnectionCallback callback) override;
+  void drop_pending(const std::string& client_identity) override;
+
+  /// Total number of frames dropped due to slow-client backpressure, summed
+  /// across all clients (currently connected and already disconnected).
+  uint64_t dropped_frame_count() const;
 
  private:
   struct IncomingRequest {
@@ -66,7 +83,23 @@ class WebSocketMiddleware : public MiddlewareInterface {
   mutable std::mutex queue_mutex_;
 
   std::unordered_map<std::string, std::shared_ptr<ix::WebSocket>> clients_;
+  // Per-client backlog of frames withheld while the client's socket buffer is
+  // over the high watermark, and the steady-clock time each client's drop
+  // warning was last logged. Both are guarded by `clients_mutex_` (the same
+  // lock as `clients_`), not a separate mutex, so client lifecycle and
+  // pending-queue lifecycle stay consistent with each other.
+  std::unordered_map<std::string, BoundedFrameQueue> pending_frames_;
+  std::unordered_map<std::string, std::chrono::steady_clock::time_point> last_drop_warn_;
   mutable std::mutex clients_mutex_;
+
+  // Sum of dropped_total() from clients that have since disconnected (their
+  // BoundedFrameQueue entry is erased from pending_frames_ on disconnect, so
+  // its count is folded in here to keep dropped_frame_count() a lifetime
+  // total). Guarded by clients_mutex_.
+  uint64_t dropped_from_disconnected_{0};
+
+  size_t client_backlog_size_;
+  std::optional<TlsConfig> tls_;
 
   ConnectionCallback on_connect_;
   ConnectionCallback on_disconnect_;
@@ -78,6 +111,13 @@ class WebSocketMiddleware : public MiddlewareInterface {
 
   static constexpr int kShutdownTimeoutSeconds = 3;
   static constexpr size_t kMaxIncomingQueueSize = 1024;
+
+  // Lossy-send policy adapted from foxglove_bridge (MIT License, Copyright
+  // (c) Foxglove Technologies Inc): once a client's outgoing socket buffer
+  // exceeds this watermark, new frames are queued (dropping the oldest on
+  // overflow) instead of blocking or disconnecting the client.
+  static constexpr size_t kSocketBufferHighWatermark = 1u << 20;  // 1 MiB
+  static constexpr int kDropWarnIntervalSeconds = 30;
 };
 
 }  // namespace pj_bridge

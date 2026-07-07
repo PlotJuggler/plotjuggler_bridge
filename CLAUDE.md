@@ -197,7 +197,7 @@ Then, for each message in the (compressed) payload:
 
 ## Testing
 
-### Test Count: 176 unit tests across 11 test suites
+### Test Count: 231 unit tests across 11 test suites
 
 ### Commands
 ```bash
@@ -229,21 +229,37 @@ pre-commit run -a
 
 ### ROS2 (via `--ros-args -p`):
 ```yaml
-port: 9090                  # WebSocket port
-publish_rate: 50.0          # Hz
-session_timeout: 10.0       # seconds
-strip_large_messages: false # Opt-in: strip Image/PointCloud2/etc data fields
+port: 9090                     # WebSocket port
+publish_rate: 50.0             # Hz
+session_timeout: 10.0          # seconds
+strip_large_messages: false    # Opt-in: strip Image/PointCloud2/etc data fields
+topic_whitelist: [".*"]        # Full-match regex patterns restricting visible/subscribable topics
+min_qos_depth: 1               # Minimum KEEP_LAST subscription depth after aggregating publisher depths
+max_qos_depth: 100             # Maximum KEEP_LAST subscription depth after aggregating publisher depths
+topic_poll_interval: 1.0       # Seconds between topics_changed notification polls; 0 disables polling
+client_backlog_size: 100       # Max frames queued per slow client before dropping the oldest (must be > 0)
+tls: false                     # Enable TLS (wss://); requires certfile and keyfile
+certfile: ""                   # TLS server certificate file
+keyfile: ""                    # TLS private key file
 ```
 
 ### RTI (via CLI flags):
 ```bash
-pj_bridge_rti --domains 0 1 --port 9090 --publish-rate 50 --session-timeout 10
+pj_bridge_rti --domains 0 1 --port 9090 --publish-rate 50 --session-timeout 10 \
+  --topic-whitelist ".*" --topic-poll-interval 1.0 --client-backlog-size 100 \
+  --certfile cert.pem --keyfile key.pem
 ```
 
 ### FastDDS (via CLI flags):
 ```bash
-pj_bridge_fastdds --domains 0 1 --port 9090 --publish-rate 50 --session-timeout 10
+pj_bridge_fastdds --domains 0 1 --port 9090 --publish-rate 50 --session-timeout 10 \
+  --topic-whitelist ".*" --topic-poll-interval 1.0 --client-backlog-size 100 \
+  --certfile cert.pem --keyfile key.pem
 ```
+
+See `docs/API.md` for full semantics of each option (topic whitelist matching rules,
+QoS depth heuristics, `topics_changed` notification, backpressure policy, latched
+replay, and TLS setup).
 
 ## Important Design Decisions
 
@@ -261,7 +277,7 @@ pj_bridge_fastdds --domains 0 1 --port 9090 --publish-rate 50 --session-timeout 
 
 ---
 
-**Last Updated**: 2026-07-02
+**Last Updated**: 2026-07-06
 **Project Phase**: Unified multi-backend architecture
-**Test Status**: 176 unit tests passing (all sanitizers clean)
+**Test Status**: 231 unit tests passing (all sanitizers clean)
 **Executables**: `pj_bridge_ros2` (ROS2), `pj_bridge_rti` (RTI DDS, disabled), `pj_bridge_fastdds` (FastDDS)

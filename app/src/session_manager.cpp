@@ -222,4 +222,27 @@ bool SessionManager::is_paused(const std::string& client_id) const {
   return it->second.paused;
 }
 
+bool SessionManager::set_topic_updates(const std::string& client_id, bool enabled) {
+  std::lock_guard<std::mutex> lock(mutex_);
+
+  auto it = sessions_.find(client_id);
+  if (it == sessions_.end()) {
+    return false;
+  }
+
+  it->second.topic_updates = enabled;
+  return true;
+}
+
+bool SessionManager::wants_topic_updates(const std::string& client_id) const {
+  std::lock_guard<std::mutex> lock(mutex_);
+
+  auto it = sessions_.find(client_id);
+  if (it == sessions_.end()) {
+    return false;
+  }
+
+  return it->second.topic_updates;
+}
+
 }  // namespace pj_bridge
