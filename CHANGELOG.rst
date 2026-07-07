@@ -20,8 +20,20 @@ Changelog for package pj_ros_bridge
     topic (e.g. ``/tf_static``) immediately receive the retained last message
   - TLS (``wss://``): optional server-certificate TLS via OpenSSL
     (``tls``/``certfile``/``keyfile``, CMake option ``PJ_BRIDGE_TLS``)
+* Demand-driven client support (PlotJuggler 4 per-topic subscriptions):
+  - ``include_schemas`` opt-in on ``get_topics`` and ``subscribe_topic_updates``:
+    topic entries gain ``encoding``/``definition`` so clients can classify
+    topics BEFORE subscribing; per-topic schema failure keeps the topic
+    listed (name+type only)
+  - ``latched: true`` badge on ``get_topics`` / ``topics_changed`` entries
+    when discovery knows every publisher offers ``TRANSIENT_LOCAL``
+    (ROS2: live graph QoS query, no subscription needed); latched replay
+    after the subscribe response is now a documented protocol guarantee
+  - ``server`` object in ``get_topics`` responses: ``{name, version,
+    capabilities[]}`` — clients feature-detect by capability name;
+    ``protocol_version`` stays the only hard compatibility gate
 * All changes are additive; ``protocol_version`` remains ``1``
-* 231 unit tests passing (TSAN/ASAN clean)
+* 245 unit tests passing (TSAN/ASAN clean)
 
 0.1.0 (2026-02-11)
 ------------------

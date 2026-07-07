@@ -259,7 +259,8 @@ pj_bridge_fastdds --domains 0 1 --port 9090 --publish-rate 50 --session-timeout 
 
 See `docs/API.md` for full semantics of each option (topic whitelist matching rules,
 QoS depth heuristics, `topics_changed` notification, backpressure policy, latched
-replay, and TLS setup).
+replay and the `latched` badge, `include_schemas`, the `server`
+identity/capabilities object, and TLS setup).
 
 ## Important Design Decisions
 
