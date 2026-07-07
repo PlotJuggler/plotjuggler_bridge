@@ -245,4 +245,27 @@ bool SessionManager::wants_topic_updates(const std::string& client_id) const {
   return it->second.topic_updates;
 }
 
+bool SessionManager::set_include_schemas_in_updates(const std::string& client_id, bool enabled) {
+  std::lock_guard<std::mutex> lock(mutex_);
+
+  auto it = sessions_.find(client_id);
+  if (it == sessions_.end()) {
+    return false;
+  }
+
+  it->second.include_schemas_in_updates = enabled;
+  return true;
+}
+
+bool SessionManager::wants_schemas_in_updates(const std::string& client_id) const {
+  std::lock_guard<std::mutex> lock(mutex_);
+
+  auto it = sessions_.find(client_id);
+  if (it == sessions_.end()) {
+    return false;
+  }
+
+  return it->second.include_schemas_in_updates;
+}
+
 }  // namespace pj_bridge

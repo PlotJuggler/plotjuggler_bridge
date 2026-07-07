@@ -92,6 +92,43 @@ fully match any whitelist pattern are omitted from the response entirely (see
 }
 ```
 
+### Requesting schemas up front (`include_schemas`)
+
+By default `get_topics` returns only `name` + `type` per topic; schemas are
+delivered lazily on `subscribe`. A client that needs to classify topics before
+subscribing (e.g. by message type *and* schema) can set the optional
+`include_schemas` boolean to `true`:
+
+```json
+{"command": "get_topics", "id": "gt1", "include_schemas": true}
+```
+
+Each topic entry then additionally carries the same `encoding` and
+`definition` fields the [subscribe](#subscribe) response uses for schemas:
+
+```json
+{
+  "status": "success",
+  "id": "gt1",
+  "protocol_version": 1,
+  "topics": [
+    {"name": "/topic_name", "type": "package_name/msg/MessageType",
+     "encoding": "ros2msg", "definition": "message definition text"}
+  ]
+}
+```
+
+- `encoding` is the backend's schema encoding (`"ros2msg"` for ROS2,
+  `"omgidl"` for DDS).
+- The flag is purely additive: omitting it (or setting it to `false`) yields
+  the byte-for-byte name+type-only response above, so old and new clients
+  interoperate with old and new servers without a protocol bump.
+- **Per-topic schema failure never drops a topic.** If a topic's schema cannot
+  be extracted, that entry is still listed with `name` + `type` only (no
+  `encoding`/`definition`); the server logs a warning and continues. Clients
+  must therefore treat the schema fields as optional even when they asked for
+  them.
+
 ## Topic Whitelist
 
 The server can be configured with a list of regex patterns restricting which
@@ -318,6 +355,21 @@ topic set changes, instead of polling `get_topics`.
 {"status": "ok", "id": "tu1", "protocol_version": 1, "topic_updates": true}
 ```
 
+The request accepts the same optional `include_schemas` boolean as
+[`get_topics`](#requesting-schemas-up-front-include_schemas). When set to
+`true`, this session's `topics_changed` notifications carry per-topic schemas
+on their `added` entries (see below):
+
+```json
+{"command": "subscribe_topic_updates", "id": "tu1", "include_schemas": true}
+```
+
+The flag is stored per session and always taken from the latest
+`subscribe_topic_updates` request, so re-subscribing without it reverts to the
+name+type-only notification shape. It is independent of `topic_updates`
+itself — it only changes the shape of notifications, never whether they are
+sent.
+
 **Unsubscribe Request:**
 ```json
 {"command": "unsubscribe_topic_updates", "id": "tu2"}
@@ -343,10 +395,27 @@ changed since the last poll:
  "protocol_version": 1}
 ```
 
+For sessions that opted in with `include_schemas: true`, each `added` entry
+additionally carries `encoding` + `definition` (the same fields as
+[`get_topics`](#requesting-schemas-up-front-include_schemas) /
+[subscribe](#subscribe)); `removed` entries are unchanged (bare names):
+
+```json
+{"notification": "topics_changed",
+ "added": [{"name": "/t", "type": "pkg/msg/T",
+            "encoding": "ros2msg", "definition": "message definition text"}],
+ "removed": ["/gone"],
+ "protocol_version": 1}
+```
+
 - `added` and `removed` may each be empty, but a notification is only sent
   when at least one of them is non-empty.
 - A topic whose type changes (same name, different type) is reported as both
   removed and added.
+- **Per-topic schema failure never drops a topic** (same as `get_topics`): an
+  `added` entry whose schema cannot be extracted is delivered with `name` +
+  `type` only, no `encoding`/`definition`. Clients must treat the schema
+  fields as optional even when they opted in.
 - Only whitelisted topics (see [Topic Whitelist](#topic-whitelist)) are
   considered — a non-whitelisted topic appearing or disappearing never
   triggers a notification.

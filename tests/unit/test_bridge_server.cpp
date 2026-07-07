@@ -25,6 +25,7 @@
 #include <functional>
 #include <mutex>
 #include <nlohmann/json.hpp>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -245,6 +246,9 @@ class MockTopicSource : public TopicSourceInterface {
   }
 
   std::string get_schema(const std::string& topic_name) override {
+    if (throwing_schema_topics_.count(topic_name) > 0) {
+      throw std::runtime_error("simulated schema extraction failure");
+    }
     if (empty_schema_topics_.count(topic_name) > 0) {
       return "";  // legitimately empty definition (e.g. std_msgs/msg/Empty)
     }
@@ -277,9 +281,16 @@ class MockTopicSource : public TopicSourceInterface {
     empty_schema_topics_.insert(name);
   }
 
+  // Test helper: mark a topic whose get_schema() throws (simulating a backend
+  // schema-extraction failure).
+  void set_throwing_schema_topic(const std::string& name) {
+    throwing_schema_topics_.insert(name);
+  }
+
  private:
   std::vector<TopicInfo> topics_;
   std::unordered_set<std::string> empty_schema_topics_;
+  std::unordered_set<std::string> throwing_schema_topics_;
 };
 
 // ---------------------------------------------------------------------------
@@ -494,6 +505,119 @@ TEST_F(BridgeServerTest, HandleGetTopics) {
   EXPECT_EQ(reply["status"], "success");
   EXPECT_TRUE(reply.contains("topics"));
   EXPECT_TRUE(reply["topics"].is_array());
+}
+
+// ---------------------------------------------------------------------------
+// GetTopicsWithSchemasIncludesDefinitions
+//
+// When the client opts in with `include_schemas: true`, every topic entry
+// additionally carries `encoding` (schema_encoding()) and `definition`
+// (get_schema()) — the same field vocabulary the subscribe response uses.
+// ---------------------------------------------------------------------------
+TEST_F(BridgeServerTest, GetTopicsWithSchemasIncludesDefinitions) {
+  ASSERT_TRUE(server_->initialize());
+  mock_topic_source_->set_topics({{"/imu", "sensor_msgs/msg/Imu"}, {"/img", "sensor_msgs/msg/Image"}});
+
+  json req;
+  req["command"] = "get_topics";
+  req["include_schemas"] = true;
+  mock_->push_request("client_gs", req.dump());
+  server_->process_requests();
+
+  json reply = mock_->pop_reply("client_gs");
+  ASSERT_FALSE(reply.is_discarded());
+  EXPECT_EQ(reply["status"], "success");
+  ASSERT_TRUE(reply["topics"].is_array());
+  ASSERT_EQ(reply["topics"].size(), 2u);
+
+  for (const auto& entry : reply["topics"]) {
+    ASSERT_TRUE(entry.contains("name"));
+    ASSERT_TRUE(entry.contains("type"));
+    ASSERT_TRUE(entry.contains("encoding")) << "topic " << entry["name"] << " missing encoding";
+    ASSERT_TRUE(entry.contains("definition")) << "topic " << entry["name"] << " missing definition";
+    EXPECT_EQ(entry["encoding"], "ros2msg");
+    EXPECT_EQ(entry["definition"], "uint32 seq\nstring data\n");
+  }
+}
+
+// ---------------------------------------------------------------------------
+// GetTopicsWithoutSchemasHasNoSchemaFields  (regression pin)
+//
+// Absent (or false) `include_schemas` must yield today's byte-for-byte
+// behavior: name+type only, no schema fields.
+// ---------------------------------------------------------------------------
+TEST_F(BridgeServerTest, GetTopicsWithoutSchemasHasNoSchemaFields) {
+  ASSERT_TRUE(server_->initialize());
+  mock_topic_source_->set_topics({{"/imu", "sensor_msgs/msg/Imu"}});
+
+  // No include_schemas field at all.
+  json req;
+  req["command"] = "get_topics";
+  mock_->push_request("client_ns", req.dump());
+  server_->process_requests();
+
+  json reply = mock_->pop_reply("client_ns");
+  ASSERT_FALSE(reply.is_discarded());
+  ASSERT_EQ(reply["topics"].size(), 1u);
+  EXPECT_EQ(reply["topics"][0]["name"], "/imu");
+  EXPECT_EQ(reply["topics"][0]["type"], "sensor_msgs/msg/Imu");
+  EXPECT_FALSE(reply["topics"][0].contains("encoding"));
+  EXPECT_FALSE(reply["topics"][0].contains("definition"));
+
+  // Explicit include_schemas: false behaves identically.
+  json req_false;
+  req_false["command"] = "get_topics";
+  req_false["include_schemas"] = false;
+  mock_->push_request("client_ns", req_false.dump());
+  server_->process_requests();
+
+  json reply_false = mock_->pop_reply("client_ns");
+  ASSERT_FALSE(reply_false.is_discarded());
+  ASSERT_EQ(reply_false["topics"].size(), 1u);
+  EXPECT_FALSE(reply_false["topics"][0].contains("encoding"));
+  EXPECT_FALSE(reply_false["topics"][0].contains("definition"));
+}
+
+// ---------------------------------------------------------------------------
+// GetTopicsSchemaFailureStillListsTopic
+//
+// A per-topic schema-extraction failure must not fail or drop anything: the
+// offending topic is still listed (name+type only, no schema fields), and
+// other topics still carry their schemas.
+// ---------------------------------------------------------------------------
+TEST_F(BridgeServerTest, GetTopicsSchemaFailureStillListsTopic) {
+  ASSERT_TRUE(server_->initialize());
+  mock_topic_source_->set_topics({{"/good", "std_msgs/msg/String"}, {"/bad", "std_msgs/msg/String"}});
+  mock_topic_source_->set_throwing_schema_topic("/bad");
+
+  json req;
+  req["command"] = "get_topics";
+  req["include_schemas"] = true;
+  mock_->push_request("client_sf", req.dump());
+  server_->process_requests();
+
+  json reply = mock_->pop_reply("client_sf");
+  ASSERT_FALSE(reply.is_discarded());
+  EXPECT_EQ(reply["status"], "success");
+  ASSERT_EQ(reply["topics"].size(), 2u);
+
+  // Both topics present; only the failing one lacks schema fields.
+  bool saw_good = false;
+  bool saw_bad = false;
+  for (const auto& entry : reply["topics"]) {
+    if (entry["name"] == "/good") {
+      saw_good = true;
+      EXPECT_TRUE(entry.contains("encoding"));
+      EXPECT_TRUE(entry.contains("definition"));
+    } else if (entry["name"] == "/bad") {
+      saw_bad = true;
+      EXPECT_EQ(entry["type"], "std_msgs/msg/String");
+      EXPECT_FALSE(entry.contains("encoding"));
+      EXPECT_FALSE(entry.contains("definition"));
+    }
+  }
+  EXPECT_TRUE(saw_good);
+  EXPECT_TRUE(saw_bad);
 }
 
 // ---------------------------------------------------------------------------
@@ -2504,6 +2628,69 @@ TEST_F(BridgeServerTest, UnsubscribeTopicUpdatesStopsNotifications) {
 
   auto replies = mock_->get_replies("client_x");
   EXPECT_TRUE(replies.empty());
+}
+
+// TopicsChangedIncludesSchemasWhenClientOptedIn
+//
+// A session that opts into topic updates WITH include_schemas:true receives
+// schema fields (encoding+definition) on each `added` entry; removed entries
+// stay unchanged (bare names).
+TEST_F(BridgeServerTest, TopicsChangedIncludesSchemasWhenClientOptedIn) {
+  ASSERT_TRUE(server_->initialize());
+  mock_topic_source_->set_topics({{"/a", "std_msgs/msg/String"}});
+
+  json sub;
+  sub["command"] = "subscribe_topic_updates";
+  sub["include_schemas"] = true;
+  mock_->push_request("client_schema_updates", sub.dump());
+  server_->process_requests();
+
+  server_->check_topic_changes();  // first call: snapshot only
+  mock_->clear_replies();
+
+  mock_topic_source_->set_topics({{"/a", "std_msgs/msg/String"}, {"/b", "sensor_msgs/msg/Imu"}});
+  server_->check_topic_changes();
+
+  auto replies = mock_->get_replies("client_schema_updates");
+  ASSERT_EQ(replies.size(), 1u);
+  json notif = replies[0];
+  EXPECT_EQ(notif["notification"], "topics_changed");
+  ASSERT_EQ(notif["added"].size(), 1u);
+  EXPECT_EQ(notif["added"][0]["name"], "/b");
+  EXPECT_EQ(notif["added"][0]["type"], "sensor_msgs/msg/Imu");
+  ASSERT_TRUE(notif["added"][0].contains("encoding"));
+  ASSERT_TRUE(notif["added"][0].contains("definition"));
+  EXPECT_EQ(notif["added"][0]["encoding"], "ros2msg");
+  EXPECT_EQ(notif["added"][0]["definition"], "uint32 seq\nstring data\n");
+}
+
+// TopicsChangedOmitsSchemasWhenClientDidNotOptIn
+//
+// A session opted into topic updates WITHOUT include_schemas gets today's
+// name+type-only `added` entries — no schema fields.
+TEST_F(BridgeServerTest, TopicsChangedOmitsSchemasWhenClientDidNotOptIn) {
+  ASSERT_TRUE(server_->initialize());
+  mock_topic_source_->set_topics({{"/a", "std_msgs/msg/String"}});
+
+  json sub;
+  sub["command"] = "subscribe_topic_updates";  // no include_schemas flag
+  mock_->push_request("client_plain_updates", sub.dump());
+  server_->process_requests();
+
+  server_->check_topic_changes();  // snapshot
+  mock_->clear_replies();
+
+  mock_topic_source_->set_topics({{"/a", "std_msgs/msg/String"}, {"/b", "sensor_msgs/msg/Imu"}});
+  server_->check_topic_changes();
+
+  auto replies = mock_->get_replies("client_plain_updates");
+  ASSERT_EQ(replies.size(), 1u);
+  json notif = replies[0];
+  ASSERT_EQ(notif["added"].size(), 1u);
+  EXPECT_EQ(notif["added"][0]["name"], "/b");
+  EXPECT_EQ(notif["added"][0]["type"], "sensor_msgs/msg/Imu");
+  EXPECT_FALSE(notif["added"][0].contains("encoding"));
+  EXPECT_FALSE(notif["added"][0].contains("definition"));
 }
 
 // ---------------------------------------------------------------------------
