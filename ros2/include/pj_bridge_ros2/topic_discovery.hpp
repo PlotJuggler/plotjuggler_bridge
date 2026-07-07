@@ -45,6 +45,15 @@ class TopicDiscovery {
    */
   std::vector<TopicInfo> discover_topics();
 
+  /**
+   * @brief Whether every discovered publisher of the topic offers
+   * TRANSIENT_LOCAL durability (the same rule the subscription manager's
+   * adapt_qos applies at subscribe time, evaluated here WITHOUT subscribing —
+   * a live graph query, so it works for topics no client has requested yet).
+   * False when the topic has no publishers.
+   */
+  bool is_transient_local(const std::string& topic_name) const;
+
  private:
   rclcpp::Node::SharedPtr node_;
 

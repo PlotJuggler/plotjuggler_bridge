@@ -58,4 +58,8 @@ std::string Ros2TopicSource::schema_encoding() const {
   return kSchemaEncodingRos2Msg;
 }
 
+bool Ros2TopicSource::is_transient_local(const std::string& topic_name) const {
+  return topic_discovery_.is_transient_local(topic_name);
+}
+
 }  // namespace pj_bridge

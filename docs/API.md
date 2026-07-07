@@ -129,6 +129,34 @@ Each topic entry then additionally carries the same `encoding` and
   must therefore treat the schema fields as optional even when they asked for
   them.
 
+### Latched (transient-local) topics
+
+Some topics publish a retained sample that late subscribers depend on —
+`/tf_static` (typically ONE message per session, carrying the robot's static
+geometry), `/map`, and similar. Two protocol guarantees make these safe under
+per-topic, subscribe-on-demand clients, where **every** subscriber is a late
+subscriber by construction:
+
+1. **Latched replay (server MUST).** Immediately after a `subscribe` (or
+   `resume`) response that adds a transient-local topic, and before any live
+   data for it, the server sends the topic's retained sample(s) as a normal
+   binary data frame. The reply ordering matters: the response carries the
+   schema, so the client can always decode the replayed frame.
+2. **The `latched` badge (server SHOULD).** When the server *knows* a topic is
+   transient-local — the ROS2 backend queries the discovered publishers'
+   durability QoS, without subscribing — the topic's entry in `get_topics`
+   responses and `topics_changed.added` carries `"latched": true`:
+
+```json
+{"name": "/tf_static", "type": "tf2_msgs/msg/TFMessage", "latched": true}
+```
+
+   The key is **absent** otherwise: absent means "not latched, or unknown" —
+   backends without discovery-time QoS knowledge stay silent rather than
+   claiming `false`. The badge is independent of `include_schemas` and is
+   informational (UI, diagnostics); correctness relies only on guarantee 1.
+   As everywhere in this protocol, clients must ignore unknown fields.
+
 ## Topic Whitelist
 
 The server can be configured with a list of regex patterns restricting which
@@ -394,6 +422,9 @@ changed since the last poll:
  "removed": ["/gone"],
  "protocol_version": 1}
 ```
+
+`added` entries carry the same optional `"latched": true` badge as
+[`get_topics`](#latched-transient-local-topics) entries.
 
 For sessions that opted in with `include_schemas: true`, each `added` entry
 additionally carries `encoding` + `definition` (the same fields as

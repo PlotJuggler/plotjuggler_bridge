@@ -267,6 +267,14 @@ std::string BridgeServer::handle_get_topics(const std::string& client_id, const 
     json topic_entry;
     topic_entry["name"] = topic.name;
     topic_entry["type"] = topic.type;
+    // `latched: true` only when discovery KNOWS the topic is transient-local
+    // (its retained sample is replayed on subscribe — see docs/API.md).
+    // Absent otherwise: backends without discovery-time QoS knowledge must
+    // not claim false. Independent of include_schemas — a UI badge should not
+    // require pulling every schema.
+    if (topic_source_->is_transient_local(topic.name)) {
+      topic_entry["latched"] = true;
+    }
     if (include_schemas) {
       attach_schema_fields(topic_entry, topic.name);
     }
@@ -792,6 +800,9 @@ void BridgeServer::check_topic_changes() {
         json entry;
         entry["name"] = name;
         entry["type"] = type;
+        if (topic_source_->is_transient_local(name)) {
+          entry["latched"] = true;  // same badge as get_topics
+        }
         added.push_back(entry);
       }
     }

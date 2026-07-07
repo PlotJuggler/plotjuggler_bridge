@@ -26,6 +26,7 @@
 #include <mutex>
 #include <nlohmann/json.hpp>
 #include <stdexcept>
+#include <set>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -245,6 +246,16 @@ class MockTopicSource : public TopicSourceInterface {
     return topics_;
   }
 
+  bool is_transient_local(const std::string& topic_name) const override {
+    return latched_topics_.count(topic_name) > 0;
+  }
+
+  /// Mark a topic as known-transient-local at DISCOVERY time (get_topics /
+  /// topics_changed badge the entry `latched: true`).
+  void set_latched_topics(std::set<std::string> topics) {
+    latched_topics_ = std::move(topics);
+  }
+
   std::string get_schema(const std::string& topic_name) override {
     if (throwing_schema_topics_.count(topic_name) > 0) {
       throw std::runtime_error("simulated schema extraction failure");
@@ -289,6 +300,7 @@ class MockTopicSource : public TopicSourceInterface {
 
  private:
   std::vector<TopicInfo> topics_;
+  std::set<std::string> latched_topics_;
   std::unordered_set<std::string> empty_schema_topics_;
   std::unordered_set<std::string> throwing_schema_topics_;
 };
@@ -2635,6 +2647,67 @@ TEST_F(BridgeServerTest, UnsubscribeTopicUpdatesStopsNotifications) {
 // A session that opts into topic updates WITH include_schemas:true receives
 // schema fields (encoding+definition) on each `added` entry; removed entries
 // stay unchanged (bare names).
+// GetTopicsMarksLatchedTopics
+//
+// A topic the discovery layer knows is TRANSIENT_LOCAL carries `latched: true`
+// in its get_topics entry; all other topics carry NO `latched` key (absent =
+// not latched or unknown — backends without discovery-time QoS knowledge stay
+// silent rather than claiming false). Independent of include_schemas.
+TEST_F(BridgeServerTest, GetTopicsMarksLatchedTopics) {
+  ASSERT_TRUE(server_->initialize());
+  mock_topic_source_->set_topics({{"/tf_static", "tf2_msgs/msg/TFMessage"}, {"/imu", "sensor_msgs/msg/Imu"}});
+  mock_topic_source_->set_latched_topics({"/tf_static"});
+
+  for (const bool with_schemas : {false, true}) {
+    json req;
+    req["command"] = "get_topics";
+    if (with_schemas) {
+      req["include_schemas"] = true;
+    }
+    mock_->clear_replies();
+    mock_->push_request("client_latched", req.dump());
+    server_->process_requests();
+
+    auto replies = mock_->get_replies("client_latched");
+    ASSERT_EQ(replies.size(), 1u);
+    for (const auto& entry : replies[0]["topics"]) {
+      if (entry["name"] == "/tf_static") {
+        ASSERT_TRUE(entry.contains("latched")) << "with_schemas=" << with_schemas;
+        EXPECT_EQ(entry["latched"], true);
+      } else {
+        EXPECT_FALSE(entry.contains("latched")) << entry.dump();
+      }
+    }
+  }
+}
+
+// TopicsChangedAddedEntriesCarryLatched
+//
+// A late-appearing transient-local topic is badged in the topics_changed push
+// too, so a client that missed the initial get_topics still learns it.
+TEST_F(BridgeServerTest, TopicsChangedAddedEntriesCarryLatched) {
+  ASSERT_TRUE(server_->initialize());
+  mock_topic_source_->set_topics({{"/a", "std_msgs/msg/String"}});
+
+  json sub;
+  sub["command"] = "subscribe_topic_updates";
+  mock_->push_request("client_latched_updates", sub.dump());
+  server_->process_requests();
+
+  server_->check_topic_changes();  // snapshot
+  mock_->clear_replies();
+
+  mock_topic_source_->set_topics({{"/a", "std_msgs/msg/String"}, {"/map", "nav_msgs/msg/OccupancyGrid"}});
+  mock_topic_source_->set_latched_topics({"/map"});
+  server_->check_topic_changes();
+
+  auto replies = mock_->get_replies("client_latched_updates");
+  ASSERT_EQ(replies.size(), 1u);
+  ASSERT_EQ(replies[0]["added"].size(), 1u);
+  EXPECT_EQ(replies[0]["added"][0]["name"], "/map");
+  EXPECT_EQ(replies[0]["added"][0]["latched"], true);
+}
+
 TEST_F(BridgeServerTest, TopicsChangedIncludesSchemasWhenClientOptedIn) {
   ASSERT_TRUE(server_->initialize());
   mock_topic_source_->set_topics({{"/a", "std_msgs/msg/String"}});
