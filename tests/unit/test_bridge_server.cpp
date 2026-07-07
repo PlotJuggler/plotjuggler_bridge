@@ -25,6 +25,8 @@
 #include <functional>
 #include <mutex>
 #include <nlohmann/json.hpp>
+#include <stdexcept>
+#include <set>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -244,7 +246,20 @@ class MockTopicSource : public TopicSourceInterface {
     return topics_;
   }
 
+  bool is_transient_local(const std::string& topic_name) const override {
+    return latched_topics_.count(topic_name) > 0;
+  }
+
+  /// Mark a topic as known-transient-local at DISCOVERY time (get_topics /
+  /// topics_changed badge the entry `latched: true`).
+  void set_latched_topics(std::set<std::string> topics) {
+    latched_topics_ = std::move(topics);
+  }
+
   std::string get_schema(const std::string& topic_name) override {
+    if (throwing_schema_topics_.count(topic_name) > 0) {
+      throw std::runtime_error("simulated schema extraction failure");
+    }
     if (empty_schema_topics_.count(topic_name) > 0) {
       return "";  // legitimately empty definition (e.g. std_msgs/msg/Empty)
     }
@@ -277,9 +292,17 @@ class MockTopicSource : public TopicSourceInterface {
     empty_schema_topics_.insert(name);
   }
 
+  // Test helper: mark a topic whose get_schema() throws (simulating a backend
+  // schema-extraction failure).
+  void set_throwing_schema_topic(const std::string& name) {
+    throwing_schema_topics_.insert(name);
+  }
+
  private:
   std::vector<TopicInfo> topics_;
+  std::set<std::string> latched_topics_;
   std::unordered_set<std::string> empty_schema_topics_;
+  std::unordered_set<std::string> throwing_schema_topics_;
 };
 
 // ---------------------------------------------------------------------------
@@ -494,6 +517,119 @@ TEST_F(BridgeServerTest, HandleGetTopics) {
   EXPECT_EQ(reply["status"], "success");
   EXPECT_TRUE(reply.contains("topics"));
   EXPECT_TRUE(reply["topics"].is_array());
+}
+
+// ---------------------------------------------------------------------------
+// GetTopicsWithSchemasIncludesDefinitions
+//
+// When the client opts in with `include_schemas: true`, every topic entry
+// additionally carries `encoding` (schema_encoding()) and `definition`
+// (get_schema()) — the same field vocabulary the subscribe response uses.
+// ---------------------------------------------------------------------------
+TEST_F(BridgeServerTest, GetTopicsWithSchemasIncludesDefinitions) {
+  ASSERT_TRUE(server_->initialize());
+  mock_topic_source_->set_topics({{"/imu", "sensor_msgs/msg/Imu"}, {"/img", "sensor_msgs/msg/Image"}});
+
+  json req;
+  req["command"] = "get_topics";
+  req["include_schemas"] = true;
+  mock_->push_request("client_gs", req.dump());
+  server_->process_requests();
+
+  json reply = mock_->pop_reply("client_gs");
+  ASSERT_FALSE(reply.is_discarded());
+  EXPECT_EQ(reply["status"], "success");
+  ASSERT_TRUE(reply["topics"].is_array());
+  ASSERT_EQ(reply["topics"].size(), 2u);
+
+  for (const auto& entry : reply["topics"]) {
+    ASSERT_TRUE(entry.contains("name"));
+    ASSERT_TRUE(entry.contains("type"));
+    ASSERT_TRUE(entry.contains("encoding")) << "topic " << entry["name"] << " missing encoding";
+    ASSERT_TRUE(entry.contains("definition")) << "topic " << entry["name"] << " missing definition";
+    EXPECT_EQ(entry["encoding"], "ros2msg");
+    EXPECT_EQ(entry["definition"], "uint32 seq\nstring data\n");
+  }
+}
+
+// ---------------------------------------------------------------------------
+// GetTopicsWithoutSchemasHasNoSchemaFields  (regression pin)
+//
+// Absent (or false) `include_schemas` must yield today's byte-for-byte
+// behavior: name+type only, no schema fields.
+// ---------------------------------------------------------------------------
+TEST_F(BridgeServerTest, GetTopicsWithoutSchemasHasNoSchemaFields) {
+  ASSERT_TRUE(server_->initialize());
+  mock_topic_source_->set_topics({{"/imu", "sensor_msgs/msg/Imu"}});
+
+  // No include_schemas field at all.
+  json req;
+  req["command"] = "get_topics";
+  mock_->push_request("client_ns", req.dump());
+  server_->process_requests();
+
+  json reply = mock_->pop_reply("client_ns");
+  ASSERT_FALSE(reply.is_discarded());
+  ASSERT_EQ(reply["topics"].size(), 1u);
+  EXPECT_EQ(reply["topics"][0]["name"], "/imu");
+  EXPECT_EQ(reply["topics"][0]["type"], "sensor_msgs/msg/Imu");
+  EXPECT_FALSE(reply["topics"][0].contains("encoding"));
+  EXPECT_FALSE(reply["topics"][0].contains("definition"));
+
+  // Explicit include_schemas: false behaves identically.
+  json req_false;
+  req_false["command"] = "get_topics";
+  req_false["include_schemas"] = false;
+  mock_->push_request("client_ns", req_false.dump());
+  server_->process_requests();
+
+  json reply_false = mock_->pop_reply("client_ns");
+  ASSERT_FALSE(reply_false.is_discarded());
+  ASSERT_EQ(reply_false["topics"].size(), 1u);
+  EXPECT_FALSE(reply_false["topics"][0].contains("encoding"));
+  EXPECT_FALSE(reply_false["topics"][0].contains("definition"));
+}
+
+// ---------------------------------------------------------------------------
+// GetTopicsSchemaFailureStillListsTopic
+//
+// A per-topic schema-extraction failure must not fail or drop anything: the
+// offending topic is still listed (name+type only, no schema fields), and
+// other topics still carry their schemas.
+// ---------------------------------------------------------------------------
+TEST_F(BridgeServerTest, GetTopicsSchemaFailureStillListsTopic) {
+  ASSERT_TRUE(server_->initialize());
+  mock_topic_source_->set_topics({{"/good", "std_msgs/msg/String"}, {"/bad", "std_msgs/msg/String"}});
+  mock_topic_source_->set_throwing_schema_topic("/bad");
+
+  json req;
+  req["command"] = "get_topics";
+  req["include_schemas"] = true;
+  mock_->push_request("client_sf", req.dump());
+  server_->process_requests();
+
+  json reply = mock_->pop_reply("client_sf");
+  ASSERT_FALSE(reply.is_discarded());
+  EXPECT_EQ(reply["status"], "success");
+  ASSERT_EQ(reply["topics"].size(), 2u);
+
+  // Both topics present; only the failing one lacks schema fields.
+  bool saw_good = false;
+  bool saw_bad = false;
+  for (const auto& entry : reply["topics"]) {
+    if (entry["name"] == "/good") {
+      saw_good = true;
+      EXPECT_TRUE(entry.contains("encoding"));
+      EXPECT_TRUE(entry.contains("definition"));
+    } else if (entry["name"] == "/bad") {
+      saw_bad = true;
+      EXPECT_EQ(entry["type"], "std_msgs/msg/String");
+      EXPECT_FALSE(entry.contains("encoding"));
+      EXPECT_FALSE(entry.contains("definition"));
+    }
+  }
+  EXPECT_TRUE(saw_good);
+  EXPECT_TRUE(saw_bad);
 }
 
 // ---------------------------------------------------------------------------
@@ -2504,6 +2640,158 @@ TEST_F(BridgeServerTest, UnsubscribeTopicUpdatesStopsNotifications) {
 
   auto replies = mock_->get_replies("client_x");
   EXPECT_TRUE(replies.empty());
+}
+
+// TopicsChangedIncludesSchemasWhenClientOptedIn
+//
+// A session that opts into topic updates WITH include_schemas:true receives
+// schema fields (encoding+definition) on each `added` entry; removed entries
+// stay unchanged (bare names).
+// GetTopicsMarksLatchedTopics
+//
+// A topic the discovery layer knows is TRANSIENT_LOCAL carries `latched: true`
+// in its get_topics entry; all other topics carry NO `latched` key (absent =
+// not latched or unknown — backends without discovery-time QoS knowledge stay
+// silent rather than claiming false). Independent of include_schemas.
+// GetTopicsCarriesServerInfo
+//
+// The get_topics response identifies the server and lists its capabilities so
+// clients can feature-detect by NAME (and warn precisely on missing features)
+// instead of comparing version strings. protocol_version remains the only
+// hard compatibility gate.
+TEST_F(BridgeServerTest, GetTopicsCarriesServerInfo) {
+  ASSERT_TRUE(server_->initialize());
+  mock_topic_source_->set_topics({{"/a", "std_msgs/msg/String"}});
+
+  json req;
+  req["command"] = "get_topics";
+  mock_->push_request("client_info", req.dump());
+  server_->process_requests();
+
+  auto replies = mock_->get_replies("client_info");
+  ASSERT_EQ(replies.size(), 1u);
+  ASSERT_TRUE(replies[0].contains("server"));
+  const json& info = replies[0]["server"];
+  EXPECT_EQ(info["name"], "pj_bridge");
+  EXPECT_FALSE(info["version"].get<std::string>().empty());
+  ASSERT_TRUE(info["capabilities"].is_array());
+  const auto& caps = info["capabilities"];
+  for (const char* expected : {"include_schemas", "latched_badge", "latched_replay", "topics_changed"}) {
+    EXPECT_TRUE(std::find(caps.begin(), caps.end(), json(expected)) != caps.end()) << "missing " << expected;
+  }
+}
+
+TEST_F(BridgeServerTest, GetTopicsMarksLatchedTopics) {
+  ASSERT_TRUE(server_->initialize());
+  mock_topic_source_->set_topics({{"/tf_static", "tf2_msgs/msg/TFMessage"}, {"/imu", "sensor_msgs/msg/Imu"}});
+  mock_topic_source_->set_latched_topics({"/tf_static"});
+
+  for (const bool with_schemas : {false, true}) {
+    json req;
+    req["command"] = "get_topics";
+    if (with_schemas) {
+      req["include_schemas"] = true;
+    }
+    mock_->clear_replies();
+    mock_->push_request("client_latched", req.dump());
+    server_->process_requests();
+
+    auto replies = mock_->get_replies("client_latched");
+    ASSERT_EQ(replies.size(), 1u);
+    for (const auto& entry : replies[0]["topics"]) {
+      if (entry["name"] == "/tf_static") {
+        ASSERT_TRUE(entry.contains("latched")) << "with_schemas=" << with_schemas;
+        EXPECT_EQ(entry["latched"], true);
+      } else {
+        EXPECT_FALSE(entry.contains("latched")) << entry.dump();
+      }
+    }
+  }
+}
+
+// TopicsChangedAddedEntriesCarryLatched
+//
+// A late-appearing transient-local topic is badged in the topics_changed push
+// too, so a client that missed the initial get_topics still learns it.
+TEST_F(BridgeServerTest, TopicsChangedAddedEntriesCarryLatched) {
+  ASSERT_TRUE(server_->initialize());
+  mock_topic_source_->set_topics({{"/a", "std_msgs/msg/String"}});
+
+  json sub;
+  sub["command"] = "subscribe_topic_updates";
+  mock_->push_request("client_latched_updates", sub.dump());
+  server_->process_requests();
+
+  server_->check_topic_changes();  // snapshot
+  mock_->clear_replies();
+
+  mock_topic_source_->set_topics({{"/a", "std_msgs/msg/String"}, {"/map", "nav_msgs/msg/OccupancyGrid"}});
+  mock_topic_source_->set_latched_topics({"/map"});
+  server_->check_topic_changes();
+
+  auto replies = mock_->get_replies("client_latched_updates");
+  ASSERT_EQ(replies.size(), 1u);
+  ASSERT_EQ(replies[0]["added"].size(), 1u);
+  EXPECT_EQ(replies[0]["added"][0]["name"], "/map");
+  EXPECT_EQ(replies[0]["added"][0]["latched"], true);
+}
+
+TEST_F(BridgeServerTest, TopicsChangedIncludesSchemasWhenClientOptedIn) {
+  ASSERT_TRUE(server_->initialize());
+  mock_topic_source_->set_topics({{"/a", "std_msgs/msg/String"}});
+
+  json sub;
+  sub["command"] = "subscribe_topic_updates";
+  sub["include_schemas"] = true;
+  mock_->push_request("client_schema_updates", sub.dump());
+  server_->process_requests();
+
+  server_->check_topic_changes();  // first call: snapshot only
+  mock_->clear_replies();
+
+  mock_topic_source_->set_topics({{"/a", "std_msgs/msg/String"}, {"/b", "sensor_msgs/msg/Imu"}});
+  server_->check_topic_changes();
+
+  auto replies = mock_->get_replies("client_schema_updates");
+  ASSERT_EQ(replies.size(), 1u);
+  json notif = replies[0];
+  EXPECT_EQ(notif["notification"], "topics_changed");
+  ASSERT_EQ(notif["added"].size(), 1u);
+  EXPECT_EQ(notif["added"][0]["name"], "/b");
+  EXPECT_EQ(notif["added"][0]["type"], "sensor_msgs/msg/Imu");
+  ASSERT_TRUE(notif["added"][0].contains("encoding"));
+  ASSERT_TRUE(notif["added"][0].contains("definition"));
+  EXPECT_EQ(notif["added"][0]["encoding"], "ros2msg");
+  EXPECT_EQ(notif["added"][0]["definition"], "uint32 seq\nstring data\n");
+}
+
+// TopicsChangedOmitsSchemasWhenClientDidNotOptIn
+//
+// A session opted into topic updates WITHOUT include_schemas gets today's
+// name+type-only `added` entries — no schema fields.
+TEST_F(BridgeServerTest, TopicsChangedOmitsSchemasWhenClientDidNotOptIn) {
+  ASSERT_TRUE(server_->initialize());
+  mock_topic_source_->set_topics({{"/a", "std_msgs/msg/String"}});
+
+  json sub;
+  sub["command"] = "subscribe_topic_updates";  // no include_schemas flag
+  mock_->push_request("client_plain_updates", sub.dump());
+  server_->process_requests();
+
+  server_->check_topic_changes();  // snapshot
+  mock_->clear_replies();
+
+  mock_topic_source_->set_topics({{"/a", "std_msgs/msg/String"}, {"/b", "sensor_msgs/msg/Imu"}});
+  server_->check_topic_changes();
+
+  auto replies = mock_->get_replies("client_plain_updates");
+  ASSERT_EQ(replies.size(), 1u);
+  json notif = replies[0];
+  ASSERT_EQ(notif["added"].size(), 1u);
+  EXPECT_EQ(notif["added"][0]["name"], "/b");
+  EXPECT_EQ(notif["added"][0]["type"], "sensor_msgs/msg/Imu");
+  EXPECT_FALSE(notif["added"][0].contains("encoding"));
+  EXPECT_FALSE(notif["added"][0].contains("definition"));
 }
 
 // ---------------------------------------------------------------------------

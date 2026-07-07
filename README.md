@@ -27,7 +27,9 @@ independently.
 - **QoS Depth Heuristics** (ROS2 only): KEEP_LAST subscription depth is derived from the discovered publishers' depths and clamped to a configurable `[min_qos_depth, max_qos_depth]` range
 - **Pushed Topic Advertisement** (opt-in): Clients can subscribe to a `topics_changed` notification instead of polling `get_topics`, at a configurable `topic_poll_interval`
 - **Slow-Client Backpressure**: A bounded, drop-oldest per-client send queue (`client_backlog_size`) keeps a lagging client from blocking the publish loop or growing an unbounded backlog, instead of disconnecting it
-- **Latched Topic Replay** (ROS2 only): New subscribers to a `TRANSIENT_LOCAL` topic (e.g. `/tf_static`) immediately receive the retained last message instead of waiting for the next publish
+- **Latched Topic Replay** (ROS2 only): New subscribers to a `TRANSIENT_LOCAL` topic (e.g. `/tf_static`) immediately receive the retained last message instead of waiting for the next publish; such topics are badged `latched: true` in `get_topics`
+- **Schemas Up Front** (opt-in): `get_topics`/`subscribe_topic_updates` accept `include_schemas` so demand-driven clients (PlotJuggler 4) can classify topics before subscribing
+- **Capability Discovery**: `get_topics` responses identify the server (`name`, `version`) and list its `capabilities`, so clients feature-detect additive protocol features by name — `protocol_version` remains the only hard compatibility gate
 - **TLS / `wss://`** (opt-in): Serve the WebSocket endpoint over TLS with a server certificate + private key (`tls`/`--certfile`+`--keyfile`); clients connect via `wss://` instead of `ws://`
 
 ## CI Status

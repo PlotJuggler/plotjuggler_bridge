@@ -59,6 +59,17 @@ class TopicSourceInterface {
   /// Used in the subscribe response so clients know how to parse the schema.
   /// @return "ros2msg" for ROS2, "omgidl" for RTI DDS.
   virtual std::string schema_encoding() const = 0;
+
+  /// True when the DISCOVERY layer knows every publisher of `topic_name`
+  /// offers TRANSIENT_LOCAL durability — usable BEFORE any subscription
+  /// exists (unlike SubscriptionManagerInterface::is_transient_local, which is
+  /// only meaningful while subscribed). Drives the `latched: true` badge on
+  /// get_topics / topics_changed entries. Backends without discovery-time QoS
+  /// knowledge return false: the badge is then simply absent (absent = "not
+  /// latched or unknown"), never a false claim.
+  virtual bool is_transient_local(const std::string& /*topic_name*/) const {
+    return false;
+  }
 };
 
 }  // namespace pj_bridge

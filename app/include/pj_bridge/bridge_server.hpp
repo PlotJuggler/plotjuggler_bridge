@@ -151,6 +151,34 @@ class BridgeServer {
   void inject_response_fields(nlohmann::json& response, const nlohmann::json& request) const;
   void cleanup_session(const std::string& client_id);
 
+  /// Extract a topic's schema, turning get_schema()'s throw-on-failure
+  /// contract into a bool. On success @p schema_out holds the definition
+  /// (which may legitimately be empty, e.g. std_msgs/msg/Empty); on failure
+  /// returns false with the exception's message in @p error_out. The caller
+  /// decides what a failure means — the subscribe path fails that one
+  /// subscription, while the get_topics / topics_changed paths keep the topic
+  /// listed without schema fields. Shared to keep both paths' extraction and
+  /// failure handling identical.
+  bool extract_schema(const std::string& topic_name, std::string& schema_out, std::string& error_out) const;
+
+  /// Defensive optional-bool read: false unless @p key is present AND boolean
+  /// (nlohmann's value() would throw on a wrong-typed value). Shared by every
+  /// handler reading an opt-in flag off the wire.
+  static bool optional_bool(const nlohmann::json& request, const char* key);
+
+  /// Stamp `latched: true` on a topic-entry when the topic is transient-local;
+  /// leave the key absent otherwise. Shared by get_topics and topics_changed.
+  void attach_latched_badge(nlohmann::json& topic_entry, const std::string& topic_name) const;
+
+  /// Add `encoding` + `definition` schema fields to a topic list entry when a
+  /// client opts into up-front schemas (get_topics / topics_changed
+  /// `include_schemas`). A per-topic extraction failure is swallowed: the
+  /// entry is left as name+type only and a warning is logged, so one bad
+  /// schema never drops a topic from the list — the same principle the
+  /// subscribe path follows for the topic list. Uses the same `encoding` /
+  /// `definition` field names as the subscribe response.
+  void attach_schema_fields(nlohmann::json& topic_entry, const std::string& topic_name) const;
+
   /// Release one middleware subscription ref for @p topic_name. When the
   /// last ref is gone (subscription destroyed), also clears the topic's
   /// latched state in the message buffer: a stale retained sample must not

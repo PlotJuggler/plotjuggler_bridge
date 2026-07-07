@@ -348,6 +348,30 @@ TEST_F(SessionManagerTest, WantsTopicUpdatesReturnsFalseForNonexistentSession) {
   EXPECT_FALSE(manager_.wants_topic_updates("nonexistent"));
 }
 
+TEST_F(SessionManagerTest, SessionStartsWithSchemasInUpdatesDisabled) {
+  EXPECT_TRUE(manager_.create_session("client1"));
+
+  EXPECT_FALSE(manager_.wants_schemas_in_updates("client1"));
+}
+
+TEST_F(SessionManagerTest, SetIncludeSchemasInUpdatesChangesState) {
+  EXPECT_TRUE(manager_.create_session("client1"));
+
+  EXPECT_TRUE(manager_.set_include_schemas_in_updates("client1", true));
+  EXPECT_TRUE(manager_.wants_schemas_in_updates("client1"));
+
+  EXPECT_TRUE(manager_.set_include_schemas_in_updates("client1", false));
+  EXPECT_FALSE(manager_.wants_schemas_in_updates("client1"));
+}
+
+TEST_F(SessionManagerTest, SetIncludeSchemasInUpdatesReturnsFalseForNonexistentSession) {
+  EXPECT_FALSE(manager_.set_include_schemas_in_updates("nonexistent", true));
+}
+
+TEST_F(SessionManagerTest, WantsSchemasInUpdatesReturnsFalseForNonexistentSession) {
+  EXPECT_FALSE(manager_.wants_schemas_in_updates("nonexistent"));
+}
+
 TEST_F(SessionManagerTest, ThreadSafety) {
   SessionManager thread_manager(10.0);
   constexpr int kNumThreads = 10;

@@ -43,6 +43,19 @@ std::vector<TopicInfo> TopicDiscovery::discover_topics() {
   return topics;
 }
 
+bool TopicDiscovery::is_transient_local(const std::string& topic_name) const {
+  const auto publishers = node_->get_publishers_info_by_topic(topic_name);
+  if (publishers.empty()) {
+    return false;
+  }
+  for (const auto& info : publishers) {
+    if (info.qos_profile().durability() != rclcpp::DurabilityPolicy::TransientLocal) {
+      return false;
+    }
+  }
+  return true;
+}
+
 bool TopicDiscovery::should_filter_topic(const std::string& topic_name) const {
   static const std::vector<std::string> kSystemTopics = {"/rosout", "/parameter_events", "/robot_description"};
 

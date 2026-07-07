@@ -248,8 +248,26 @@ std::string BridgeServer::handle_get_topics(const std::string& client_id, const 
 
   auto topics = topic_source_->get_topics();
 
+  // Opt-in: when the client sets `include_schemas`, each topic entry also
+  // carries `encoding` + `definition` so the client can classify topics
+  // up front without a subscribe round-trip. Absent/false leaves the response
+  // byte-for-byte as before.
+  const bool include_schemas = optional_bool(request, "include_schemas");
+
   json response;
   response["status"] = "success";
+  // Server identity + capability list: clients feature-detect by capability
+  // NAME and warn on missing features; `version` is for humans and bug
+  // reports, never for client-side comparison logic (docs/API.md). The only
+  // hard compatibility gate is protocol_version.
+  json server_info;
+  server_info["name"] = "pj_bridge";
+  server_info["version"] = PJ_BRIDGE_VERSION;
+  server_info["capabilities"] = json::array();
+  for (const char* capability : kServerCapabilities) {
+    server_info["capabilities"].push_back(capability);
+  }
+  response["server"] = std::move(server_info);
   response["topics"] = json::array();
 
   size_t returned_count = 0;
@@ -260,6 +278,10 @@ std::string BridgeServer::handle_get_topics(const std::string& client_id, const 
     json topic_entry;
     topic_entry["name"] = topic.name;
     topic_entry["type"] = topic.type;
+    attach_latched_badge(topic_entry, topic.name);
+    if (include_schemas) {
+      attach_schema_fields(topic_entry, topic.name);
+    }
     response["topics"].push_back(topic_entry);
     returned_count++;
   }
@@ -349,16 +371,16 @@ std::string BridgeServer::handle_subscribe(const std::string& client_id, const n
 
     std::string topic_type = topic_types[topic_name];
 
-    // get_schema throws on failure; an empty return is a legitimately empty
-    // definition (e.g. std_msgs/msg/Empty) and must not fail the subscribe.
+    // A schema failure fails only THIS subscription (the client can't decode a
+    // topic whose schema is missing); the topic list paths instead keep the
+    // topic without schema fields. Both share extract_schema().
     std::string schema;
-    try {
-      schema = topic_source_->get_schema(topic_name);
-    } catch (const std::exception& e) {
-      spdlog::error("Failed to get schema for topic '{}': {}", topic_name, e.what());
+    std::string schema_error;
+    if (!extract_schema(topic_name, schema, schema_error)) {
+      spdlog::error("Failed to get schema for topic '{}': {}", topic_name, schema_error);
       json failure;
       failure["topic"] = topic_name;
-      failure["reason"] = std::string("Schema extraction failed: ") + e.what();
+      failure["reason"] = "Schema extraction failed: " + schema_error;
       failures.push_back(failure);
       continue;
     }
@@ -658,7 +680,13 @@ std::string BridgeServer::handle_subscribe_topic_updates(const std::string& clie
   session_manager_->update_heartbeat(client_id);
   session_manager_->set_topic_updates(client_id, true);
 
-  spdlog::debug("Client '{}' subscribed to topic updates", client_id);
+  // Optional: opt into schemas (encoding+definition) on `topics_changed.added`
+  // entries. Always (re)set from the request so re-subscribing without the flag
+  // reverts to the name+type-only notification shape.
+  const bool include_schemas = optional_bool(request, "include_schemas");
+  session_manager_->set_include_schemas_in_updates(client_id, include_schemas);
+
+  spdlog::debug("Client '{}' subscribed to topic updates (include_schemas={})", client_id, include_schemas);
 
   json response;
   response["status"] = "ok";
@@ -702,6 +730,51 @@ std::string BridgeServer::create_error_response(
   inject_response_fields(response, request);
 
   return response.dump();
+}
+
+bool BridgeServer::extract_schema(
+    const std::string& topic_name, std::string& schema_out, std::string& error_out) const {
+  // get_schema throws on failure; an empty return is a legitimately empty
+  // definition (e.g. std_msgs/msg/Empty) and is a success, not a failure.
+  try {
+    schema_out = topic_source_->get_schema(topic_name);
+    return true;
+  } catch (const std::exception& e) {
+    error_out = e.what();
+    return false;
+  }
+}
+
+bool BridgeServer::optional_bool(const nlohmann::json& request, const char* key) {
+  // request.value(key, false) would THROW on a present-but-wrong-typed value;
+  // an off-the-wire flag must degrade to false instead.
+  const auto it = request.find(key);
+  return it != request.end() && it->is_boolean() && it->get<bool>();
+}
+
+void BridgeServer::attach_latched_badge(nlohmann::json& topic_entry, const std::string& topic_name) const {
+  // `latched: true` only when discovery KNOWS the topic is transient-local
+  // (its retained sample is replayed on subscribe — see docs/API.md). Absent
+  // otherwise: backends without discovery-time QoS knowledge must not claim
+  // false. Independent of include_schemas — a UI badge should not require
+  // pulling every schema.
+  if (topic_source_->is_transient_local(topic_name)) {
+    topic_entry["latched"] = true;
+  }
+}
+
+void BridgeServer::attach_schema_fields(nlohmann::json& topic_entry, const std::string& topic_name) const {
+  std::string schema;
+  std::string error;
+  if (!extract_schema(topic_name, schema, error)) {
+    // Swallow the failure: a topic whose schema can't be extracted must still
+    // appear in the list (name+type only), matching the principle that schema
+    // failure can't corrupt the topic list.
+    spdlog::warn("Omitting schema for topic '{}' (extraction failed): {}", topic_name, error);
+    return;
+  }
+  topic_entry["encoding"] = topic_source_->schema_encoding();
+  topic_entry["definition"] = std::move(schema);
 }
 
 void BridgeServer::check_session_timeouts() {
@@ -748,6 +821,7 @@ void BridgeServer::check_topic_changes() {
         json entry;
         entry["name"] = name;
         entry["type"] = type;
+        attach_latched_badge(entry, name);
         added.push_back(entry);
       }
     }
@@ -766,21 +840,43 @@ void BridgeServer::check_topic_changes() {
     return;
   }
 
-  json notification;
-  notification["notification"] = "topics_changed";
-  notification["added"] = added;
-  notification["removed"] = removed;
-  notification["protocol_version"] = kProtocolVersion;
-
-  std::vector<uint8_t> bytes;
-  {
+  auto make_notification_bytes = [&](const json& added_entries) {
+    json notification;
+    notification["notification"] = "topics_changed";
+    notification["added"] = added_entries;
+    notification["removed"] = removed;
+    notification["protocol_version"] = kProtocolVersion;
     std::string text = notification.dump();
-    bytes.assign(text.begin(), text.end());
-  }
+    return std::vector<uint8_t>(text.begin(), text.end());
+  };
+
+  // Plain notification (name+type only) — today's shape, sent to sessions that
+  // opted in without `include_schemas`.
+  const std::vector<uint8_t> plain_bytes = make_notification_bytes(added);
+
+  // Schema-augmented variant: each `added` entry additionally carries
+  // encoding+definition (removed entries are unchanged). Built lazily on the
+  // first opted-in-with-schemas client so a deployment with none pays nothing;
+  // shared across all such clients so schemas are extracted once per poll.
+  std::optional<std::vector<uint8_t>> schema_bytes;
 
   for (const auto& client_id : session_manager_->get_active_sessions()) {
-    if (session_manager_->wants_topic_updates(client_id)) {
-      middleware_->send_reply(client_id, bytes);
+    if (!session_manager_->wants_topic_updates(client_id)) {
+      continue;
+    }
+    if (session_manager_->wants_schemas_in_updates(client_id)) {
+      if (!schema_bytes) {
+        json added_with_schemas = json::array();
+        for (const auto& entry : added) {
+          json augmented = entry;
+          attach_schema_fields(augmented, entry["name"].get<std::string>());
+          added_with_schemas.push_back(std::move(augmented));
+        }
+        schema_bytes = make_notification_bytes(added_with_schemas);
+      }
+      middleware_->send_reply(client_id, *schema_bytes);
+    } else {
+      middleware_->send_reply(client_id, plain_bytes);
     }
   }
 }

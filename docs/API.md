@@ -92,6 +92,94 @@ fully match any whitelist pattern are omitted from the response entirely (see
 }
 ```
 
+### Server identity and capabilities (`server`)
+
+Every `get_topics` response carries a `server` object:
+
+```json
+{"server": {"name": "pj_bridge", "version": "0.8.0",
+            "capabilities": ["include_schemas", "latched_badge",
+                             "latched_replay", "topics_changed",
+                             "per_topic_rate_limit"]}}
+```
+
+Compatibility policy for clients:
+
+- **`protocol_version` is the only hard gate.** A client that receives a
+  `protocol_version` above what it speaks should stop and tell the user to
+  upgrade (breaking changes bump it; additive changes never do).
+- **Feature-detect by capability NAME, never by comparing `version`.** A
+  missing capability degrades that one feature (ideally with a precise
+  warning, e.g. "no `include_schemas`: topic classification degraded").
+  `version` is for humans and bug reports.
+- A response without a `server` object is a pre-capability server: treat
+  every capability above as absent.
+
+### Requesting schemas up front (`include_schemas`)
+
+By default `get_topics` returns only `name` + `type` per topic; schemas are
+delivered lazily on `subscribe`. A client that needs to classify topics before
+subscribing (e.g. by message type *and* schema) can set the optional
+`include_schemas` boolean to `true`:
+
+```json
+{"command": "get_topics", "id": "gt1", "include_schemas": true}
+```
+
+Each topic entry then additionally carries the same `encoding` and
+`definition` fields the [subscribe](#subscribe) response uses for schemas:
+
+```json
+{
+  "status": "success",
+  "id": "gt1",
+  "protocol_version": 1,
+  "topics": [
+    {"name": "/topic_name", "type": "package_name/msg/MessageType",
+     "encoding": "ros2msg", "definition": "message definition text"}
+  ]
+}
+```
+
+- `encoding` is the backend's schema encoding (`"ros2msg"` for ROS2,
+  `"omgidl"` for DDS).
+- The flag is purely additive: omitting it (or setting it to `false`) yields
+  the byte-for-byte name+type-only response above, so old and new clients
+  interoperate with old and new servers without a protocol bump.
+- **Per-topic schema failure never drops a topic.** If a topic's schema cannot
+  be extracted, that entry is still listed with `name` + `type` only (no
+  `encoding`/`definition`); the server logs a warning and continues. Clients
+  must therefore treat the schema fields as optional even when they asked for
+  them.
+
+### Latched (transient-local) topics
+
+Some topics publish a retained sample that late subscribers depend on —
+`/tf_static` (typically ONE message per session, carrying the robot's static
+geometry), `/map`, and similar. Two protocol guarantees make these safe under
+per-topic, subscribe-on-demand clients, where **every** subscriber is a late
+subscriber by construction:
+
+1. **Latched replay (server MUST).** Immediately after a `subscribe` (or
+   `resume`) response that adds a transient-local topic, and before any live
+   data for it, the server sends the topic's retained sample(s) as a normal
+   binary data frame. The reply ordering matters: the response carries the
+   schema, so the client can always decode the replayed frame.
+2. **The `latched` badge (server SHOULD).** When the server *knows* a topic is
+   transient-local — the ROS2 backend queries the discovered publishers'
+   durability QoS, without subscribing — the topic's entry in `get_topics`
+   responses and `topics_changed.added` carries `"latched": true`:
+
+```json
+{"name": "/tf_static", "type": "tf2_msgs/msg/TFMessage", "latched": true}
+```
+
+   The key is **absent** otherwise: absent means "not latched, or unknown" —
+   backends without discovery-time QoS knowledge stay silent rather than
+   claiming `false`. The badge is independent of `include_schemas` and is
+   informational (UI, diagnostics); correctness relies only on guarantee 1.
+   As everywhere in this protocol, clients must ignore unknown fields.
+
 ## Topic Whitelist
 
 The server can be configured with a list of regex patterns restricting which
@@ -318,6 +406,21 @@ topic set changes, instead of polling `get_topics`.
 {"status": "ok", "id": "tu1", "protocol_version": 1, "topic_updates": true}
 ```
 
+The request accepts the same optional `include_schemas` boolean as
+[`get_topics`](#requesting-schemas-up-front-include_schemas). When set to
+`true`, this session's `topics_changed` notifications carry per-topic schemas
+on their `added` entries (see below):
+
+```json
+{"command": "subscribe_topic_updates", "id": "tu1", "include_schemas": true}
+```
+
+The flag is stored per session and always taken from the latest
+`subscribe_topic_updates` request, so re-subscribing without it reverts to the
+name+type-only notification shape. It is independent of `topic_updates`
+itself — it only changes the shape of notifications, never whether they are
+sent.
+
 **Unsubscribe Request:**
 ```json
 {"command": "unsubscribe_topic_updates", "id": "tu2"}
@@ -343,10 +446,30 @@ changed since the last poll:
  "protocol_version": 1}
 ```
 
+`added` entries carry the same optional `"latched": true` badge as
+[`get_topics`](#latched-transient-local-topics) entries.
+
+For sessions that opted in with `include_schemas: true`, each `added` entry
+additionally carries `encoding` + `definition` (the same fields as
+[`get_topics`](#requesting-schemas-up-front-include_schemas) /
+[subscribe](#subscribe)); `removed` entries are unchanged (bare names):
+
+```json
+{"notification": "topics_changed",
+ "added": [{"name": "/t", "type": "pkg/msg/T",
+            "encoding": "ros2msg", "definition": "message definition text"}],
+ "removed": ["/gone"],
+ "protocol_version": 1}
+```
+
 - `added` and `removed` may each be empty, but a notification is only sent
   when at least one of them is non-empty.
 - A topic whose type changes (same name, different type) is reported as both
   removed and added.
+- **Per-topic schema failure never drops a topic** (same as `get_topics`): an
+  `added` entry whose schema cannot be extracted is delivered with `name` +
+  `type` only, no `encoding`/`definition`. Clients must treat the schema
+  fields as optional even when they opted in.
 - Only whitelisted topics (see [Topic Whitelist](#topic-whitelist)) are
   considered — a non-whitelisted topic appearing or disappearing never
   triggers a notification.

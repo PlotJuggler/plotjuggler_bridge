@@ -45,6 +45,7 @@ class Ros2TopicSource : public TopicSourceInterface {
   std::vector<TopicInfo> get_topics() override;
   std::string get_schema(const std::string& topic_name) override;
   std::string schema_encoding() const override;
+  bool is_transient_local(const std::string& topic_name) const override;
 
  private:
   TopicDiscovery topic_discovery_;

@@ -42,6 +42,12 @@ struct Session {
   /// True if this session opted in to server-initiated `topics_changed`
   /// notifications via the `subscribe_topic_updates` command.
   bool topic_updates{false};
+  /// True if this session's `topics_changed` notifications should carry
+  /// per-topic schemas (encoding+definition) on `added` entries — set via the
+  /// optional `include_schemas` flag on `subscribe_topic_updates`. Independent
+  /// of `topic_updates`: it only affects the shape of notifications, never
+  /// whether they are sent.
+  bool include_schemas_in_updates{false};
 };
 
 class SessionManager {
@@ -64,6 +70,8 @@ class SessionManager {
   bool is_paused(const std::string& client_id) const;
   bool set_topic_updates(const std::string& client_id, bool enabled);
   bool wants_topic_updates(const std::string& client_id) const;
+  bool set_include_schemas_in_updates(const std::string& client_id, bool enabled);
+  bool wants_schemas_in_updates(const std::string& client_id) const;
   bool set_ref_held(const std::string& client_id, const std::string& topic, bool held);
   std::unordered_set<std::string> get_ref_held_topics(const std::string& client_id) const;
 

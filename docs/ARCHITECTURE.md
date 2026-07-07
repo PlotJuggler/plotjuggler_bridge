@@ -39,7 +39,13 @@ Three interfaces decouple the core from any specific middleware:
 
 ### TopicSourceInterface
 
-Discovers available topics and retrieves their schemas. Implementations:
+Discovers available topics, retrieves their schemas, and reports
+discovery-time QoS knowledge: `is_transient_local()` answers "does every
+discovered publisher offer TRANSIENT_LOCAL?" WITHOUT subscribing (the
+SubscriptionManager's same-named flag is only valid while subscribed, which
+is useless for badging unsubscribed topics under lazy demand). Backends
+without discovery-time QoS knowledge keep the default `false`, so the
+`latched` badge is simply absent rather than falsely claimed. Implementations:
 - `Ros2TopicSource`: wraps `TopicDiscovery` (rclcpp enumeration) + `SchemaExtractor` (.msg file parsing). Schema encoding: `"ros2msg"`.
 - `RtiTopicSource`: wraps `DdsTopicDiscovery` (RTI participant discovery). Schema encoding: `"omgidl"`.
 - `FastDdsTopicSource`: directly implements the interface (flattened design). Discovers topics via `on_data_writer_discovery()`, resolves `DynamicType` from TypeObject registry, generates IDL via `idl_serialize()`. Schema encoding: `"omgidl"`.
