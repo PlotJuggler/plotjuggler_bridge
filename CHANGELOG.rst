@@ -2,7 +2,7 @@
 Changelog for package pj_ros_bridge
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-0.7.0 (2026-07-06)
+0.8.0 (2026-07-07)
 ------------------
 * Foxglove-parity feature set, closing the gap with foxglove_bridge's
   topic-subscription features:
