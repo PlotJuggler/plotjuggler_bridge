@@ -2653,6 +2653,34 @@ TEST_F(BridgeServerTest, UnsubscribeTopicUpdatesStopsNotifications) {
 // in its get_topics entry; all other topics carry NO `latched` key (absent =
 // not latched or unknown — backends without discovery-time QoS knowledge stay
 // silent rather than claiming false). Independent of include_schemas.
+// GetTopicsCarriesServerInfo
+//
+// The get_topics response identifies the server and lists its capabilities so
+// clients can feature-detect by NAME (and warn precisely on missing features)
+// instead of comparing version strings. protocol_version remains the only
+// hard compatibility gate.
+TEST_F(BridgeServerTest, GetTopicsCarriesServerInfo) {
+  ASSERT_TRUE(server_->initialize());
+  mock_topic_source_->set_topics({{"/a", "std_msgs/msg/String"}});
+
+  json req;
+  req["command"] = "get_topics";
+  mock_->push_request("client_info", req.dump());
+  server_->process_requests();
+
+  auto replies = mock_->get_replies("client_info");
+  ASSERT_EQ(replies.size(), 1u);
+  ASSERT_TRUE(replies[0].contains("server"));
+  const json& info = replies[0]["server"];
+  EXPECT_EQ(info["name"], "pj_bridge");
+  EXPECT_FALSE(info["version"].get<std::string>().empty());
+  ASSERT_TRUE(info["capabilities"].is_array());
+  const auto& caps = info["capabilities"];
+  for (const char* expected : {"include_schemas", "latched_badge", "latched_replay", "topics_changed"}) {
+    EXPECT_TRUE(std::find(caps.begin(), caps.end(), json(expected)) != caps.end()) << "missing " << expected;
+  }
+}
+
 TEST_F(BridgeServerTest, GetTopicsMarksLatchedTopics) {
   ASSERT_TRUE(server_->initialize());
   mock_topic_source_->set_topics({{"/tf_static", "tf2_msgs/msg/TFMessage"}, {"/imu", "sensor_msgs/msg/Imu"}});

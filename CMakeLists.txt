@@ -1,6 +1,15 @@
 cmake_minimum_required(VERSION 3.14)
 project(pj_bridge)
 
+# Single source of truth for the server version: package.xml. Exposed to the
+# code as PJ_BRIDGE_VERSION (the `server.version` field in get_topics).
+file(STRINGS package.xml _pj_bridge_version_line REGEX "<version>[^<]+</version>" LIMIT_COUNT 1)
+string(REGEX REPLACE ".*<version>([^<]+)</version>.*" "\\1" PJ_BRIDGE_VERSION "${_pj_bridge_version_line}")
+if(NOT PJ_BRIDGE_VERSION MATCHES "^[0-9]")
+  set(PJ_BRIDGE_VERSION "unknown")
+endif()
+add_compile_definitions(PJ_BRIDGE_VERSION="${PJ_BRIDGE_VERSION}")
+
 # Compiler settings
 if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
   add_compile_options(-Wall -Wextra -Wpedantic)

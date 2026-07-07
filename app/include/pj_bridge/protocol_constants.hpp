@@ -39,4 +39,16 @@ inline constexpr const char* kSchemaEncodingRos2Msg = "ros2msg";
 /// Schema encoding identifier for OMG IDL type definitions
 inline constexpr const char* kSchemaEncodingOmgIdl = "omgidl";
 
+/// Capability names advertised in the get_topics response's `server` object.
+/// Clients feature-detect by NAME (never by comparing version strings): a
+/// missing capability degrades that one feature with a warning, while a
+/// protocol_version above what the client speaks is the only hard-fail.
+inline constexpr const char* kServerCapabilities[] = {
+    "include_schemas",       // get_topics/subscribe_topic_updates opt-in schemas
+    "latched_badge",         // `latched: true` on transient-local topic entries
+    "latched_replay",        // retained samples replayed after subscribe/resume
+    "topics_changed",        // pushed topic advertisement (subscribe_topic_updates)
+    "per_topic_rate_limit",  // subscribe entries accept {name, max_rate_hz}
+};
+
 }  // namespace pj_bridge

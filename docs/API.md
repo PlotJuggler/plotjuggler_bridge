@@ -92,6 +92,29 @@ fully match any whitelist pattern are omitted from the response entirely (see
 }
 ```
 
+### Server identity and capabilities (`server`)
+
+Every `get_topics` response carries a `server` object:
+
+```json
+{"server": {"name": "pj_bridge", "version": "0.6.0",
+            "capabilities": ["include_schemas", "latched_badge",
+                             "latched_replay", "topics_changed",
+                             "per_topic_rate_limit"]}}
+```
+
+Compatibility policy for clients:
+
+- **`protocol_version` is the only hard gate.** A client that receives a
+  `protocol_version` above what it speaks should stop and tell the user to
+  upgrade (breaking changes bump it; additive changes never do).
+- **Feature-detect by capability NAME, never by comparing `version`.** A
+  missing capability degrades that one feature (ideally with a precise
+  warning, e.g. "no `include_schemas`: topic classification degraded").
+  `version` is for humans and bug reports.
+- A response without a `server` object is a pre-capability server: treat
+  every capability above as absent.
+
 ### Requesting schemas up front (`include_schemas`)
 
 By default `get_topics` returns only `name` + `type` per topic; schemas are

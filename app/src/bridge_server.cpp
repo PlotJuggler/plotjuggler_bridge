@@ -257,6 +257,22 @@ std::string BridgeServer::handle_get_topics(const std::string& client_id, const 
 
   json response;
   response["status"] = "success";
+  // Server identity + capability list: clients feature-detect by capability
+  // NAME and warn on missing features; `version` is for humans and bug
+  // reports, never for client-side comparison logic (docs/API.md). The only
+  // hard compatibility gate is protocol_version.
+  json server_info;
+  server_info["name"] = "pj_bridge";
+#ifdef PJ_BRIDGE_VERSION
+  server_info["version"] = PJ_BRIDGE_VERSION;
+#else
+  server_info["version"] = "unknown";
+#endif
+  server_info["capabilities"] = json::array();
+  for (const char* capability : kServerCapabilities) {
+    server_info["capabilities"].push_back(capability);
+  }
+  response["server"] = std::move(server_info);
   response["topics"] = json::array();
 
   size_t returned_count = 0;
