@@ -161,6 +161,15 @@ class BridgeServer {
   /// failure handling identical.
   bool extract_schema(const std::string& topic_name, std::string& schema_out, std::string& error_out) const;
 
+  /// Defensive optional-bool read: false unless @p key is present AND boolean
+  /// (nlohmann's value() would throw on a wrong-typed value). Shared by every
+  /// handler reading an opt-in flag off the wire.
+  static bool optional_bool(const nlohmann::json& request, const char* key);
+
+  /// Stamp `latched: true` on a topic-entry when the topic is transient-local;
+  /// leave the key absent otherwise. Shared by get_topics and topics_changed.
+  void attach_latched_badge(nlohmann::json& topic_entry, const std::string& topic_name) const;
+
   /// Add `encoding` + `definition` schema fields to a topic list entry when a
   /// client opts into up-front schemas (get_topics / topics_changed
   /// `include_schemas`). A per-topic extraction failure is swallowed: the

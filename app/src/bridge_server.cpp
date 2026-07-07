@@ -252,8 +252,7 @@ std::string BridgeServer::handle_get_topics(const std::string& client_id, const 
   // carries `encoding` + `definition` so the client can classify topics
   // up front without a subscribe round-trip. Absent/false leaves the response
   // byte-for-byte as before.
-  const bool include_schemas = request.contains("include_schemas") && request["include_schemas"].is_boolean() &&
-                               request["include_schemas"].get<bool>();
+  const bool include_schemas = optional_bool(request, "include_schemas");
 
   json response;
   response["status"] = "success";
@@ -263,11 +262,7 @@ std::string BridgeServer::handle_get_topics(const std::string& client_id, const 
   // hard compatibility gate is protocol_version.
   json server_info;
   server_info["name"] = "pj_bridge";
-#ifdef PJ_BRIDGE_VERSION
   server_info["version"] = PJ_BRIDGE_VERSION;
-#else
-  server_info["version"] = "unknown";
-#endif
   server_info["capabilities"] = json::array();
   for (const char* capability : kServerCapabilities) {
     server_info["capabilities"].push_back(capability);
@@ -283,14 +278,7 @@ std::string BridgeServer::handle_get_topics(const std::string& client_id, const 
     json topic_entry;
     topic_entry["name"] = topic.name;
     topic_entry["type"] = topic.type;
-    // `latched: true` only when discovery KNOWS the topic is transient-local
-    // (its retained sample is replayed on subscribe — see docs/API.md).
-    // Absent otherwise: backends without discovery-time QoS knowledge must
-    // not claim false. Independent of include_schemas — a UI badge should not
-    // require pulling every schema.
-    if (topic_source_->is_transient_local(topic.name)) {
-      topic_entry["latched"] = true;
-    }
+    attach_latched_badge(topic_entry, topic.name);
     if (include_schemas) {
       attach_schema_fields(topic_entry, topic.name);
     }
@@ -695,8 +683,7 @@ std::string BridgeServer::handle_subscribe_topic_updates(const std::string& clie
   // Optional: opt into schemas (encoding+definition) on `topics_changed.added`
   // entries. Always (re)set from the request so re-subscribing without the flag
   // reverts to the name+type-only notification shape.
-  const bool include_schemas = request.contains("include_schemas") && request["include_schemas"].is_boolean() &&
-                               request["include_schemas"].get<bool>();
+  const bool include_schemas = optional_bool(request, "include_schemas");
   session_manager_->set_include_schemas_in_updates(client_id, include_schemas);
 
   spdlog::debug("Client '{}' subscribed to topic updates (include_schemas={})", client_id, include_schemas);
@@ -758,6 +745,24 @@ bool BridgeServer::extract_schema(
   }
 }
 
+bool BridgeServer::optional_bool(const nlohmann::json& request, const char* key) {
+  // request.value(key, false) would THROW on a present-but-wrong-typed value;
+  // an off-the-wire flag must degrade to false instead.
+  const auto it = request.find(key);
+  return it != request.end() && it->is_boolean() && it->get<bool>();
+}
+
+void BridgeServer::attach_latched_badge(nlohmann::json& topic_entry, const std::string& topic_name) const {
+  // `latched: true` only when discovery KNOWS the topic is transient-local
+  // (its retained sample is replayed on subscribe — see docs/API.md). Absent
+  // otherwise: backends without discovery-time QoS knowledge must not claim
+  // false. Independent of include_schemas — a UI badge should not require
+  // pulling every schema.
+  if (topic_source_->is_transient_local(topic_name)) {
+    topic_entry["latched"] = true;
+  }
+}
+
 void BridgeServer::attach_schema_fields(nlohmann::json& topic_entry, const std::string& topic_name) const {
   std::string schema;
   std::string error;
@@ -816,9 +821,7 @@ void BridgeServer::check_topic_changes() {
         json entry;
         entry["name"] = name;
         entry["type"] = type;
-        if (topic_source_->is_transient_local(name)) {
-          entry["latched"] = true;  // same badge as get_topics
-        }
+        attach_latched_badge(entry, name);
         added.push_back(entry);
       }
     }
