@@ -1060,6 +1060,10 @@ void BridgeServer::publish_aggregated_messages() {
       size_t msg_count;
       std::vector<std::string> client_ids;
       bool is_heavy = false;  // isolated large/size-class frame (kFrameFlagHeavy)
+      // Per-topic message counts carried by THIS frame, folded into
+      // topic_forward_counts_ only when the frame is actually sent (so a
+      // partial send after the split doesn't over-count unsent topics).
+      std::unordered_map<std::string, uint64_t> topic_counts;
     };
     std::vector<GroupFrame> frames;
 
@@ -1073,6 +1077,10 @@ void BridgeServer::publish_aggregated_messages() {
 
         const auto& representative_subs = client_subs[client_ids.front()];
         auto& rep_last_sent = last_sent_times_[client_ids.front()];
+
+        // Per-topic counts for messages routed into THIS group's light frame;
+        // folded into the light frame's topic_counts when it is built.
+        std::unordered_map<std::string, uint64_t> light_topic_counts;
 
         // Route one rate-admitted message into either the aggregated light
         // frame or its own isolated heavy frame, based on the per-message CDR
@@ -1090,12 +1098,13 @@ void BridgeServer::publish_aggregated_messages() {
             heavy_frame.msg_count = 1;
             heavy_frame.client_ids = client_ids;
             heavy_frame.is_heavy = true;
+            heavy_frame.topic_counts[topic] = 1;
             heavy_frames_for_group.push_back(std::move(heavy_frame));
           } else {
             light_serializer.serialize_message(topic, msg.timestamp_ns, msg.data->data(), msg.data->size());
+            light_topic_counts[topic]++;
           }
           group_msg_count++;
-          forward_counts[topic]++;
         };
 
         for (const auto& [topic, msgs] : messages) {
@@ -1145,6 +1154,7 @@ void BridgeServer::publish_aggregated_messages() {
           light_frame.compressed_data = light_serializer.finalize();
           light_frame.msg_count = light_serializer.get_message_count();
           light_frame.client_ids = client_ids;
+          light_frame.topic_counts = std::move(light_topic_counts);
           frames.push_back(std::move(light_frame));
         }
         for (auto& heavy_frame : heavy_frames_for_group) {
@@ -1171,6 +1181,9 @@ void BridgeServer::publish_aggregated_messages() {
       if (any_sent) {
         total_msg_count += frame.msg_count;
         total_bytes += frame.compressed_data.size();
+        for (const auto& [topic, count] : frame.topic_counts) {
+          forward_counts[topic] += count;
+        }
       }
     }
 

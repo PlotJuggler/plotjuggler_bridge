@@ -86,6 +86,15 @@ class MockMiddleware : public MiddlewareInterface {
   }
 
   bool send_binary(const std::string& client_identity, const std::vector<uint8_t>& data) override {
+    // Test seam: simulate a client vanishing right before a heavy frame is
+    // delivered (send returns false), so partial-send stats can be exercised.
+    if (fail_heavy_sends_ && data.size() >= 16) {
+      uint32_t flags = 0;
+      std::memcpy(&flags, data.data() + 12, sizeof(flags));
+      if ((flags & kFrameFlagHeavy) != 0) {
+        return false;
+      }
+    }
     log_send(SendKind::kBinary, client_identity);
     std::lock_guard<std::mutex> lock(binary_mutex_);
     binary_sends_.emplace_back(client_identity, data);
@@ -175,6 +184,12 @@ class MockMiddleware : public MiddlewareInterface {
     binary_sends_.clear();
   }
 
+  /// When enabled, send_binary() returns false for frames marked kFrameFlagHeavy
+  /// (simulating the client disconnecting before the heavy frame is delivered).
+  void set_fail_heavy_sends(bool fail) {
+    fail_heavy_sends_ = fail;
+  }
+
   /// Return all replies sent to a given client, in send order (parsed JSON).
   std::vector<json> get_replies(const std::string& client_id) {
     std::lock_guard<std::mutex> lock(reply_mutex_);
@@ -226,6 +241,7 @@ class MockMiddleware : public MiddlewareInterface {
 
   std::mutex binary_mutex_;
   std::vector<std::pair<std::string, std::vector<uint8_t>>> binary_sends_;
+  bool fail_heavy_sends_{false};
 
   std::mutex send_log_mutex_;
   std::vector<std::pair<SendKind, std::string>> send_log_;
@@ -3205,4 +3221,145 @@ TEST_F(BridgeServerTest, HeavyFrameThresholdZeroKeepsSingleFrame) {
   ASSERT_EQ(sends.size(), 1u) << "threshold 0 must not split";
   EXPECT_EQ(frame_flags(sends[0].second), 0u);
   EXPECT_EQ(decode_frame(sends[0].second).size(), 2u);
+}
+
+TEST_F(BridgeServerTest, PartialSendDoesNotOvercountForwardStats) {
+  // A split group emits a light frame (/small) then a heavy frame (/big). If
+  // the heavy frame's send fails (client vanished mid-cycle), forward stats
+  // must count only the topic that was actually delivered — not the unsent one.
+  server_ = std::make_unique<BridgeServer>(
+      mock_topic_source_, mock_sub_manager_, mock_, 19999, 10.0, 50.0, WhitelistFilter{},
+      /*heavy_frame_threshold_bytes=*/64);
+  ASSERT_TRUE(server_->initialize());
+
+  mock_topic_source_->set_topics({{"/small", "std_msgs/msg/String"}, {"/big", "sensor_msgs/msg/PointCloud2"}});
+  mock_sub_manager_->add_known_topic("/small");
+  mock_sub_manager_->add_known_topic("/big");
+
+  json sub;
+  sub["command"] = "subscribe";
+  sub["topics"] = json::array({"/small", "/big"});
+  mock_->push_request("client_a", sub.dump());
+  server_->process_requests();
+  mock_->pop_reply("client_a");
+  mock_->clear_binary_sends();
+
+  mock_->set_fail_heavy_sends(true);  // heavy frame delivery fails
+
+  mock_sub_manager_->deliver_message("/small", make_bytes(8, 0xAA), 111);
+  mock_sub_manager_->deliver_message("/big", make_bytes(200, 0xBB), 222);
+  server_->publish_aggregated_messages();
+
+  auto stats = server_->snapshot_and_reset_stats();
+  EXPECT_EQ(stats.topic_forward_counts["/small"], 1u);
+  EXPECT_EQ(stats.topic_forward_counts["/big"], 0u) << "unsent heavy topic must not be counted";
+}
+
+TEST_F(BridgeServerTest, HeavyFrameThresholdBoundaryIsInclusive) {
+  // The classifier is `size >= threshold`: a message exactly at the threshold
+  // is heavy; one byte under is light.
+  server_ = std::make_unique<BridgeServer>(
+      mock_topic_source_, mock_sub_manager_, mock_, 19999, 10.0, 50.0, WhitelistFilter{},
+      /*heavy_frame_threshold_bytes=*/64);
+  ASSERT_TRUE(server_->initialize());
+
+  mock_topic_source_->set_topics({{"/at", "std_msgs/msg/String"}, {"/below", "std_msgs/msg/String"}});
+  mock_sub_manager_->add_known_topic("/at");
+  mock_sub_manager_->add_known_topic("/below");
+
+  json sub;
+  sub["command"] = "subscribe";
+  sub["topics"] = json::array({"/at", "/below"});
+  mock_->push_request("client_a", sub.dump());
+  server_->process_requests();
+  mock_->pop_reply("client_a");
+  mock_->clear_binary_sends();
+
+  mock_sub_manager_->deliver_message("/at", make_bytes(64, 0x11), 111);     // == threshold -> heavy
+  mock_sub_manager_->deliver_message("/below", make_bytes(63, 0x22), 222);  // < threshold -> light
+  server_->publish_aggregated_messages();
+
+  auto sends = mock_->get_binary_sends();
+  ASSERT_EQ(sends.size(), 2u);
+  bool heavy_is_at = false;
+  bool light_is_below = false;
+  for (const auto& [cid, frame] : sends) {
+    auto msgs = decode_frame(frame);
+    ASSERT_EQ(msgs.size(), 1u);
+    if ((frame_flags(frame) & kFrameFlagHeavy) != 0) {
+      heavy_is_at = (msgs[0].topic == "/at");
+    } else {
+      light_is_below = (msgs[0].topic == "/below");
+    }
+  }
+  EXPECT_TRUE(heavy_is_at) << "message == threshold must be heavy";
+  EXPECT_TRUE(light_is_below) << "message < threshold must be light";
+}
+
+TEST_F(BridgeServerTest, OnlyHeavyTopicEmitsNoLightFrame) {
+  // A group whose only admitted message is heavy emits just the heavy frame —
+  // no empty light frame.
+  server_ = std::make_unique<BridgeServer>(
+      mock_topic_source_, mock_sub_manager_, mock_, 19999, 10.0, 50.0, WhitelistFilter{},
+      /*heavy_frame_threshold_bytes=*/64);
+  ASSERT_TRUE(server_->initialize());
+
+  mock_topic_source_->set_topics({{"/big", "sensor_msgs/msg/PointCloud2"}});
+  mock_sub_manager_->add_known_topic("/big");
+
+  json sub;
+  sub["command"] = "subscribe";
+  sub["topics"] = json::array({"/big"});
+  mock_->push_request("client_a", sub.dump());
+  server_->process_requests();
+  mock_->pop_reply("client_a");
+  mock_->clear_binary_sends();
+
+  mock_sub_manager_->deliver_message("/big", make_bytes(200, 0xBB), 222);
+  server_->publish_aggregated_messages();
+
+  auto sends = mock_->get_binary_sends();
+  ASSERT_EQ(sends.size(), 1u) << "no light frame when every topic is heavy";
+  EXPECT_NE(frame_flags(sends[0].second) & kFrameFlagHeavy, 0u);
+  auto msgs = decode_frame(sends[0].second);
+  ASSERT_EQ(msgs.size(), 1u);
+  EXPECT_EQ(msgs[0].topic, "/big");
+}
+
+TEST_F(BridgeServerTest, LargeLatchedSampleReplayedUnflagged) {
+  // A latched replay frame is built by collect_latched_replay via the plain
+  // finalize() (no flags) and must NOT be marked heavy even when the retained
+  // sample is large: it is a one-shot replay, not part of the size-class stream.
+  server_ = std::make_unique<BridgeServer>(
+      mock_topic_source_, mock_sub_manager_, mock_, 19999, 10.0, 50.0, WhitelistFilter{},
+      /*heavy_frame_threshold_bytes=*/64);
+  ASSERT_TRUE(server_->initialize());
+
+  mock_topic_source_->set_topics({{"/latched", "sensor_msgs/msg/PointCloud2"}});
+  mock_sub_manager_->add_known_topic("/latched");
+  mock_sub_manager_->set_transient_local("/latched", true);
+
+  json sub;
+  sub["command"] = "subscribe";
+  sub["topics"] = json::array({"/latched"});
+
+  mock_->push_request("client_a", sub.dump());
+  server_->process_requests();
+  mock_->pop_reply("client_a");
+  mock_sub_manager_->deliver_message("/latched", make_bytes(200, 0xCC), 777);  // large retained sample
+  server_->publish_aggregated_messages();                                      // drains the normal buffer
+  mock_->clear_binary_sends();
+
+  // Late subscriber gets the retained sample replayed.
+  mock_->push_request("client_b", sub.dump());
+  server_->process_requests();
+  mock_->pop_reply("client_b");
+
+  auto sends = mock_->get_binary_sends();
+  ASSERT_EQ(sends.size(), 1u);
+  EXPECT_EQ(sends[0].first, "client_b");
+  EXPECT_EQ(frame_flags(sends[0].second), 0u) << "latched replay must be unflagged even when large";
+  auto msgs = decode_frame(sends[0].second);
+  ASSERT_EQ(msgs.size(), 1u);
+  EXPECT_EQ(msgs[0].topic, "/latched");
 }

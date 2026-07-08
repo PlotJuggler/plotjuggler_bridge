@@ -100,7 +100,7 @@ Every `get_topics` response carries a `server` object:
 {"server": {"name": "pj_bridge", "version": "0.8.0",
             "capabilities": ["include_schemas", "latched_badge",
                              "latched_replay", "topics_changed",
-                             "per_topic_rate_limit"]}}
+                             "per_topic_rate_limit", "size_class_frames"]}}
 ```
 
 Compatibility policy for clients:
@@ -601,7 +601,7 @@ Binary frames consist of a fixed 16-byte header followed by ZSTD-compressed payl
 | 0 | 4 | magic | `0x42524A50` ("PJRB") |
 | 4 | 4 | message_count | Number of messages in frame |
 | 8 | 4 | uncompressed_size | Payload size before compression |
-| 12 | 4 | flags | Reserved (must be 0) |
+| 12 | 4 | flags | Bit 0 (`0x1`) = heavy frame (see [Size-class frames](#size-class-frames-heavy-flag)); other bits reserved = 0 |
 
 ### Payload (ZSTD-compressed)
 
@@ -617,3 +617,21 @@ For each message:
 ```
 
 The magic bytes allow clients to validate frame integrity before decompression.
+
+### Size-class frames (heavy flag)
+
+Advertised by the `size_class_frames` capability. To keep a large topic (e.g. a
+`PointCloud2`) from starving small topics under slow-link backpressure, the server
+does **not** weld small and large messages into one frame. Instead, each message
+whose serialized size is at or above a server-configured threshold
+(`heavy_frame_threshold_bytes`, default 256 KiB; `0` disables splitting) is sent as
+its own **heavy** frame with header flag bit 0 (`0x1`) set, while smaller messages
+stay aggregated in a single unflagged frame.
+
+This is purely a framing change — the payload format is identical, and a publish
+cycle may now emit several binary frames (one light frame plus one per heavy
+message) instead of one. Clients that do not care about the distinction can ignore
+the flag and decode every frame the same way (each frame is self-describing via its
+`message_count`). Clients that do care may use bit 0 to, for example, surface
+heavy-topic drop indicators. The flag never affects decoding, so old clients remain
+compatible and `protocol_version` is unchanged.
