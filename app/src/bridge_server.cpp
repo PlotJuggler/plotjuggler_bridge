@@ -60,7 +60,8 @@ double clamp_rate_hz(double rate_hz) {
 BridgeServer::BridgeServer(
     std::shared_ptr<TopicSourceInterface> topic_source,
     std::shared_ptr<SubscriptionManagerInterface> subscription_manager, std::shared_ptr<MiddlewareInterface> middleware,
-    int port, double session_timeout, double publish_rate, WhitelistFilter whitelist)
+    int port, double session_timeout, double publish_rate, WhitelistFilter whitelist,
+    size_t heavy_frame_threshold_bytes)
     : topic_source_(std::move(topic_source)),
       subscription_manager_(std::move(subscription_manager)),
       middleware_(std::move(middleware)),
@@ -68,6 +69,7 @@ BridgeServer::BridgeServer(
       session_timeout_(session_timeout),
       publish_rate_(publish_rate),
       whitelist_(std::move(whitelist)),
+      heavy_frame_threshold_bytes_(heavy_frame_threshold_bytes),
       initialized_(false),
       total_messages_published_(0),
       total_bytes_published_(0),
@@ -1057,6 +1059,7 @@ void BridgeServer::publish_aggregated_messages() {
       std::vector<uint8_t> compressed_data;
       size_t msg_count;
       std::vector<std::string> client_ids;
+      bool is_heavy = false;  // isolated large/size-class frame (kFrameFlagHeavy)
     };
     std::vector<GroupFrame> frames;
 
@@ -1064,11 +1067,36 @@ void BridgeServer::publish_aggregated_messages() {
       std::lock_guard<std::mutex> sent_lock(last_sent_mutex_);
 
       for (const auto& [group_key, client_ids] : subscription_groups) {
-        AggregatedMessageSerializer serializer;
+        AggregatedMessageSerializer light_serializer;
+        std::vector<GroupFrame> heavy_frames_for_group;
         size_t group_msg_count = 0;
 
         const auto& representative_subs = client_subs[client_ids.front()];
         auto& rep_last_sent = last_sent_times_[client_ids.front()];
+
+        // Route one rate-admitted message into either the aggregated light
+        // frame or its own isolated heavy frame, based on the per-message CDR
+        // byte size. The rate gate (below) decides WHETHER a message is
+        // admitted; this decides WHICH frame it lands in — orthogonal. A
+        // threshold of 0 disables splitting (everything goes to the light frame).
+        auto route_message = [&](const std::string& topic, const BufferedMessage& msg) {
+          const bool heavy = heavy_frame_threshold_bytes_ != 0 && msg.data->size() >= heavy_frame_threshold_bytes_;
+          if (heavy) {
+            // One frame per heavy message (mirrors collect_latched_replay).
+            AggregatedMessageSerializer heavy_serializer;
+            heavy_serializer.serialize_message(topic, msg.timestamp_ns, msg.data->data(), msg.data->size());
+            GroupFrame heavy_frame;
+            heavy_frame.compressed_data = heavy_serializer.finalize(kFrameFlagHeavy);
+            heavy_frame.msg_count = 1;
+            heavy_frame.client_ids = client_ids;
+            heavy_frame.is_heavy = true;
+            heavy_frames_for_group.push_back(std::move(heavy_frame));
+          } else {
+            light_serializer.serialize_message(topic, msg.timestamp_ns, msg.data->data(), msg.data->size());
+          }
+          group_msg_count++;
+          forward_counts[topic]++;
+        };
 
         for (const auto& [topic, msgs] : messages) {
           auto sub_it = representative_subs.find(topic);
@@ -1081,9 +1109,7 @@ void BridgeServer::publish_aggregated_messages() {
 
           if (rate_mhz == 0) {
             for (const auto& msg : msgs) {
-              serializer.serialize_message(topic, msg.timestamp_ns, msg.data->data(), msg.data->size());
-              group_msg_count++;
-              forward_counts[topic]++;
+              route_message(topic, msg);
             }
           } else {
             uint64_t min_interval_ns = static_cast<uint64_t>(1'000'000'000'000) / static_cast<uint64_t>(rate_mhz);
@@ -1091,10 +1117,8 @@ void BridgeServer::publish_aggregated_messages() {
 
             for (const auto& msg : msgs) {
               if (msg.timestamp_ns >= last_sent + min_interval_ns) {
-                serializer.serialize_message(topic, msg.timestamp_ns, msg.data->data(), msg.data->size());
+                route_message(topic, msg);
                 last_sent = msg.timestamp_ns;
-                group_msg_count++;
-                forward_counts[topic]++;
               }
             }
             rep_last_sent[topic] = last_sent;
@@ -1105,19 +1129,27 @@ void BridgeServer::publish_aggregated_messages() {
           continue;
         }
 
-        GroupFrame frame;
-        frame.compressed_data = serializer.finalize();
-        frame.msg_count = group_msg_count;
-        frame.client_ids = client_ids;
-
-        // Propagate rate-limiting state to other clients in the group
+        // Propagate rate-limiting state to other clients in the group. Done
+        // once per group; both lanes advanced the same rep_last_sent.
         for (const auto& client_id : client_ids) {
           if (client_id != client_ids.front()) {
             last_sent_times_[client_id] = rep_last_sent;
           }
         }
 
-        frames.push_back(std::move(frame));
+        // Emit the aggregated light frame (only if small topics landed in it),
+        // then each isolated heavy frame. Every frame carries the same
+        // client_ids, so the send loop below is unchanged.
+        if (light_serializer.get_message_count() > 0) {
+          GroupFrame light_frame;
+          light_frame.compressed_data = light_serializer.finalize();
+          light_frame.msg_count = light_serializer.get_message_count();
+          light_frame.client_ids = client_ids;
+          frames.push_back(std::move(light_frame));
+        }
+        for (auto& heavy_frame : heavy_frames_for_group) {
+          frames.push_back(std::move(heavy_frame));
+        }
       }
     }  // last_sent_mutex_ released here
 

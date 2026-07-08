@@ -28,6 +28,7 @@
 
 #include "pj_bridge/message_buffer.hpp"
 #include "pj_bridge/middleware/middleware_interface.hpp"
+#include "pj_bridge/protocol_constants.hpp"
 #include "pj_bridge/session_manager.hpp"
 #include "pj_bridge/subscription_manager_interface.hpp"
 #include "pj_bridge/topic_source_interface.hpp"
@@ -65,12 +66,17 @@ class BridgeServer {
    * @param session_timeout Session timeout in seconds (default: 10.0)
    * @param publish_rate Message aggregation publish rate in Hz (default: 50.0)
    * @param whitelist Topic whitelist filter (default: matches everything)
+   * @param heavy_frame_threshold_bytes Per-message byte size at or above which
+   *        a topic's message is isolated into its own size-class ("heavy")
+   *        frame instead of being aggregated with light topics. 0 disables
+   *        splitting (single aggregated frame). Default: 256 KiB.
    */
   explicit BridgeServer(
       std::shared_ptr<TopicSourceInterface> topic_source,
       std::shared_ptr<SubscriptionManagerInterface> subscription_manager,
       std::shared_ptr<MiddlewareInterface> middleware, int port = 9090, double session_timeout = 10.0,
-      double publish_rate = 50.0, WhitelistFilter whitelist = {});
+      double publish_rate = 50.0, WhitelistFilter whitelist = {},
+      size_t heavy_frame_threshold_bytes = kDefaultHeavyFrameThresholdBytes);
 
   /// Shuts down middleware before members are destroyed, preventing
   /// disconnect callbacks from firing into a partially destroyed object.
@@ -211,6 +217,9 @@ class BridgeServer {
   double session_timeout_;
   double publish_rate_;
   WhitelistFilter whitelist_;
+  // Per-message byte size at or above which a topic is isolated into its own
+  // size-class ("heavy") frame; 0 disables splitting. See publish_aggregated_messages().
+  size_t heavy_frame_threshold_bytes_;
 
   // State
   std::atomic<bool> initialized_;

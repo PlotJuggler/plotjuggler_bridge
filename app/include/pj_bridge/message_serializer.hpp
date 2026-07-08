@@ -89,12 +89,14 @@ class AggregatedMessageSerializer {
    *   - Offset 0: magic (uint32_t "PJRB" = 0x42524A50, little-endian)
    *   - Offset 4: message_count (uint32_t, little-endian)
    *   - Offset 8: uncompressed_size (uint32_t, little-endian)
-   *   - Offset 12: flags (uint32_t, reserved = 0)
+   *   - Offset 12: flags (uint32_t; bit0 = heavy frame, else reserved = 0)
    *   - Offset 16+: ZSTD-compressed payload
    *
+   * @param flags Header flag bits written at offset 12 (default 0). Use
+   *              kFrameFlagHeavy to mark an isolated large/size-class frame.
    * @return Vector containing header + compressed payload
    */
-  std::vector<uint8_t> finalize();
+  std::vector<uint8_t> finalize(uint32_t flags = 0);
 
   /**
    * @brief Compress data using ZSTD (compression level 1)

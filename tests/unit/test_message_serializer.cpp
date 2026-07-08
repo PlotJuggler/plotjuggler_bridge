@@ -22,6 +22,7 @@
 #include <cstring>
 
 #include "pj_bridge/message_serializer.hpp"
+#include "pj_bridge/protocol_constants.hpp"
 
 using namespace pj_bridge;
 
@@ -497,4 +498,35 @@ TEST_F(MessageSerializerTest, UncompressedSizeMatchesPayload) {
   uint32_t uncompressed_size;
   std::memcpy(&uncompressed_size, result.data() + 8, sizeof(uncompressed_size));
   EXPECT_EQ(uncompressed_size, 18u);
+}
+
+// ============================================================================
+// Frame flags — heavy/size-class frame marking (bit 0 of header flags field)
+// ============================================================================
+
+TEST_F(MessageSerializerTest, FinalizeWithHeavyFlagSetsHeaderBit) {
+  auto data = create_test_data({1, 2, 3, 4});
+  serializer_.serialize_message("/big", 1000, data.data(), data.size());
+
+  auto result = serializer_.finalize(kFrameFlagHeavy);
+
+  // Flags field at offset 12 carries the heavy bit.
+  uint32_t flags;
+  std::memcpy(&flags, result.data() + 12, sizeof(flags));
+  EXPECT_EQ(flags, kFrameFlagHeavy);
+}
+
+TEST_F(MessageSerializerTest, FinalizeFlagsDoNotAlterPayload) {
+  auto data = create_test_data({10, 20, 30, 40, 50});
+  serializer_.serialize_message("/big", 12345, data.data(), data.size());
+
+  auto plain = serializer_.finalize(0);
+  auto heavy = serializer_.finalize(kFrameFlagHeavy);
+
+  // Only the flags field differs; the compressed payload (offset 16+) is
+  // byte-identical regardless of flags.
+  ASSERT_EQ(plain.size(), heavy.size());
+  std::vector<uint8_t> plain_payload(plain.begin() + 16, plain.end());
+  std::vector<uint8_t> heavy_payload(heavy.begin() + 16, heavy.end());
+  EXPECT_EQ(plain_payload, heavy_payload);
 }
