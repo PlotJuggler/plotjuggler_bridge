@@ -30,9 +30,20 @@ namespace pj_bridge {
 
 /// Delivery priority for a per-client binary frame. Under socket congestion a
 /// `kHeavy` (large/size-class) frame is dropped before transmit rather than
-/// queued, so one big frame cannot starve the small frames behind it; `kNormal`
-/// frames use the queue-with-drop-oldest backlog. See docs/API.md.
+/// queued, so one big frame cannot starve the small frames behind it; a
+/// `kNormal` frame instead falls back to the queue-with-drop-oldest backlog.
+/// (When the socket has room, both are sent immediately.) See docs/API.md.
 enum class FramePriority { kNormal, kHeavy };
+
+/// Outcome of send_binary(): how the transport handled the frame. Only
+/// `kDelivered` and `kQueued` are (or will be) put on the wire; `kShed` and
+/// `kClientGone` are never delivered, so callers must NOT count them as sent.
+enum class SendResult {
+  kDelivered,   ///< written to the socket now (or flushed from the backlog)
+  kQueued,      ///< enqueued for later delivery (kNormal frame, socket congested)
+  kShed,        ///< dropped before transmit (kHeavy frame, socket congested)
+  kClientGone,  ///< the client disconnected; nothing was sent
+};
 
 /// Abstract transport layer between BridgeServer and clients.
 ///
@@ -73,9 +84,10 @@ class MiddlewareInterface {
   /// Send binary data to a specific client (used for per-client aggregated frames).
   /// @param priority kHeavy frames are shed before transmit under congestion
   ///        instead of queued (default kNormal preserves the legacy behavior).
-  /// @return true if the message was sent or accepted for later delivery,
-  ///         false if the client is gone.
-  virtual bool send_binary(
+  /// @return how the frame was handled (see SendResult). Callers counting
+  ///         forwarded bytes/messages must treat only kDelivered/kQueued as
+  ///         forwarded — kShed and kClientGone never reach the client.
+  virtual SendResult send_binary(
       const std::string& client_identity, const std::vector<uint8_t>& data,
       FramePriority priority = FramePriority::kNormal) = 0;
 

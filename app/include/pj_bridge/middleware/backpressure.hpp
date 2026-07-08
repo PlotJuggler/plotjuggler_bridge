@@ -20,7 +20,6 @@
 #pragma once
 
 #include <cstddef>
-#include <functional>
 #include <optional>
 #include <vector>
 
@@ -28,39 +27,40 @@
 
 namespace pj_bridge {
 
-/// Outcome of run_backpressure() for one outgoing frame.
+/// Outcome of run_backpressure() for one outgoing frame. The disposition is a
+/// single discriminant (no contradictory flag combinations are representable);
+/// the counters are companion data.
 struct SendOutcome {
-  bool accepted = false;      ///< value send_binary() should return to its caller
-  size_t frames_flushed = 0;  ///< queued frames flushed to the socket this call
-  bool shed_heavy = false;    ///< a kHeavy frame was dropped before transmit
-  size_t dropped = 0;         ///< frames evicted from the backlog on queue overflow
-  bool send_failed = false;   ///< a send() returned false (client gone)
+  SendResult result = SendResult::kClientGone;  ///< how the current frame was handled
+  size_t frames_flushed = 0;                    ///< backlog frames flushed to the socket this call
+  size_t dropped = 0;                           ///< backlog frames evicted on overflow (only when result == kQueued)
 };
 
 /// Socket-agnostic backpressure policy shared by the send path. The caller
-/// injects the socket/queue primitives so the policy is unit-testable without a
-/// real connection:
-///   - @p buffered_amount : current outgoing socket buffer size, in bytes
-///   - @p pop_pending     : remove + return the oldest queued frame (nullopt if empty)
-///   - @p send            : transmit a frame; returns success (false = client gone)
-///   - @p queue_pending   : enqueue a frame with drop-oldest overflow; returns the
-///                          number dropped, or nullopt if the client is gone
+/// injects the socket/queue primitives (as callables — templated to avoid
+/// std::function type-erasure on the hot path) so the policy is unit-testable
+/// without a real connection:
+///   - @p buffered_amount : `size_t()`                    — current socket buffer bytes
+///   - @p pop_pending     : `std::optional<vector<uint8_t>>()` — pop oldest queued frame (nullopt if empty)
+///   - @p send            : `bool(const vector<uint8_t>&)` — transmit a frame; false = client gone
+///   - @p queue_pending   : `std::optional<size_t>(const vector<uint8_t>&)` — enqueue (drop-oldest),
+///                          returns #dropped, or nullopt if the client is gone
 ///
 /// Policy: first flush the backlog while the socket has room (re-checking the
 /// watermark each iteration so an already-congested socket is never fed
 /// further, and never flushing more than @p max_flush frames so a concurrent
 /// producer cannot make one call flush forever); then handle the current
-/// frame — send it if there is room, else drop a kHeavy frame before transmit
-/// (shed) or enqueue a kNormal frame.
+/// frame — send it if there is room (kDelivered), else drop a kHeavy frame
+/// before transmit (kShed) or enqueue a kNormal frame (kQueued). A vanished
+/// client surfaces as kClientGone.
 ///
 /// @param max_flush upper bound on frames flushed this call — pass the backlog
 ///        size observed at call start.
-inline SendOutcome run_backpressure(
+template <class BufferedAmount, class PopPending, class Send, class QueuePending>
+SendOutcome run_backpressure(
     FramePriority priority, const std::vector<uint8_t>& frame, size_t watermark, size_t max_flush,
-    const std::function<size_t()>& buffered_amount,
-    const std::function<std::optional<std::vector<uint8_t>>()>& pop_pending,
-    const std::function<bool(const std::vector<uint8_t>&)>& send,
-    const std::function<std::optional<size_t>(const std::vector<uint8_t>&)>& queue_pending) {
+    const BufferedAmount& buffered_amount, const PopPending& pop_pending, const Send& send,
+    const QueuePending& queue_pending) {
   SendOutcome out;
 
   // Flush queued frames to the socket, re-checking the watermark each iteration
@@ -74,8 +74,7 @@ inline SendOutcome run_backpressure(
       break;
     }
     if (!send(*queued)) {
-      out.send_failed = true;
-      out.accepted = false;
+      out.result = SendResult::kClientGone;
       return out;
     }
     out.frames_flushed++;
@@ -83,26 +82,23 @@ inline SendOutcome run_backpressure(
 
   // Handle the current frame against the live socket buffer.
   if (buffered_amount() < watermark) {
-    out.accepted = send(frame);
-    out.send_failed = !out.accepted;
+    out.result = send(frame) ? SendResult::kDelivered : SendResult::kClientGone;
     return out;
   }
 
   // Socket congested: shed heavy frames before transmit; queue normal frames.
   if (priority == FramePriority::kHeavy) {
-    out.shed_heavy = true;
-    out.accepted = true;  // accepted-for-later semantics, same as a queued normal frame
+    out.result = SendResult::kShed;
     return out;
   }
 
   std::optional<size_t> dropped = queue_pending(frame);
   if (!dropped) {
-    out.accepted = false;
-    out.send_failed = true;
+    out.result = SendResult::kClientGone;
     return out;
   }
   out.dropped = *dropped;
-  out.accepted = true;
+  out.result = SendResult::kQueued;
   return out;
 }
 

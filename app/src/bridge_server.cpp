@@ -60,16 +60,15 @@ double clamp_rate_hz(double rate_hz) {
 BridgeServer::BridgeServer(
     std::shared_ptr<TopicSourceInterface> topic_source,
     std::shared_ptr<SubscriptionManagerInterface> subscription_manager, std::shared_ptr<MiddlewareInterface> middleware,
-    int port, double session_timeout, double publish_rate, WhitelistFilter whitelist,
-    size_t heavy_frame_threshold_bytes)
+    BridgeServerConfig config)
     : topic_source_(std::move(topic_source)),
       subscription_manager_(std::move(subscription_manager)),
       middleware_(std::move(middleware)),
-      port_(port),
-      session_timeout_(session_timeout),
-      publish_rate_(publish_rate),
-      whitelist_(std::move(whitelist)),
-      heavy_frame_threshold_bytes_(heavy_frame_threshold_bytes),
+      port_(config.port),
+      session_timeout_(config.session_timeout),
+      publish_rate_(config.publish_rate),
+      whitelist_(std::move(config.whitelist)),
+      heavy_frame_threshold_bytes_(config.heavy_frame_threshold_bytes),
       initialized_(false),
       total_messages_published_(0),
       total_bytes_published_(0),
@@ -1090,7 +1089,8 @@ void BridgeServer::publish_aggregated_messages() {
         auto route_message = [&](const std::string& topic, const BufferedMessage& msg) {
           const bool heavy = heavy_frame_threshold_bytes_ != 0 && msg.data->size() >= heavy_frame_threshold_bytes_;
           if (heavy) {
-            // One frame per heavy message (mirrors collect_latched_replay).
+            // One single-message frame per heavy message (same one-message-per-frame
+            // shape as collect_latched_replay's retained-sample frame).
             AggregatedMessageSerializer heavy_serializer;
             heavy_serializer.serialize_message(topic, msg.timestamp_ns, msg.data->data(), msg.data->size());
             GroupFrame heavy_frame;
@@ -1172,9 +1172,14 @@ void BridgeServer::publish_aggregated_messages() {
           continue;
         }
         const FramePriority priority = frame.is_heavy ? FramePriority::kHeavy : FramePriority::kNormal;
-        if (middleware_->send_binary(client_id, frame.compressed_data, priority)) {
+        const SendResult result = middleware_->send_binary(client_id, frame.compressed_data, priority);
+        // Count a frame as forwarded only if it was delivered now or queued for
+        // later delivery. A kShed heavy frame is intentionally dropped under
+        // congestion (surfaced via the middleware's heavy_shed_count(), not in
+        // publish stats); kClientGone never reaches the client.
+        if (result == SendResult::kDelivered || result == SendResult::kQueued) {
           any_sent = true;
-        } else {
+        } else if (result == SendResult::kClientGone) {
           spdlog::debug("Failed to send binary frame to client '{}'", client_id);
         }
       }

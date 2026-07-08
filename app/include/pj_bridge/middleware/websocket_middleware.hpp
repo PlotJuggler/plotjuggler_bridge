@@ -49,7 +49,13 @@ struct TlsConfig {
 
 class WebSocketMiddleware : public MiddlewareInterface {
  public:
-  explicit WebSocketMiddleware(size_t client_backlog_size = 100, std::optional<TlsConfig> tls = std::nullopt);
+  /// @param socket_buffer_watermark bytes of outgoing socket buffer at/above
+  ///        which a client is considered congested (frames queue or shed).
+  ///        Defaults to kSocketBufferHighWatermark; primarily overridden in
+  ///        tests to exercise the congested path deterministically.
+  explicit WebSocketMiddleware(
+      size_t client_backlog_size = 100, std::optional<TlsConfig> tls = std::nullopt,
+      size_t socket_buffer_watermark = kSocketBufferHighWatermark);
   ~WebSocketMiddleware() override;
 
   WebSocketMiddleware(const WebSocketMiddleware&) = delete;
@@ -62,9 +68,11 @@ class WebSocketMiddleware : public MiddlewareInterface {
   bool receive_request(std::vector<uint8_t>& data, std::string& client_identity) override;
   bool send_reply(const std::string& client_identity, const std::vector<uint8_t>& data) override;
   bool publish_data(const std::vector<uint8_t>& data) override;
-  bool send_binary(
-      const std::string& client_identity, const std::vector<uint8_t>& data,
-      FramePriority priority = FramePriority::kNormal) override;
+  // NOTE: the FramePriority default lives only on the base MiddlewareInterface
+  // declaration (defaults are bound statically, so repeating it here could
+  // silently diverge).
+  SendResult send_binary(
+      const std::string& client_identity, const std::vector<uint8_t>& data, FramePriority priority) override;
   bool is_ready() const override;
   void set_on_connect(ConnectionCallback callback) override;
   void set_on_disconnect(ConnectionCallback callback) override;
@@ -77,6 +85,13 @@ class WebSocketMiddleware : public MiddlewareInterface {
   /// Total number of kHeavy frames shed before transmit under congestion
   /// (dropped instead of queued), summed over the middleware's lifetime.
   uint64_t heavy_shed_count() const;
+
+  /// Lossy-send policy watermark adapted from foxglove_bridge (MIT License,
+  /// Copyright (c) Foxglove Technologies Inc): once a client's outgoing socket
+  /// buffer reaches this many bytes, further frames are queued (kNormal) or shed
+  /// (kHeavy) instead of blocking or disconnecting the client. Public so entry
+  /// points can sanity-check a configured heavy-frame threshold against it.
+  static constexpr size_t kSocketBufferHighWatermark = 1u << 20;  // 1 MiB
 
  private:
   struct IncomingRequest {
@@ -111,6 +126,7 @@ class WebSocketMiddleware : public MiddlewareInterface {
   uint64_t heavy_shed_total_{0};
 
   size_t client_backlog_size_;
+  size_t socket_buffer_watermark_;
   std::optional<TlsConfig> tls_;
 
   ConnectionCallback on_connect_;
@@ -123,12 +139,6 @@ class WebSocketMiddleware : public MiddlewareInterface {
 
   static constexpr int kShutdownTimeoutSeconds = 3;
   static constexpr size_t kMaxIncomingQueueSize = 1024;
-
-  // Lossy-send policy adapted from foxglove_bridge (MIT License, Copyright
-  // (c) Foxglove Technologies Inc): once a client's outgoing socket buffer
-  // exceeds this watermark, new frames are queued (dropping the oldest on
-  // overflow) instead of blocking or disconnecting the client.
-  static constexpr size_t kSocketBufferHighWatermark = 1u << 20;  // 1 MiB
   static constexpr int kDropWarnIntervalSeconds = 30;
 };
 

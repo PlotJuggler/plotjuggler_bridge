@@ -116,7 +116,7 @@ TEST_F(WebSocketMiddlewareTest, SendBinaryToUnknownClient) {
   ASSERT_TRUE(result.has_value());
 
   std::vector<uint8_t> data = {1, 2, 3};
-  EXPECT_FALSE(middleware_->send_binary("nonexistent_client", data));
+  EXPECT_EQ(middleware_->send_binary("nonexistent_client", data, FramePriority::kNormal), SendResult::kClientGone);
 }
 
 TEST_F(WebSocketMiddlewareTest, ReceiveRequestNotInitializedReturnsFast) {
@@ -334,7 +334,7 @@ TEST_F(WebSocketMiddlewareTest, SendBinaryToConnectedClient) {
 
   // Send binary data from the server to this client
   std::vector<uint8_t> binary_payload = {0xDE, 0xAD, 0xBE, 0xEF, 0x01, 0x02, 0x03, 0x04};
-  EXPECT_TRUE(middleware_->send_binary(client_id, binary_payload));
+  EXPECT_EQ(middleware_->send_binary(client_id, binary_payload, FramePriority::kNormal), SendResult::kDelivered);
 
   // Wait for the client to receive the binary data
   {
@@ -345,6 +345,48 @@ TEST_F(WebSocketMiddlewareTest, SendBinaryToConnectedClient) {
 
   ASSERT_EQ(received_binary.size(), binary_payload.size());
   EXPECT_EQ(received_binary, binary_payload);
+
+  client.stop();
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+}
+
+// With the socket watermark forced to 0, every connected client is treated as
+// congested, which makes the otherwise-unreachable over-watermark path testable
+// with a real connection: a kHeavy frame is shed (and counted) before transmit,
+// while a kNormal frame is queued. This covers the shed-counter wiring that
+// lives outside the pure run_backpressure() policy.
+TEST(WebSocketMiddlewareShedTest, HeavyFrameShedUnderForcedCongestionIncrementsCounter) {
+  WebSocketMiddleware middleware(/*client_backlog_size=*/100, std::nullopt, /*socket_buffer_watermark=*/0);
+  ASSERT_TRUE(middleware.initialize(18110).has_value());
+
+  ix::WebSocket client;
+  client.setUrl("ws://127.0.0.1:18110");
+  client.setOnMessageCallback([](const ix::WebSocketMessagePtr& /*msg*/) {});
+  client.start();
+  ASSERT_TRUE(wait_for_client_open(client)) << "Client failed to connect";
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+  client.send("register");
+  std::vector<uint8_t> data;
+  std::string client_id;
+  ASSERT_TRUE(poll_receive_request(middleware, data, client_id));
+  ASSERT_FALSE(client_id.empty());
+
+  // The middleware is content-agnostic; it acts on the priority argument, not
+  // the frame bytes. A >=16-byte buffer is a realistic frame size.
+  std::vector<uint8_t> frame(32, 0x7F);
+
+  EXPECT_EQ(middleware.heavy_shed_count(), 0u);
+
+  EXPECT_EQ(middleware.send_binary(client_id, frame, FramePriority::kHeavy), SendResult::kShed);
+  EXPECT_EQ(middleware.heavy_shed_count(), 1u);
+
+  EXPECT_EQ(middleware.send_binary(client_id, frame, FramePriority::kHeavy), SendResult::kShed);
+  EXPECT_EQ(middleware.heavy_shed_count(), 2u);
+
+  // A normal frame under the same congestion is queued, not shed.
+  EXPECT_EQ(middleware.send_binary(client_id, frame, FramePriority::kNormal), SendResult::kQueued);
+  EXPECT_EQ(middleware.heavy_shed_count(), 2u);
 
   client.stop();
   std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -474,7 +516,7 @@ TEST_F(WebSocketMiddlewareTest, DroppedFrameCountZeroAfterNormalTraffic) {
 
   std::vector<uint8_t> payload = {1, 2, 3, 4};
   for (int i = 0; i < 10; ++i) {
-    EXPECT_TRUE(middleware_->send_binary(client_id, payload));
+    EXPECT_EQ(middleware_->send_binary(client_id, payload, FramePriority::kNormal), SendResult::kDelivered);
   }
 
   EXPECT_EQ(middleware_->dropped_frame_count(), 0u);
@@ -499,7 +541,7 @@ TEST_F(WebSocketMiddlewareTest, SendBinaryToAbsentClientCreatesNoPendingState) {
 
   std::vector<uint8_t> data = {1, 2, 3};
   for (int i = 0; i < 5; ++i) {
-    EXPECT_FALSE(middleware_->send_binary("never-connected", data));
+    EXPECT_EQ(middleware_->send_binary("never-connected", data, FramePriority::kNormal), SendResult::kClientGone);
   }
   EXPECT_EQ(middleware_->dropped_frame_count(), 0u);
 
@@ -545,7 +587,7 @@ TEST_F(WebSocketMiddlewareTest, DropPendingIsSafeNoOpAndKeepsSocketUsable) {
   EXPECT_EQ(middleware_->dropped_frame_count(), 0u);
 
   std::vector<uint8_t> payload = {1, 2, 3, 4};
-  EXPECT_TRUE(middleware_->send_binary(client_id, payload));
+  EXPECT_EQ(middleware_->send_binary(client_id, payload, FramePriority::kNormal), SendResult::kDelivered);
   EXPECT_EQ(middleware_->dropped_frame_count(), 0u);
 
   client.stop();

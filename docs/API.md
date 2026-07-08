@@ -551,9 +551,10 @@ Under congestion, heavy (size-class) frames from the aggregated publish stream
 are shed before transmit rather than queued (see
 [Size-class frames](#size-class-frames-heavy-flag)), so a continuous stream of
 large frames cannot fill the backlog and evict small-topic frames. (One-shot
-latched-replay frames are the exception: they are delivered reliably at normal
-priority so a late subscriber always receives the retained sample, and may
-therefore briefly occupy the backlog — but they are not a continuous stream.)
+latched-replay frames are an exception: they are sent at normal priority —
+never shed like heavy frames — so they may briefly occupy the backlog and, like
+any normal frame, can be dropped only if the backlog itself overflows under
+sustained congestion; they are not a continuous stream.)
 
 The per-message size at or above which a message is isolated into its own heavy
 frame is configurable:
@@ -649,8 +650,9 @@ its own **heavy** frame with header flag bit 0 (`0x1`) set, while smaller messag
 stay aggregated in a single unflagged frame.
 
 This is purely a framing change — the payload format is identical, and a publish
-cycle may now emit several binary frames (one light frame plus one per heavy
-message) instead of one. Clients that do not care about the distinction can ignore
+cycle may now emit several binary frames (at most one aggregated light frame,
+plus one per heavy message — and no light frame at all when every admitted
+message in a group is heavy) instead of one. Clients that do not care about the distinction can ignore
 the flag and decode every frame the same way (each frame is self-describing via its
 `message_count`). Clients that do care may use bit 0 to, for example, surface
 heavy-topic drop indicators. The flag never affects decoding, so old clients remain

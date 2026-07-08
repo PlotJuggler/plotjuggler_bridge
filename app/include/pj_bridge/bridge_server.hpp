@@ -48,6 +48,21 @@ namespace pj_bridge {
  * Thread-safe for concurrent client connections.
  * Event loop is driven externally (no internal timers).
  */
+
+/// Tunable configuration for BridgeServer (backend-agnostic). Bundled into one
+/// struct so entry points construct the server with a single named aggregate
+/// rather than a long positional argument list.
+struct BridgeServerConfig {
+  int port = 9090;                 ///< WebSocket port
+  double session_timeout = 10.0;   ///< client session timeout, seconds
+  double publish_rate = 50.0;      ///< message aggregation/publish rate, Hz
+  WhitelistFilter whitelist = {};  ///< topic whitelist (default: matches everything)
+  /// Per-message byte size at or above which a topic's message is isolated into
+  /// its own size-class ("heavy") frame instead of being aggregated with light
+  /// topics. 0 disables splitting (single aggregated frame). Default: 256 KiB.
+  size_t heavy_frame_threshold_bytes = kDefaultHeavyFrameThresholdBytes;
+};
+
 class BridgeServer {
  public:
   struct StatsSnapshot {
@@ -62,21 +77,12 @@ class BridgeServer {
    * @param topic_source Backend-specific topic discovery and schema provider
    * @param subscription_manager Backend-specific subscription manager
    * @param middleware Middleware interface for network communication
-   * @param port Server port (default: 9090)
-   * @param session_timeout Session timeout in seconds (default: 10.0)
-   * @param publish_rate Message aggregation publish rate in Hz (default: 50.0)
-   * @param whitelist Topic whitelist filter (default: matches everything)
-   * @param heavy_frame_threshold_bytes Per-message byte size at or above which
-   *        a topic's message is isolated into its own size-class ("heavy")
-   *        frame instead of being aggregated with light topics. 0 disables
-   *        splitting (single aggregated frame). Default: 256 KiB.
+   * @param config Tunable server configuration (see BridgeServerConfig)
    */
   explicit BridgeServer(
       std::shared_ptr<TopicSourceInterface> topic_source,
       std::shared_ptr<SubscriptionManagerInterface> subscription_manager,
-      std::shared_ptr<MiddlewareInterface> middleware, int port = 9090, double session_timeout = 10.0,
-      double publish_rate = 50.0, WhitelistFilter whitelist = {},
-      size_t heavy_frame_threshold_bytes = kDefaultHeavyFrameThresholdBytes);
+      std::shared_ptr<MiddlewareInterface> middleware, BridgeServerConfig config = {});
 
   /// Shuts down middleware before members are destroyed, preventing
   /// disconnect callbacks from firing into a partially destroyed object.

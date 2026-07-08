@@ -83,7 +83,7 @@ class BackpressureTest : public ::testing::Test {
 
 TEST_F(BackpressureTest, SendsImmediatelyWhenSocketHasRoom) {
   auto out = run(FramePriority::kNormal, frame_of(100));
-  EXPECT_TRUE(out.accepted);
+  EXPECT_EQ(out.result, SendResult::kDelivered);
   EXPECT_EQ(out.frames_flushed, 0u);
   ASSERT_EQ(sent_.size(), 1u);
   EXPECT_EQ(sent_[0].size(), 100u);
@@ -97,6 +97,7 @@ TEST_F(BackpressureTest, FlushStopsWhenWatermarkReachedMidFlush) {
   }
   auto out = run(FramePriority::kNormal, frame_of(600));
   EXPECT_EQ(out.frames_flushed, 2u) << "flush must recheck the watermark and stop early";
+  EXPECT_EQ(out.result, SendResult::kQueued);
   EXPECT_EQ(sent_.size(), 2u);
   // Three unflushed backlog frames remain, plus the current frame gets queued.
   EXPECT_EQ(backlog_.size(), 4u);
@@ -105,8 +106,7 @@ TEST_F(BackpressureTest, FlushStopsWhenWatermarkReachedMidFlush) {
 TEST_F(BackpressureTest, HeavyFrameShedWhenCongested) {
   buffered_ = watermark_;  // already congested
   auto out = run(FramePriority::kHeavy, frame_of(5000));
-  EXPECT_TRUE(out.shed_heavy);
-  EXPECT_TRUE(out.accepted);
+  EXPECT_EQ(out.result, SendResult::kShed);
   EXPECT_TRUE(sent_.empty());
   EXPECT_TRUE(backlog_.empty()) << "a heavy frame must be shed, never queued";
 }
@@ -114,8 +114,7 @@ TEST_F(BackpressureTest, HeavyFrameShedWhenCongested) {
 TEST_F(BackpressureTest, NormalFrameQueuedWhenCongested) {
   buffered_ = watermark_;  // congested
   auto out = run(FramePriority::kNormal, frame_of(100));
-  EXPECT_TRUE(out.accepted);
-  EXPECT_FALSE(out.shed_heavy);
+  EXPECT_EQ(out.result, SendResult::kQueued);
   EXPECT_TRUE(sent_.empty());
   ASSERT_EQ(backlog_.size(), 1u);
 }
@@ -126,8 +125,7 @@ TEST_F(BackpressureTest, SendFailureDuringFlushIsNotAccepted) {
       FramePriority::kNormal, frame_of(100), watermark_, /*max_flush=*/1, buffered_amount(), pop_pending(),
       [](const std::vector<uint8_t>&) { return false; },  // send fails (client gone)
       queue_pending());
-  EXPECT_FALSE(out.accepted);
-  EXPECT_TRUE(out.send_failed);
+  EXPECT_EQ(out.result, SendResult::kClientGone);
 }
 
 TEST_F(BackpressureTest, FlushDrainsFullyThenSendsCurrentWhenRoom) {
@@ -137,7 +135,7 @@ TEST_F(BackpressureTest, FlushDrainsFullyThenSendsCurrentWhenRoom) {
     backlog_.push_back(frame_of(10));
   }
   auto out = run(FramePriority::kNormal, frame_of(10));
-  EXPECT_TRUE(out.accepted);
+  EXPECT_EQ(out.result, SendResult::kDelivered);
   EXPECT_EQ(out.frames_flushed, 3u);
   EXPECT_TRUE(backlog_.empty());
   EXPECT_EQ(sent_.size(), 4u);  // 3 flushed + current
@@ -146,8 +144,7 @@ TEST_F(BackpressureTest, FlushDrainsFullyThenSendsCurrentWhenRoom) {
 TEST_F(BackpressureTest, HeavyFrameSentWhenRoomAvailable) {
   // A heavy frame is only shed under congestion; with room it is sent normally.
   auto out = run(FramePriority::kHeavy, frame_of(5000));
-  EXPECT_TRUE(out.accepted);
-  EXPECT_FALSE(out.shed_heavy);
+  EXPECT_EQ(out.result, SendResult::kDelivered);
   ASSERT_EQ(sent_.size(), 1u);
   EXPECT_EQ(sent_[0].size(), 5000u);
 }
@@ -159,8 +156,7 @@ TEST_F(BackpressureTest, QueueClientGoneReturnsNotAccepted) {
   auto out = run_backpressure(
       FramePriority::kNormal, frame_of(100), watermark_, /*max_flush=*/0, buffered_amount(), pop_pending(), send(),
       [](const std::vector<uint8_t>&) -> std::optional<size_t> { return std::nullopt; });
-  EXPECT_FALSE(out.accepted);
-  EXPECT_TRUE(out.send_failed);
+  EXPECT_EQ(out.result, SendResult::kClientGone);
 }
 
 TEST_F(BackpressureTest, FlushBoundedByMaxFlush) {
@@ -174,4 +170,25 @@ TEST_F(BackpressureTest, FlushBoundedByMaxFlush) {
       queue_pending());
   EXPECT_EQ(out.frames_flushed, 3u);
   EXPECT_EQ(backlog_.size(), 2u);
+}
+
+TEST_F(BackpressureTest, FlushTerminatesDespiteConcurrentEnqueue) {
+  // A producer that enqueues a fresh frame on every pop (socket has endless
+  // room). Without the max_flush bound this would flush forever; with it,
+  // exactly max_flush frames flush and the call terminates. This is the
+  // concurrency property max_flush exists to guarantee.
+  backlog_.push_back(frame_of(1));
+  auto refilling_pop = [this]() -> std::optional<std::vector<uint8_t>> {
+    if (backlog_.empty()) {
+      return std::nullopt;
+    }
+    std::vector<uint8_t> f = std::move(backlog_.front());
+    backlog_.pop_front();
+    backlog_.push_back(frame_of(1));  // producer keeps the backlog non-empty
+    return f;
+  };
+  auto out = run_backpressure(
+      FramePriority::kNormal, frame_of(1), watermark_, /*max_flush=*/3, buffered_amount(), refilling_pop, send(),
+      queue_pending());
+  EXPECT_EQ(out.frames_flushed, 3u) << "max_flush must bound the flush despite continual refills";
 }

@@ -102,6 +102,14 @@ int main(int argc, char** argv) {
     rclcpp::shutdown();
     return 1;
   }
+  if (heavy_frame_threshold_bytes > 0 &&
+      static_cast<size_t>(heavy_frame_threshold_bytes) >= pj_bridge::WebSocketMiddleware::kSocketBufferHighWatermark) {
+    RCLCPP_WARN(
+        node->get_logger(),
+        "heavy_frame_threshold_bytes (%ld) >= socket watermark (%zu): messages between the two sizes stay 'light' and "
+        "queue instead of shedding under congestion — keep the threshold below the watermark",
+        heavy_frame_threshold_bytes, pj_bridge::WebSocketMiddleware::kSocketBufferHighWatermark);
+  }
   RCLCPP_INFO(node->get_logger(), "heavy_frame_threshold_bytes=%ld", heavy_frame_threshold_bytes);
 
   auto whitelist_result = pj_bridge::WhitelistFilter::create(topic_whitelist);
@@ -135,8 +143,9 @@ int main(int argc, char** argv) {
 
     // Create bridge server
     pj_bridge::BridgeServer server(
-        topic_source, sub_manager, middleware, port, session_timeout, publish_rate, std::move(whitelist_result.value()),
-        static_cast<size_t>(heavy_frame_threshold_bytes));
+        topic_source, sub_manager, middleware,
+        {port, session_timeout, publish_rate, std::move(whitelist_result.value()),
+         static_cast<size_t>(heavy_frame_threshold_bytes)});
 
     if (!server.initialize()) {
       RCLCPP_ERROR(node->get_logger(), "Failed to initialize bridge server");
@@ -197,8 +206,10 @@ int main(int argc, char** argv) {
 
     auto [total_messages, total_bytes] = server.get_publish_stats();
     RCLCPP_INFO(
-        node->get_logger(), "Final statistics: %lu messages published, %lu bytes transmitted", total_messages,
-        total_bytes);
+        node->get_logger(),
+        "Final statistics: %lu messages published, %lu bytes transmitted, %lu frames dropped (slow clients), "
+        "%lu heavy frames shed (congestion)",
+        total_messages, total_bytes, middleware->dropped_frame_count(), middleware->heavy_shed_count());
 
     RCLCPP_INFO(node->get_logger(), "Bridge server shutdown complete");
 

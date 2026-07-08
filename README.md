@@ -54,6 +54,7 @@ independently.
 | `max_qos_depth` | int | 100 | ROS2 only: maximum KEEP_LAST subscription depth after aggregating publisher depths |
 | `topic_poll_interval` | double | 1.0 | Seconds between `topics_changed` notification polls; `0` disables polling |
 | `client_backlog_size` | int | 100 | Max binary frames queued per slow client before the oldest is dropped (must be `> 0`) |
+| `heavy_frame_threshold_bytes` | int | 262144 | Isolate messages ≥ this size (bytes) into their own size-class frame so they don't starve small topics; `0` disables (must be `>= 0`) |
 | `tls` | bool | false | Enable TLS (`wss://`); requires `certfile` and `keyfile` |
 | `certfile` | string | `""` | TLS server certificate file |
 | `keyfile` | string | `""` | TLS private key file |
@@ -71,6 +72,7 @@ independently.
 | `--topic-whitelist` | string list | `.*` | Full-match regex patterns (ECMAScript), repeatable |
 | `--topic-poll-interval` | double | 1.0 | Seconds between `topics_changed` notification polls; `0` disables polling |
 | `--client-backlog-size` | int | 100 | Max binary frames queued per slow client before the oldest is dropped (range `1`-`1000000`) |
+| `--heavy-frame-threshold-bytes` | int | 262144 | Isolate messages ≥ this size (bytes) into their own size-class frame; `0` disables (range `0`-`1000000000`) |
 | `--certfile` | string | (none) | TLS server certificate file; enables `wss://`, requires `--keyfile` |
 | `--keyfile` | string | (none) | TLS private key file; enables `wss://`, requires `--certfile` |
 | `--qos-profile` | string | (none) | RTI only: QoS profile XML file path |

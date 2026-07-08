@@ -28,8 +28,12 @@
 
 namespace pj_bridge {
 
-WebSocketMiddleware::WebSocketMiddleware(size_t client_backlog_size, std::optional<TlsConfig> tls)
-    : client_backlog_size_(client_backlog_size), tls_(std::move(tls)), initialized_(false) {}
+WebSocketMiddleware::WebSocketMiddleware(
+    size_t client_backlog_size, std::optional<TlsConfig> tls, size_t socket_buffer_watermark)
+    : client_backlog_size_(client_backlog_size),
+      socket_buffer_watermark_(socket_buffer_watermark),
+      tls_(std::move(tls)),
+      initialized_(false) {}
 
 WebSocketMiddleware::~WebSocketMiddleware() {
   shutdown();
@@ -296,7 +300,7 @@ bool WebSocketMiddleware::send_reply(const std::string& client_identity, const s
   return send_info.success;
 }
 
-bool WebSocketMiddleware::send_binary(
+SendResult WebSocketMiddleware::send_binary(
     const std::string& client_identity, const std::vector<uint8_t>& data, FramePriority priority) {
   // Lossy-send policy adapted from foxglove_bridge (MIT License, Copyright
   // (c) Foxglove Technologies Inc): a slow client never blocks the publisher
@@ -318,7 +322,7 @@ bool WebSocketMiddleware::send_binary(
     std::lock_guard<std::mutex> lock(clients_mutex_);
     auto it = clients_.find(client_identity);
     if (it == clients_.end() || !it->second) {
-      return false;
+      return SendResult::kClientGone;
     }
     ws = it->second;
     // Snapshot the backlog size so the flush is bounded to frames present now,
@@ -349,7 +353,7 @@ bool WebSocketMiddleware::send_binary(
   // exists: between the ws lookup above and here the disconnect callback may
   // have erased it AND its pending_frames_ entry; recreating a queue for a dead
   // client would strand the frame and skew dropped_frame_count(). nullopt tells
-  // the policy the client is gone, so send_binary returns false.
+  // the policy the client is gone, so send_binary reports kClientGone.
   auto queue_pending = [&](const std::vector<uint8_t>& frame) -> std::optional<size_t> {
     std::lock_guard<std::mutex> lock(clients_mutex_);
     if (clients_.find(client_identity) == clients_.end()) {
@@ -361,22 +365,23 @@ bool WebSocketMiddleware::send_binary(
   };
 
   SendOutcome outcome = run_backpressure(
-      priority, data, kSocketBufferHighWatermark, max_flush, buffered_amount, pop_pending, send, queue_pending);
+      priority, data, socket_buffer_watermark_, max_flush, buffered_amount, pop_pending, send, queue_pending);
 
-  if (outcome.shed_heavy) {
+  if (outcome.result == SendResult::kShed) {
     std::lock_guard<std::mutex> lock(clients_mutex_);
     // Re-check liveness, mirroring the queue path's disconnect-race handling: if
     // the client vanished between the ws lookup and the shed decision, report
-    // the client gone (false) rather than counting a shed for a dead client.
+    // it gone rather than counting a shed for a dead client.
     if (clients_.find(client_identity) == clients_.end()) {
-      return false;
+      return SendResult::kClientGone;
     }
     heavy_shed_total_++;
   }
 
   // Throttled slow-client warning, shared by the queue-drop and heavy-shed
   // paths (at most one line per client per kDropWarnIntervalSeconds).
-  if (outcome.dropped > 0 || outcome.shed_heavy) {
+  const bool dropped_a_frame = outcome.result == SendResult::kQueued && outcome.dropped > 0;
+  if (dropped_a_frame || outcome.result == SendResult::kShed) {
     auto now = std::chrono::steady_clock::now();
     bool should_warn = false;
     {
@@ -389,7 +394,7 @@ bool WebSocketMiddleware::send_binary(
       }
     }
     if (should_warn) {
-      if (outcome.shed_heavy) {
+      if (outcome.result == SendResult::kShed) {
         spdlog::warn("Slow client '{}': shedding heavy frame(s) ({} shed total)", client_identity, heavy_shed_count());
       } else {
         spdlog::warn("Slow client '{}': dropping oldest queued frame(s)", client_identity);
@@ -397,7 +402,7 @@ bool WebSocketMiddleware::send_binary(
     }
   }
 
-  return outcome.accepted;
+  return outcome.result;
 }
 
 void WebSocketMiddleware::drop_pending(const std::string& client_identity) {
