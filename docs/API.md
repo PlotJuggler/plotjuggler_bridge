@@ -547,10 +547,13 @@ configurable:
 - **FastDDS / RTI**: CLI flag `--client-backlog-size`, default `100`, valid
   range `1`-`1000000`.
 
-Under congestion this backlog only ever holds small frames: heavy
-(size-class) frames are shed before transmit rather than queued (see
-[Size-class frames](#size-class-frames-heavy-flag)), so a single large frame
-cannot fill the backlog and evict small-topic frames.
+Under congestion, heavy (size-class) frames from the aggregated publish stream
+are shed before transmit rather than queued (see
+[Size-class frames](#size-class-frames-heavy-flag)), so a continuous stream of
+large frames cannot fill the backlog and evict small-topic frames. (One-shot
+latched-replay frames are the exception: they are delivered reliably at normal
+priority so a late subscriber always receives the retained sample, and may
+therefore briefly occupy the backlog — but they are not a continuous stream.)
 
 The per-message size at or above which a message is isolated into its own heavy
 frame is configurable:
