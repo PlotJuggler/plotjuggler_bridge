@@ -48,10 +48,15 @@ struct SendOutcome {
 ///
 /// Policy: first flush the backlog while the socket has room (re-checking the
 /// watermark each iteration so an already-congested socket is never fed
-/// further); then handle the current frame — send it if there is room, else drop
-/// a kHeavy frame before transmit (shed) or enqueue a kNormal frame.
+/// further, and never flushing more than @p max_flush frames so a concurrent
+/// producer cannot make one call flush forever); then handle the current
+/// frame — send it if there is room, else drop a kHeavy frame before transmit
+/// (shed) or enqueue a kNormal frame.
+///
+/// @param max_flush upper bound on frames flushed this call — pass the backlog
+///        size observed at call start.
 inline SendOutcome run_backpressure(
-    FramePriority priority, const std::vector<uint8_t>& frame, size_t watermark,
+    FramePriority priority, const std::vector<uint8_t>& frame, size_t watermark, size_t max_flush,
     const std::function<size_t()>& buffered_amount,
     const std::function<std::optional<std::vector<uint8_t>>()>& pop_pending,
     const std::function<bool(const std::vector<uint8_t>&)>& send,
@@ -61,8 +66,9 @@ inline SendOutcome run_backpressure(
   // Flush queued frames to the socket, re-checking the watermark each iteration
   // so a socket that fills up mid-flush is never fed further (the flush-recheck
   // fix: the old loop computed the flush count once and could dump a burst of
-  // stale frames onto an already-congested socket).
-  while (buffered_amount() < watermark) {
+  // stale frames onto an already-congested socket). Bounded by max_flush so a
+  // producer enqueueing concurrently cannot keep this single call flushing.
+  while (out.frames_flushed < max_flush && buffered_amount() < watermark) {
     std::optional<std::vector<uint8_t>> queued = pop_pending();
     if (!queued) {
       break;

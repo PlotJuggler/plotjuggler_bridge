@@ -76,7 +76,8 @@ class BackpressureTest : public ::testing::Test {
     };
   }
   SendOutcome run(FramePriority prio, const std::vector<uint8_t>& frame) {
-    return run_backpressure(prio, frame, watermark_, buffered_amount(), pop_pending(), send(), queue_pending());
+    return run_backpressure(
+        prio, frame, watermark_, backlog_.size(), buffered_amount(), pop_pending(), send(), queue_pending());
   }
 };
 
@@ -122,9 +123,55 @@ TEST_F(BackpressureTest, NormalFrameQueuedWhenCongested) {
 TEST_F(BackpressureTest, SendFailureDuringFlushIsNotAccepted) {
   backlog_.push_back(frame_of(100));
   auto out = run_backpressure(
-      FramePriority::kNormal, frame_of(100), watermark_, buffered_amount(), pop_pending(),
+      FramePriority::kNormal, frame_of(100), watermark_, /*max_flush=*/1, buffered_amount(), pop_pending(),
       [](const std::vector<uint8_t>&) { return false; },  // send fails (client gone)
       queue_pending());
   EXPECT_FALSE(out.accepted);
   EXPECT_TRUE(out.send_failed);
+}
+
+TEST_F(BackpressureTest, FlushDrainsFullyThenSendsCurrentWhenRoom) {
+  // Backlog fits comfortably under the watermark: all of it flushes, then the
+  // current frame is sent too.
+  for (int i = 0; i < 3; ++i) {
+    backlog_.push_back(frame_of(10));
+  }
+  auto out = run(FramePriority::kNormal, frame_of(10));
+  EXPECT_TRUE(out.accepted);
+  EXPECT_EQ(out.frames_flushed, 3u);
+  EXPECT_TRUE(backlog_.empty());
+  EXPECT_EQ(sent_.size(), 4u);  // 3 flushed + current
+}
+
+TEST_F(BackpressureTest, HeavyFrameSentWhenRoomAvailable) {
+  // A heavy frame is only shed under congestion; with room it is sent normally.
+  auto out = run(FramePriority::kHeavy, frame_of(5000));
+  EXPECT_TRUE(out.accepted);
+  EXPECT_FALSE(out.shed_heavy);
+  ASSERT_EQ(sent_.size(), 1u);
+  EXPECT_EQ(sent_[0].size(), 5000u);
+}
+
+TEST_F(BackpressureTest, QueueClientGoneReturnsNotAccepted) {
+  // queue_pending() reporting the client vanished (nullopt) must surface as a
+  // failed send (matches the middleware disconnect-race handling).
+  buffered_ = watermark_;  // congested -> normal frame takes the queue path
+  auto out = run_backpressure(
+      FramePriority::kNormal, frame_of(100), watermark_, /*max_flush=*/0, buffered_amount(), pop_pending(), send(),
+      [](const std::vector<uint8_t>&) -> std::optional<size_t> { return std::nullopt; });
+  EXPECT_FALSE(out.accepted);
+  EXPECT_TRUE(out.send_failed);
+}
+
+TEST_F(BackpressureTest, FlushBoundedByMaxFlush) {
+  // Even with room for all, at most max_flush queued frames flush per call, so a
+  // concurrent producer cannot make one call flush forever.
+  for (int i = 0; i < 5; ++i) {
+    backlog_.push_back(frame_of(10));
+  }
+  auto out = run_backpressure(
+      FramePriority::kNormal, frame_of(10), watermark_, /*max_flush=*/3, buffered_amount(), pop_pending(), send(),
+      queue_pending());
+  EXPECT_EQ(out.frames_flushed, 3u);
+  EXPECT_EQ(backlog_.size(), 2u);
 }

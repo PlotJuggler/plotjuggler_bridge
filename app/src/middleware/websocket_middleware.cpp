@@ -313,6 +313,7 @@ bool WebSocketMiddleware::send_binary(
   // a lock-order cycle (observed as a TSAN lock-order-inversion). Each policy
   // callback below therefore takes the lock only for its own state access.
   std::shared_ptr<ix::WebSocket> ws;
+  size_t max_flush = 0;
   {
     std::lock_guard<std::mutex> lock(clients_mutex_);
     auto it = clients_.find(client_identity);
@@ -320,6 +321,12 @@ bool WebSocketMiddleware::send_binary(
       return false;
     }
     ws = it->second;
+    // Snapshot the backlog size so the flush is bounded to frames present now,
+    // never chasing frames a concurrent producer enqueues mid-flush.
+    auto pending_it = pending_frames_.find(client_identity);
+    if (pending_it != pending_frames_.end()) {
+      max_flush = pending_it->second.size();
+    }
   }
 
   auto buffered_amount = [&]() -> size_t { return ws->bufferedAmount(); };
@@ -353,11 +360,17 @@ bool WebSocketMiddleware::send_binary(
     return pending_it->second.push(frame);
   };
 
-  SendOutcome outcome =
-      run_backpressure(priority, data, kSocketBufferHighWatermark, buffered_amount, pop_pending, send, queue_pending);
+  SendOutcome outcome = run_backpressure(
+      priority, data, kSocketBufferHighWatermark, max_flush, buffered_amount, pop_pending, send, queue_pending);
 
   if (outcome.shed_heavy) {
     std::lock_guard<std::mutex> lock(clients_mutex_);
+    // Re-check liveness, mirroring the queue path's disconnect-race handling: if
+    // the client vanished between the ws lookup and the shed decision, report
+    // the client gone (false) rather than counting a shed for a dead client.
+    if (clients_.find(client_identity) == clients_.end()) {
+      return false;
+    }
     heavy_shed_total_++;
   }
 
