@@ -1090,11 +1090,16 @@ void BridgeServer::publish_aggregated_messages() {
           const bool heavy = heavy_frame_threshold_bytes_ != 0 && msg.data->size() >= heavy_frame_threshold_bytes_;
           if (heavy) {
             // One single-message frame per heavy message (same one-message-per-frame
-            // shape as collect_latched_replay's retained-sample frame).
+            // shape as collect_latched_replay's retained-sample frame). The frame is
+            // NOT wire-flagged (flags stay 0): existing PlotJuggler plugins reject
+            // any frame with flags != 0, and the isolation/shedding benefit comes
+            // entirely from the separate frame + the in-memory is_heavy priority
+            // below — not from a wire marker. kFrameFlagHeavy is reserved for a
+            // future capability-negotiated rollout (see docs/API.md).
             AggregatedMessageSerializer heavy_serializer;
             heavy_serializer.serialize_message(topic, msg.timestamp_ns, msg.data->data(), msg.data->size());
             GroupFrame heavy_frame;
-            heavy_frame.compressed_data = heavy_serializer.finalize(kFrameFlagHeavy);
+            heavy_frame.compressed_data = heavy_serializer.finalize();
             heavy_frame.msg_count = 1;
             heavy_frame.client_ids = client_ids;
             heavy_frame.is_heavy = true;

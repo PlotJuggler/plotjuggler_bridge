@@ -87,25 +87,22 @@ class MockMiddleware : public MiddlewareInterface {
 
   SendResult send_binary(
       const std::string& client_identity, const std::vector<uint8_t>& data, FramePriority priority) override {
-    bool is_heavy_frame = false;
-    if (data.size() >= 16) {
-      uint32_t flags = 0;
-      std::memcpy(&flags, data.data() + 12, sizeof(flags));
-      is_heavy_frame = (flags & kFrameFlagHeavy) != 0;
-    }
+    // Heaviness is carried by the priority argument, not a wire flag (heavy
+    // frames are NOT wire-flagged so existing plugins accept them).
+    const bool is_heavy_frame = (priority == FramePriority::kHeavy);
     // Test seam: simulate a client vanishing right before a heavy frame is
     // delivered, so partial-send stats can be exercised.
     if (fail_heavy_sends_ && is_heavy_frame) {
       return SendResult::kClientGone;
     }
     // Test seam: simulate the middleware shedding a heavy frame under congestion
-    // (accepted-but-dropped) so the bridge's "shed frames aren't counted as
-    // forwarded" rule can be verified without a real socket.
+    // (accepted-but-dropped, never delivered) so the bridge's "shed frames aren't
+    // counted as forwarded" rule can be verified without a real socket.
     if (shed_heavy_sends_ && is_heavy_frame) {
-      std::lock_guard<std::mutex> lock(binary_mutex_);
-      binary_priorities_.push_back(priority);
       return SendResult::kShed;
     }
+    // Only delivered frames are recorded; binary_sends_ and binary_priorities_
+    // stay index-parallel.
     log_send(SendKind::kBinary, client_identity);
     std::lock_guard<std::mutex> lock(binary_mutex_);
     binary_sends_.emplace_back(client_identity, data);
@@ -3193,20 +3190,24 @@ TEST_F(BridgeServerTest, PublishSplitsHeavyTopicIntoOwnFrame) {
   server_->publish_aggregated_messages();
 
   auto sends = mock_->get_binary_sends();
+  auto priorities = mock_->get_binary_priorities();
   ASSERT_EQ(sends.size(), 2u) << "expected one light frame + one heavy frame";
+  ASSERT_EQ(priorities.size(), 2u);
 
-  // Classify by the header heavy flag, not by emission order.
+  // Classify by send priority (heavy frames are NOT wire-flagged so existing
+  // plugins accept them). Every frame must therefore carry flags == 0.
   int light_idx = -1;
   int heavy_idx = -1;
   for (int i = 0; i < 2; ++i) {
-    if ((frame_flags(sends[i].second) & kFrameFlagHeavy) != 0) {
+    EXPECT_EQ(frame_flags(sends[i].second), 0u) << "heavy frames must not set a wire flag (plugin compatibility)";
+    if (priorities[i] == FramePriority::kHeavy) {
       heavy_idx = i;
     } else {
       light_idx = i;
     }
   }
-  ASSERT_GE(light_idx, 0) << "no light frame (flags == 0) found";
-  ASSERT_GE(heavy_idx, 0) << "no heavy frame (kFrameFlagHeavy) found";
+  ASSERT_GE(light_idx, 0) << "no light (kNormal) frame found";
+  ASSERT_GE(heavy_idx, 0) << "no heavy (kHeavy) frame found";
 
   // Both frames go to the subscribing client.
   EXPECT_EQ(sends[light_idx].first, "client_a");
@@ -3310,13 +3311,14 @@ TEST_F(BridgeServerTest, HeavyFrameThresholdBoundaryIsInclusive) {
   server_->publish_aggregated_messages();
 
   auto sends = mock_->get_binary_sends();
+  auto priorities = mock_->get_binary_priorities();
   ASSERT_EQ(sends.size(), 2u);
   bool heavy_is_at = false;
   bool light_is_below = false;
-  for (const auto& [cid, frame] : sends) {
-    auto msgs = decode_frame(frame);
+  for (size_t i = 0; i < sends.size(); ++i) {
+    auto msgs = decode_frame(sends[i].second);
     ASSERT_EQ(msgs.size(), 1u);
-    if ((frame_flags(frame) & kFrameFlagHeavy) != 0) {
+    if (priorities[i] == FramePriority::kHeavy) {
       heavy_is_at = (msgs[0].topic == "/at");
     } else {
       light_is_below = (msgs[0].topic == "/below");
@@ -3349,8 +3351,9 @@ TEST_F(BridgeServerTest, OnlyHeavyTopicEmitsNoLightFrame) {
   server_->publish_aggregated_messages();
 
   auto sends = mock_->get_binary_sends();
+  auto priorities = mock_->get_binary_priorities();
   ASSERT_EQ(sends.size(), 1u) << "no light frame when every topic is heavy";
-  EXPECT_NE(frame_flags(sends[0].second) & kFrameFlagHeavy, 0u);
+  EXPECT_EQ(priorities[0], FramePriority::kHeavy);
   auto msgs = decode_frame(sends[0].second);
   ASSERT_EQ(msgs.size(), 1u);
   EXPECT_EQ(msgs[0].topic, "/big");
@@ -3422,9 +3425,13 @@ TEST_F(BridgeServerTest, HeavyFramesSentWithHeavyPriority) {
   auto priorities = mock_->get_binary_priorities();
   ASSERT_EQ(sends.size(), 2u);
   ASSERT_EQ(priorities.size(), 2u);
+  // The kHeavy-priority frame must carry /big; the kNormal frame /small. (Frames
+  // are not wire-flagged, so priority is the only heaviness signal.)
   for (size_t i = 0; i < sends.size(); ++i) {
-    const bool heavy_frame = (frame_flags(sends[i].second) & kFrameFlagHeavy) != 0;
-    EXPECT_EQ(priorities[i], heavy_frame ? FramePriority::kHeavy : FramePriority::kNormal);
+    EXPECT_EQ(frame_flags(sends[i].second), 0u);
+    auto msgs = decode_frame(sends[i].second);
+    ASSERT_EQ(msgs.size(), 1u);
+    EXPECT_EQ(msgs[0].topic, priorities[i] == FramePriority::kHeavy ? "/big" : "/small");
   }
 }
 
@@ -3452,10 +3459,11 @@ TEST_F(BridgeServerTest, RateLimitedHeavyTopicRespectsRateGate) {
   server_->publish_aggregated_messages();
 
   auto sends = mock_->get_binary_sends();
+  auto priorities = mock_->get_binary_priorities();
   ASSERT_EQ(sends.size(), 2u) << "rate gate must admit exactly 2 of the 3 heavy messages";
-  for (const auto& [cid, frame] : sends) {
-    EXPECT_NE(frame_flags(frame) & kFrameFlagHeavy, 0u) << "each admitted heavy message is its own frame";
-    auto msgs = decode_frame(frame);
+  for (size_t i = 0; i < sends.size(); ++i) {
+    EXPECT_EQ(priorities[i], FramePriority::kHeavy) << "each admitted heavy message is its own frame";
+    auto msgs = decode_frame(sends[i].second);
     ASSERT_EQ(msgs.size(), 1u);
     EXPECT_EQ(msgs[0].topic, "/big");
   }
@@ -3530,12 +3538,13 @@ TEST_F(BridgeServerTest, MultipleHeavyTopicsEachGetOwnFrame) {
   server_->publish_aggregated_messages();
 
   auto sends = mock_->get_binary_sends();
+  auto priorities = mock_->get_binary_priorities();
   ASSERT_EQ(sends.size(), 3u) << "1 light + 2 heavy";
   std::set<std::string> heavy_topics;
   std::set<std::string> light_topics;
-  for (const auto& [cid, frame] : sends) {
-    auto msgs = decode_frame(frame);
-    if ((frame_flags(frame) & kFrameFlagHeavy) != 0) {
+  for (size_t i = 0; i < sends.size(); ++i) {
+    auto msgs = decode_frame(sends[i].second);
+    if (priorities[i] == FramePriority::kHeavy) {
       ASSERT_EQ(msgs.size(), 1u) << "a heavy frame carries a single message";
       heavy_topics.insert(msgs[0].topic);
     } else {

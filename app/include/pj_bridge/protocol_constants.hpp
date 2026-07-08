@@ -33,10 +33,12 @@ static constexpr uint32_t kBinaryFrameMagic = 0x42524A50;
 /// Size of the binary frame header in bytes
 static constexpr size_t kBinaryHeaderSize = 16;
 
-/// Binary frame header flag bits (offset 12 of the 16-byte header). Bit 0
-/// marks a "heavy" frame carrying an isolated large/size-class message
-/// (see docs/API.md); remaining bits are reserved = 0. Old clients ignore
-/// this field, so the flag is purely additive.
+/// Binary frame header flag bit (offset 12 of the 16-byte header) reserved for a
+/// future "heavy" (isolated large/size-class message) marker. NOT currently
+/// emitted: existing PlotJuggler plugins reject any frame with flags != 0, so
+/// heavy frames ship unflagged (flags == 0) and heaviness is conveyed
+/// server-side via FramePriority instead. Reserved here for a future
+/// capability-negotiated rollout (see docs/API.md).
 static constexpr uint32_t kFrameFlagHeavy = 0x1;
 
 /// Default per-message byte threshold at or above which a topic's message is
