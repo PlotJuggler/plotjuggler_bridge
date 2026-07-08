@@ -42,6 +42,7 @@ int main(int argc, char* argv[]) {
   std::vector<std::string> topic_whitelist{".*"};
   double topic_poll_interval = 1.0;
   int client_backlog_size = 100;
+  int heavy_frame_threshold_bytes = 262144;
   std::string certfile;
   std::string keyfile;
 
@@ -60,6 +61,12 @@ int main(int argc, char* argv[]) {
          "Max frames queued per slow client before dropping the oldest (backpressure)")
       ->default_val(100)
       ->check(CLI::Range(1, 1000000));
+  app.add_option(
+         "--heavy-frame-threshold-bytes", heavy_frame_threshold_bytes,
+         "Isolate messages this size (bytes) or larger into their own size-class frames; "
+         "0 disables (keep below the 1 MiB socket watermark)")
+      ->default_val(262144)
+      ->check(CLI::Range(0, 1000000000));
   // Bound variable is already initialized to {".*"} (match everything); CLI11
   // leaves it untouched if the flag is not passed, so no default_val() is
   // needed (and default_val() on a vector<string> would round-trip through a
@@ -86,6 +93,7 @@ int main(int argc, char* argv[]) {
   spdlog::info("  Topic whitelist: {}", fmt::join(topic_whitelist, ", "));
   spdlog::info("  Topic poll interval: {:.1f} s", topic_poll_interval);
   spdlog::info("  Client backlog size: {}", client_backlog_size);
+  spdlog::info("  Heavy frame threshold: {} bytes", heavy_frame_threshold_bytes);
   spdlog::info("  TLS: {}", tls_enabled ? "enabled" : "disabled");
 
   auto whitelist_result = pj_bridge::WhitelistFilter::create(topic_whitelist);
@@ -99,6 +107,14 @@ int main(int argc, char* argv[]) {
     return 1;
   }
 
+  if (heavy_frame_threshold_bytes > 0 &&
+      static_cast<size_t>(heavy_frame_threshold_bytes) >= pj_bridge::WebSocketMiddleware::kSocketBufferHighWatermark) {
+    spdlog::warn(
+        "--heavy-frame-threshold-bytes ({}) >= socket watermark ({}): messages between the two sizes stay 'light' and "
+        "queue instead of shedding under congestion — keep the threshold below the watermark",
+        heavy_frame_threshold_bytes, pj_bridge::WebSocketMiddleware::kSocketBufferHighWatermark);
+  }
+
   try {
     auto topic_source = std::make_shared<pj_bridge::FastDdsTopicSource>(domain_ids);
     auto sub_manager = std::make_shared<pj_bridge::FastDdsSubscriptionManager>(*topic_source);
@@ -110,8 +126,9 @@ int main(int argc, char* argv[]) {
         std::make_shared<pj_bridge::WebSocketMiddleware>(static_cast<size_t>(client_backlog_size), tls_config);
 
     pj_bridge::BridgeServer server(
-        topic_source, sub_manager, middleware, port, session_timeout, publish_rate,
-        std::move(whitelist_result.value()));
+        topic_source, sub_manager, middleware,
+        {port, session_timeout, publish_rate, std::move(whitelist_result.value()),
+         static_cast<size_t>(heavy_frame_threshold_bytes)});
 
     pj_bridge::run_standalone_event_loop(
         server, sub_manager, middleware, {port, publish_rate, session_timeout, stats_enabled, topic_poll_interval});

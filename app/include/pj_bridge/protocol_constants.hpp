@@ -33,6 +33,21 @@ static constexpr uint32_t kBinaryFrameMagic = 0x42524A50;
 /// Size of the binary frame header in bytes
 static constexpr size_t kBinaryHeaderSize = 16;
 
+/// Binary frame header flag bit (offset 12 of the 16-byte header) reserved for a
+/// future "heavy" (isolated large/size-class message) marker. NOT currently
+/// emitted: existing PlotJuggler plugins reject any frame with flags != 0, so
+/// heavy frames ship unflagged (flags == 0) and heaviness is conveyed
+/// server-side via FramePriority instead. Reserved here for a future
+/// capability-negotiated rollout (see docs/API.md).
+static constexpr uint32_t kFrameFlagHeavy = 0x1;
+
+/// Default per-message byte threshold at or above which a topic's message is
+/// isolated into its own "heavy" size-class frame instead of being aggregated
+/// with light topics (see docs/API.md). Chosen comfortably below the 1 MiB
+/// socket high-watermark and well above typical scalar/odom/tf frames. A
+/// threshold of 0 disables splitting (single aggregated frame, legacy behavior).
+static constexpr size_t kDefaultHeavyFrameThresholdBytes = 256 * 1024;  // 256 KiB
+
 /// Schema encoding identifier for ROS2 message definitions
 inline constexpr const char* kSchemaEncodingRos2Msg = "ros2msg";
 
@@ -49,6 +64,7 @@ inline constexpr const char* kServerCapabilities[] = {
     "latched_replay",        // retained samples replayed after subscribe/resume
     "topics_changed",        // pushed topic advertisement (subscribe_topic_updates)
     "per_topic_rate_limit",  // subscribe entries accept {name, max_rate_hz}
+    "size_class_frames",     // large topics isolated into own frames (header flag bit0 = heavy)
 };
 
 }  // namespace pj_bridge

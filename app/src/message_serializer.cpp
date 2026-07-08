@@ -67,7 +67,7 @@ size_t AggregatedMessageSerializer::get_message_count() const {
   return message_count_;
 }
 
-std::vector<uint8_t> AggregatedMessageSerializer::finalize() {
+std::vector<uint8_t> AggregatedMessageSerializer::finalize(uint32_t flags) {
   // Build 16-byte header (uncompressed)
   std::vector<uint8_t> header(kBinaryHeaderSize);
 
@@ -83,8 +83,7 @@ std::vector<uint8_t> AggregatedMessageSerializer::finalize() {
   uint32_t uncompressed = static_cast<uint32_t>(serialized_data_.size());
   std::memcpy(header.data() + 8, &uncompressed, sizeof(uncompressed));
 
-  // Flags (offset 12, 4 bytes, reserved = 0)
-  uint32_t flags = 0;
+  // Flags (offset 12, 4 bytes; bit0 = heavy frame, see kFrameFlagHeavy)
   std::memcpy(header.data() + 12, &flags, sizeof(flags));
 
   // Handle empty payload case

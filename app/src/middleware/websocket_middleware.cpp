@@ -28,8 +28,12 @@
 
 namespace pj_bridge {
 
-WebSocketMiddleware::WebSocketMiddleware(size_t client_backlog_size, std::optional<TlsConfig> tls)
-    : client_backlog_size_(client_backlog_size), tls_(std::move(tls)), initialized_(false) {}
+WebSocketMiddleware::WebSocketMiddleware(
+    size_t client_backlog_size, std::optional<TlsConfig> tls, size_t socket_buffer_watermark)
+    : client_backlog_size_(client_backlog_size),
+      socket_buffer_watermark_(socket_buffer_watermark),
+      tls_(std::move(tls)),
+      initialized_(false) {}
 
 WebSocketMiddleware::~WebSocketMiddleware() {
   shutdown();
@@ -296,101 +300,90 @@ bool WebSocketMiddleware::send_reply(const std::string& client_identity, const s
   return send_info.success;
 }
 
-bool WebSocketMiddleware::send_binary(const std::string& client_identity, const std::vector<uint8_t>& data) {
+SendResult WebSocketMiddleware::send_binary(
+    const std::string& client_identity, const std::vector<uint8_t>& data, FramePriority priority) {
   // Lossy-send policy adapted from foxglove_bridge (MIT License, Copyright
   // (c) Foxglove Technologies Inc): a slow client never blocks the publisher
-  // and is never disconnected for falling behind. Instead, once its socket's
-  // outgoing buffer crosses kSocketBufferHighWatermark, new frames are queued
-  // per-client (dropping the oldest queued frame on overflow) and flushed
-  // once the buffer drains below the watermark again.
+  // and is never disconnected for falling behind. The admit/flush/queue/shed
+  // decision itself lives in the socket-agnostic run_backpressure() policy;
+  // this method binds it to the real socket and the per-client backlog.
   //
-  // IMPORTANT: clients_mutex_ is only ever held to look up state (the client
-  // handle, pending_frames_, last_drop_warn_) — never while calling into
-  // ix::WebSocket (bufferedAmount()/sendBinary()). Those calls take
-  // IXWebSocket's own internal locks, and the Open-connection handler above
-  // takes clients_mutex_ from an IXWebSocket-owned thread that already holds
-  // some of those internal locks; holding clients_mutex_ across a socket call
-  // here would form a lock-order cycle with that path (observed as a TSAN
-  // lock-order-inversion during development).
+  // IMPORTANT: clients_mutex_ is only ever held to look up/mutate per-client
+  // state (the client handle, pending_frames_, last_drop_warn_) — never while
+  // calling into ix::WebSocket (bufferedAmount()/sendBinary()). Those calls
+  // take IXWebSocket's own internal locks, and the Open-connection handler
+  // takes clients_mutex_ from an IXWebSocket-owned thread already holding some
+  // of those locks; holding clients_mutex_ across a socket call here would form
+  // a lock-order cycle (observed as a TSAN lock-order-inversion). Each policy
+  // callback below therefore takes the lock only for its own state access.
   std::shared_ptr<ix::WebSocket> ws;
+  size_t max_flush = 0;
   {
     std::lock_guard<std::mutex> lock(clients_mutex_);
     auto it = clients_.find(client_identity);
     if (it == clients_.end() || !it->second) {
-      return false;
+      return SendResult::kClientGone;
     }
     ws = it->second;
+    // Snapshot the backlog size so the flush is bounded to frames present now,
+    // never chasing frames a concurrent producer enqueues mid-flush.
+    auto pending_it = pending_frames_.find(client_identity);
+    if (pending_it != pending_frames_.end()) {
+      max_flush = pending_it->second.size();
+    }
   }
 
-  if (ws->bufferedAmount() < kSocketBufferHighWatermark) {
-    // Flush any backlog first, in FIFO order, bounded to the number of
-    // frames present when this call started so a fast producer can't spin
-    // forever. Each frame is popped under the lock and sent outside it.
-    size_t to_flush = 0;
-    {
-      std::lock_guard<std::mutex> lock(clients_mutex_);
-      auto pending_it = pending_frames_.find(client_identity);
-      if (pending_it != pending_frames_.end()) {
-        to_flush = pending_it->second.size();
-      }
-    }
+  auto buffered_amount = [&]() -> size_t { return ws->bufferedAmount(); };
 
-    for (size_t i = 0; i < to_flush; ++i) {
-      std::optional<std::vector<uint8_t>> frame;
-      {
-        std::lock_guard<std::mutex> lock(clients_mutex_);
-        auto pending_it = pending_frames_.find(client_identity);
-        if (pending_it == pending_frames_.end()) {
-          break;
-        }
-        frame = pending_it->second.pop_front();
-      }
-      if (!frame) {
-        break;
-      }
-      std::string frame_data(reinterpret_cast<const char*>(frame->data()), frame->size());
-      auto send_info = ws->sendBinary(frame_data);
-      if (!send_info.success) {
-        return false;
-      }
-    }
-
-    std::string binary_data(reinterpret_cast<const char*>(data.data()), data.size());
-    auto send_info = ws->sendBinary(binary_data);
-    return send_info.success;
-  }
-
-  // Socket buffer is over the high watermark: queue the frame instead of
-  // sending it now.
-  //
-  // Note the backlog is only ever flushed from within send_binary itself: if
-  // a client's subscribed topics go quiet, queued frames sit here until the
-  // next send_binary call for that client (or its disconnect). This is
-  // deliberate — the queue is bounded, delivering stale frames on the next
-  // traffic burst is acceptable, and plotting clients care about fresh data,
-  // so a dedicated flush timer isn't worth the extra machinery.
-  size_t dropped;
-  uint64_t dropped_total_now;
-  {
+  auto pop_pending = [&]() -> std::optional<std::vector<uint8_t>> {
     std::lock_guard<std::mutex> lock(clients_mutex_);
-    // Re-check the client still exists: between the ws lookup above (lock
-    // released before the socket calls) and here, the disconnect callback may
-    // have erased the client AND its pending_frames_ entry. Blindly
-    // try_emplace-ing would recreate a queue for a disconnected client,
-    // stranding the frame until shutdown and skewing dropped_frame_count().
-    // Treat it like the top-of-function lookup miss: the client is gone.
+    auto pending_it = pending_frames_.find(client_identity);
+    if (pending_it == pending_frames_.end()) {
+      return std::nullopt;
+    }
+    return pending_it->second.pop_front();
+  };
+
+  auto send = [&](const std::vector<uint8_t>& frame) -> bool {
+    std::string frame_data(reinterpret_cast<const char*>(frame.data()), frame.size());
+    return ws->sendBinary(frame_data).success;
+  };
+
+  // Enqueue under the lock (drop-oldest on overflow). Re-check the client still
+  // exists: between the ws lookup above and here the disconnect callback may
+  // have erased it AND its pending_frames_ entry; recreating a queue for a dead
+  // client would strand the frame and skew dropped_frame_count(). nullopt tells
+  // the policy the client is gone, so send_binary reports kClientGone.
+  auto queue_pending = [&](const std::vector<uint8_t>& frame) -> std::optional<size_t> {
+    std::lock_guard<std::mutex> lock(clients_mutex_);
     if (clients_.find(client_identity) == clients_.end()) {
-      return false;
+      return std::nullopt;
     }
     auto [pending_it, inserted] = pending_frames_.try_emplace(client_identity, BoundedFrameQueue(client_backlog_size_));
     (void)inserted;
-    dropped = pending_it->second.push(data);
-    dropped_total_now = pending_it->second.dropped_total();
+    return pending_it->second.push(frame);
+  };
+
+  SendOutcome outcome = run_backpressure(
+      priority, data, socket_buffer_watermark_, max_flush, buffered_amount, pop_pending, send, queue_pending);
+
+  if (outcome.result == SendResult::kShed) {
+    std::lock_guard<std::mutex> lock(clients_mutex_);
+    // Re-check liveness, mirroring the queue path's disconnect-race handling: if
+    // the client vanished between the ws lookup and the shed decision, report
+    // it gone rather than counting a shed for a dead client.
+    if (clients_.find(client_identity) == clients_.end()) {
+      return SendResult::kClientGone;
+    }
+    heavy_shed_total_++;
   }
 
-  if (dropped > 0) {
+  // Throttled slow-client warning, shared by the queue-drop and heavy-shed
+  // paths (at most one line per client per kDropWarnIntervalSeconds).
+  const bool dropped_a_frame = outcome.result == SendResult::kQueued && outcome.dropped > 0;
+  if (dropped_a_frame || outcome.result == SendResult::kShed) {
     auto now = std::chrono::steady_clock::now();
-    bool should_warn;
+    bool should_warn = false;
     {
       std::lock_guard<std::mutex> lock(clients_mutex_);
       auto warn_it = last_drop_warn_.find(client_identity);
@@ -401,13 +394,15 @@ bool WebSocketMiddleware::send_binary(const std::string& client_identity, const 
       }
     }
     if (should_warn) {
-      spdlog::warn(
-          "Slow client '{}': dropping oldest queued frame(s) ({} dropped total)", client_identity, dropped_total_now);
+      if (outcome.result == SendResult::kShed) {
+        spdlog::warn("Slow client '{}': shedding heavy frame(s) ({} shed total)", client_identity, heavy_shed_count());
+      } else {
+        spdlog::warn("Slow client '{}': dropping oldest queued frame(s)", client_identity);
+      }
     }
   }
 
-  // The frame was accepted for later delivery, not a failure.
-  return true;
+  return outcome.result;
 }
 
 void WebSocketMiddleware::drop_pending(const std::string& client_identity) {
@@ -432,6 +427,11 @@ uint64_t WebSocketMiddleware::dropped_frame_count() const {
     total += entry.second.dropped_total();
   }
   return total;
+}
+
+uint64_t WebSocketMiddleware::heavy_shed_count() const {
+  std::lock_guard<std::mutex> lock(clients_mutex_);
+  return heavy_shed_total_;
 }
 
 bool WebSocketMiddleware::publish_data(const std::vector<uint8_t>& data) {

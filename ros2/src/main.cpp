@@ -49,6 +49,7 @@ int main(int argc, char** argv) {
   node->declare_parameter<int>("max_qos_depth", 100);
   node->declare_parameter<double>("topic_poll_interval", 1.0);
   node->declare_parameter<int>("client_backlog_size", 100);
+  node->declare_parameter<int>("heavy_frame_threshold_bytes", 262144);
   node->declare_parameter<bool>("tls", false);
   node->declare_parameter<std::string>("certfile", "");
   node->declare_parameter<std::string>("keyfile", "");
@@ -62,6 +63,7 @@ int main(int argc, char** argv) {
   int64_t max_qos_depth = node->get_parameter("max_qos_depth").as_int();
   double topic_poll_interval = node->get_parameter("topic_poll_interval").as_double();
   int64_t client_backlog_size = node->get_parameter("client_backlog_size").as_int();
+  int64_t heavy_frame_threshold_bytes = node->get_parameter("heavy_frame_threshold_bytes").as_int();
   bool tls_enabled = node->get_parameter("tls").as_bool();
   std::string certfile = node->get_parameter("certfile").as_string();
   std::string keyfile = node->get_parameter("keyfile").as_string();
@@ -92,6 +94,23 @@ int main(int argc, char** argv) {
     rclcpp::shutdown();
     return 1;
   }
+
+  if (heavy_frame_threshold_bytes < 0) {
+    RCLCPP_ERROR(
+        node->get_logger(), "Invalid heavy_frame_threshold_bytes: %ld (must be >= 0; 0 disables splitting)",
+        heavy_frame_threshold_bytes);
+    rclcpp::shutdown();
+    return 1;
+  }
+  if (heavy_frame_threshold_bytes > 0 &&
+      static_cast<size_t>(heavy_frame_threshold_bytes) >= pj_bridge::WebSocketMiddleware::kSocketBufferHighWatermark) {
+    RCLCPP_WARN(
+        node->get_logger(),
+        "heavy_frame_threshold_bytes (%ld) >= socket watermark (%zu): messages between the two sizes stay 'light' and "
+        "queue instead of shedding under congestion — keep the threshold below the watermark",
+        heavy_frame_threshold_bytes, pj_bridge::WebSocketMiddleware::kSocketBufferHighWatermark);
+  }
+  RCLCPP_INFO(node->get_logger(), "heavy_frame_threshold_bytes=%ld", heavy_frame_threshold_bytes);
 
   auto whitelist_result = pj_bridge::WhitelistFilter::create(topic_whitelist);
   if (!whitelist_result) {
@@ -124,8 +143,9 @@ int main(int argc, char** argv) {
 
     // Create bridge server
     pj_bridge::BridgeServer server(
-        topic_source, sub_manager, middleware, port, session_timeout, publish_rate,
-        std::move(whitelist_result.value()));
+        topic_source, sub_manager, middleware,
+        {port, session_timeout, publish_rate, std::move(whitelist_result.value()),
+         static_cast<size_t>(heavy_frame_threshold_bytes)});
 
     if (!server.initialize()) {
       RCLCPP_ERROR(node->get_logger(), "Failed to initialize bridge server");
@@ -186,8 +206,10 @@ int main(int argc, char** argv) {
 
     auto [total_messages, total_bytes] = server.get_publish_stats();
     RCLCPP_INFO(
-        node->get_logger(), "Final statistics: %lu messages published, %lu bytes transmitted", total_messages,
-        total_bytes);
+        node->get_logger(),
+        "Final statistics: %lu messages published, %lu bytes transmitted, %lu frames dropped (slow clients), "
+        "%lu heavy frames shed (congestion)",
+        total_messages, total_bytes, middleware->dropped_frame_count(), middleware->heavy_shed_count());
 
     RCLCPP_INFO(node->get_logger(), "Bridge server shutdown complete");
 

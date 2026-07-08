@@ -60,14 +60,15 @@ double clamp_rate_hz(double rate_hz) {
 BridgeServer::BridgeServer(
     std::shared_ptr<TopicSourceInterface> topic_source,
     std::shared_ptr<SubscriptionManagerInterface> subscription_manager, std::shared_ptr<MiddlewareInterface> middleware,
-    int port, double session_timeout, double publish_rate, WhitelistFilter whitelist)
+    BridgeServerConfig config)
     : topic_source_(std::move(topic_source)),
       subscription_manager_(std::move(subscription_manager)),
       middleware_(std::move(middleware)),
-      port_(port),
-      session_timeout_(session_timeout),
-      publish_rate_(publish_rate),
-      whitelist_(std::move(whitelist)),
+      port_(config.port),
+      session_timeout_(config.session_timeout),
+      publish_rate_(config.publish_rate),
+      whitelist_(std::move(config.whitelist)),
+      heavy_frame_threshold_bytes_(config.heavy_frame_threshold_bytes),
       initialized_(false),
       total_messages_published_(0),
       total_bytes_published_(0),
@@ -1057,6 +1058,11 @@ void BridgeServer::publish_aggregated_messages() {
       std::vector<uint8_t> compressed_data;
       size_t msg_count;
       std::vector<std::string> client_ids;
+      bool is_heavy = false;  // isolated large/size-class frame (kFrameFlagHeavy)
+      // Per-topic message counts carried by THIS frame, folded into
+      // topic_forward_counts_ only when the frame is actually sent (so a
+      // partial send after the split doesn't over-count unsent topics).
+      std::unordered_map<std::string, uint64_t> topic_counts;
     };
     std::vector<GroupFrame> frames;
 
@@ -1064,11 +1070,47 @@ void BridgeServer::publish_aggregated_messages() {
       std::lock_guard<std::mutex> sent_lock(last_sent_mutex_);
 
       for (const auto& [group_key, client_ids] : subscription_groups) {
-        AggregatedMessageSerializer serializer;
+        AggregatedMessageSerializer light_serializer;
+        std::vector<GroupFrame> heavy_frames_for_group;
         size_t group_msg_count = 0;
 
         const auto& representative_subs = client_subs[client_ids.front()];
         auto& rep_last_sent = last_sent_times_[client_ids.front()];
+
+        // Per-topic counts for messages routed into THIS group's light frame;
+        // folded into the light frame's topic_counts when it is built.
+        std::unordered_map<std::string, uint64_t> light_topic_counts;
+
+        // Route one rate-admitted message into either the aggregated light
+        // frame or its own isolated heavy frame, based on the per-message CDR
+        // byte size. The rate gate (below) decides WHETHER a message is
+        // admitted; this decides WHICH frame it lands in — orthogonal. A
+        // threshold of 0 disables splitting (everything goes to the light frame).
+        auto route_message = [&](const std::string& topic, const BufferedMessage& msg) {
+          const bool heavy = heavy_frame_threshold_bytes_ != 0 && msg.data->size() >= heavy_frame_threshold_bytes_;
+          if (heavy) {
+            // One single-message frame per heavy message (same one-message-per-frame
+            // shape as collect_latched_replay's retained-sample frame). The frame is
+            // NOT wire-flagged (flags stay 0): existing PlotJuggler plugins reject
+            // any frame with flags != 0, and the isolation/shedding benefit comes
+            // entirely from the separate frame + the in-memory is_heavy priority
+            // below — not from a wire marker. kFrameFlagHeavy is reserved for a
+            // future capability-negotiated rollout (see docs/API.md).
+            AggregatedMessageSerializer heavy_serializer;
+            heavy_serializer.serialize_message(topic, msg.timestamp_ns, msg.data->data(), msg.data->size());
+            GroupFrame heavy_frame;
+            heavy_frame.compressed_data = heavy_serializer.finalize();
+            heavy_frame.msg_count = 1;
+            heavy_frame.client_ids = client_ids;
+            heavy_frame.is_heavy = true;
+            heavy_frame.topic_counts[topic] = 1;
+            heavy_frames_for_group.push_back(std::move(heavy_frame));
+          } else {
+            light_serializer.serialize_message(topic, msg.timestamp_ns, msg.data->data(), msg.data->size());
+            light_topic_counts[topic]++;
+          }
+          group_msg_count++;
+        };
 
         for (const auto& [topic, msgs] : messages) {
           auto sub_it = representative_subs.find(topic);
@@ -1081,9 +1123,7 @@ void BridgeServer::publish_aggregated_messages() {
 
           if (rate_mhz == 0) {
             for (const auto& msg : msgs) {
-              serializer.serialize_message(topic, msg.timestamp_ns, msg.data->data(), msg.data->size());
-              group_msg_count++;
-              forward_counts[topic]++;
+              route_message(topic, msg);
             }
           } else {
             uint64_t min_interval_ns = static_cast<uint64_t>(1'000'000'000'000) / static_cast<uint64_t>(rate_mhz);
@@ -1091,10 +1131,8 @@ void BridgeServer::publish_aggregated_messages() {
 
             for (const auto& msg : msgs) {
               if (msg.timestamp_ns >= last_sent + min_interval_ns) {
-                serializer.serialize_message(topic, msg.timestamp_ns, msg.data->data(), msg.data->size());
+                route_message(topic, msg);
                 last_sent = msg.timestamp_ns;
-                group_msg_count++;
-                forward_counts[topic]++;
               }
             }
             rep_last_sent[topic] = last_sent;
@@ -1105,19 +1143,28 @@ void BridgeServer::publish_aggregated_messages() {
           continue;
         }
 
-        GroupFrame frame;
-        frame.compressed_data = serializer.finalize();
-        frame.msg_count = group_msg_count;
-        frame.client_ids = client_ids;
-
-        // Propagate rate-limiting state to other clients in the group
+        // Propagate rate-limiting state to other clients in the group. Done
+        // once per group; both lanes advanced the same rep_last_sent.
         for (const auto& client_id : client_ids) {
           if (client_id != client_ids.front()) {
             last_sent_times_[client_id] = rep_last_sent;
           }
         }
 
-        frames.push_back(std::move(frame));
+        // Emit the aggregated light frame (only if small topics landed in it),
+        // then each isolated heavy frame. Every frame carries the same
+        // client_ids, so the send loop below is unchanged.
+        if (light_serializer.get_message_count() > 0) {
+          GroupFrame light_frame;
+          light_frame.compressed_data = light_serializer.finalize();
+          light_frame.msg_count = light_serializer.get_message_count();
+          light_frame.client_ids = client_ids;
+          light_frame.topic_counts = std::move(light_topic_counts);
+          frames.push_back(std::move(light_frame));
+        }
+        for (auto& heavy_frame : heavy_frames_for_group) {
+          frames.push_back(std::move(heavy_frame));
+        }
       }
     }  // last_sent_mutex_ released here
 
@@ -1129,9 +1176,15 @@ void BridgeServer::publish_aggregated_messages() {
         if (it != paused_state.end() && it->second) {
           continue;
         }
-        if (middleware_->send_binary(client_id, frame.compressed_data)) {
+        const FramePriority priority = frame.is_heavy ? FramePriority::kHeavy : FramePriority::kNormal;
+        const SendResult result = middleware_->send_binary(client_id, frame.compressed_data, priority);
+        // Count a frame as forwarded only if it was delivered now or queued for
+        // later delivery. A kShed heavy frame is intentionally dropped under
+        // congestion (surfaced via the middleware's heavy_shed_count(), not in
+        // publish stats); kClientGone never reaches the client.
+        if (result == SendResult::kDelivered || result == SendResult::kQueued) {
           any_sent = true;
-        } else {
+        } else if (result == SendResult::kClientGone) {
           spdlog::debug("Failed to send binary frame to client '{}'", client_id);
         }
       }
@@ -1139,6 +1192,9 @@ void BridgeServer::publish_aggregated_messages() {
       if (any_sent) {
         total_msg_count += frame.msg_count;
         total_bytes += frame.compressed_data.size();
+        for (const auto& [topic, count] : frame.topic_counts) {
+          forward_counts[topic] += count;
+        }
       }
     }
 

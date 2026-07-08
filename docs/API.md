@@ -100,7 +100,7 @@ Every `get_topics` response carries a `server` object:
 {"server": {"name": "pj_bridge", "version": "0.8.0",
             "capabilities": ["include_schemas", "latched_badge",
                              "latched_replay", "topics_changed",
-                             "per_topic_rate_limit"]}}
+                             "per_topic_rate_limit", "size_class_frames"]}}
 ```
 
 Compatibility policy for clients:
@@ -547,6 +547,27 @@ configurable:
 - **FastDDS / RTI**: CLI flag `--client-backlog-size`, default `100`, valid
   range `1`-`1000000`.
 
+Under congestion, heavy (size-class) frames from the aggregated publish stream
+are shed before transmit rather than queued (see
+[Size-class frames](#size-class-frames)), so a continuous stream of
+large frames cannot fill the backlog and evict small-topic frames. (One-shot
+latched-replay frames are an exception: they are sent at normal priority —
+never shed like heavy frames — so they may briefly occupy the backlog and, like
+any normal frame, can be dropped only if the backlog itself overflows under
+sustained congestion; they are not a continuous stream.)
+
+The per-message size at or above which a message is isolated into its own heavy
+frame is configurable:
+
+- **ROS2**: int parameter `heavy_frame_threshold_bytes`, default `262144`
+  (256 KiB). Must be `>= 0`; `0` disables splitting (single aggregated frame,
+  legacy behavior).
+- **FastDDS / RTI**: CLI flag `--heavy-frame-threshold-bytes`, default `262144`,
+  valid range `0`-`1000000000`.
+
+Keep the threshold below the 1 MiB socket watermark so a single heavy message
+does not fill the socket buffer on its own.
+
 ## TLS / wss://
 
 The bridge can optionally serve the WebSocket endpoint over TLS (`wss://`)
@@ -601,7 +622,7 @@ Binary frames consist of a fixed 16-byte header followed by ZSTD-compressed payl
 | 0 | 4 | magic | `0x42524A50` ("PJRB") |
 | 4 | 4 | message_count | Number of messages in frame |
 | 8 | 4 | uncompressed_size | Payload size before compression |
-| 12 | 4 | flags | Reserved (must be 0) |
+| 12 | 4 | flags | Reserved — currently always `0` (bit 0 is reserved for a future heavy-frame marker; see [Size-class frames](#size-class-frames)) |
 
 ### Payload (ZSTD-compressed)
 
@@ -617,3 +638,27 @@ For each message:
 ```
 
 The magic bytes allow clients to validate frame integrity before decompression.
+
+### Size-class frames
+
+Advertised by the `size_class_frames` capability. To keep a large topic (e.g. a
+`PointCloud2`) from starving small topics under slow-link backpressure, the server
+does **not** weld small and large messages into one frame. Instead, each message
+whose serialized size is at or above a server-configured threshold
+(`heavy_frame_threshold_bytes`, default 256 KiB; `0` disables splitting) is sent as
+its own frame, while smaller messages stay aggregated in a single frame. Server-side
+these large frames are treated as "heavy" and shed before transmit under congestion
+(see [Slow clients / backpressure](#slow-clients--backpressure)).
+
+This is purely a framing change — the payload format is identical, and a publish
+cycle may now emit several binary frames (at most one aggregated light frame, plus
+one per heavy message — and no light frame at all when every admitted message in a
+group is heavy) instead of one. Each frame is self-describing via its
+`message_count`, so a client decodes them all the same way and needs no changes.
+
+**Wire compatibility:** heavy frames are **not** marked on the wire — the `flags`
+field stays `0` on every frame, because existing PlotJuggler plugins reject any
+frame with `flags != 0`. Heaviness is a purely server-side scheduling property. The
+`kFrameFlagHeavy` bit (0x1) is reserved for a future capability-negotiated rollout
+if clients ever need to distinguish heavy frames (e.g. to surface drop indicators).
+`protocol_version` is unchanged.
