@@ -547,6 +547,23 @@ configurable:
 - **FastDDS / RTI**: CLI flag `--client-backlog-size`, default `100`, valid
   range `1`-`1000000`.
 
+Under congestion this backlog only ever holds small frames: heavy
+(size-class) frames are shed before transmit rather than queued (see
+[Size-class frames](#size-class-frames-heavy-flag)), so a single large frame
+cannot fill the backlog and evict small-topic frames.
+
+The per-message size at or above which a message is isolated into its own heavy
+frame is configurable:
+
+- **ROS2**: int parameter `heavy_frame_threshold_bytes`, default `262144`
+  (256 KiB). Must be `>= 0`; `0` disables splitting (single aggregated frame,
+  legacy behavior).
+- **FastDDS / RTI**: CLI flag `--heavy-frame-threshold-bytes`, default `262144`,
+  valid range `0`-`1000000000`.
+
+Keep the threshold below the 1 MiB socket watermark so a single heavy message
+does not fill the socket buffer on its own.
+
 ## TLS / wss://
 
 The bridge can optionally serve the WebSocket endpoint over TLS (`wss://`)
