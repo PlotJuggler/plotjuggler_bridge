@@ -1,0 +1,130 @@
+/*
+ * Copyright (C) 2026 Davide Faconti
+ *
+ * This file is part of pj_bridge.
+ *
+ * pj_bridge is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Affero General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * pj_bridge is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU Affero General Public License for more details.
+ *
+ * You should have received a copy of the GNU Affero General Public License
+ * along with pj_bridge. If not, see <https://www.gnu.org/licenses/>.
+ */
+
+#include <gtest/gtest.h>
+
+#include <deque>
+#include <optional>
+#include <vector>
+
+#include "pj_bridge/middleware/backpressure.hpp"
+
+using namespace pj_bridge;
+
+namespace {
+std::vector<uint8_t> frame_of(size_t n) {
+  return std::vector<uint8_t>(n, 0x7F);
+}
+}  // namespace
+
+// Drives run_backpressure() against an in-memory fake socket whose buffered
+// amount grows by each frame's size as it is "sent" (sockets drain over time,
+// but within one synchronous call the buffer only grows). No real connection.
+class BackpressureTest : public ::testing::Test {
+ protected:
+  size_t watermark_ = 1000;
+  size_t buffered_ = 0;
+  std::deque<std::vector<uint8_t>> backlog_;
+  std::vector<std::vector<uint8_t>> sent_;
+  size_t backlog_cap_ = 100;
+
+  std::function<size_t()> buffered_amount() {
+    return [this] { return buffered_; };
+  }
+  std::function<std::optional<std::vector<uint8_t>>()> pop_pending() {
+    return [this]() -> std::optional<std::vector<uint8_t>> {
+      if (backlog_.empty()) {
+        return std::nullopt;
+      }
+      std::vector<uint8_t> f = std::move(backlog_.front());
+      backlog_.pop_front();
+      return f;
+    };
+  }
+  std::function<bool(const std::vector<uint8_t>&)> send() {
+    return [this](const std::vector<uint8_t>& f) {
+      sent_.push_back(f);
+      buffered_ += f.size();
+      return true;
+    };
+  }
+  std::function<std::optional<size_t>(const std::vector<uint8_t>&)> queue_pending() {
+    return [this](const std::vector<uint8_t>& f) -> std::optional<size_t> {
+      size_t dropped = 0;
+      if (backlog_.size() >= backlog_cap_) {
+        backlog_.pop_front();
+        dropped = 1;
+      }
+      backlog_.push_back(f);
+      return dropped;
+    };
+  }
+  SendOutcome run(FramePriority prio, const std::vector<uint8_t>& frame) {
+    return run_backpressure(prio, frame, watermark_, buffered_amount(), pop_pending(), send(), queue_pending());
+  }
+};
+
+TEST_F(BackpressureTest, SendsImmediatelyWhenSocketHasRoom) {
+  auto out = run(FramePriority::kNormal, frame_of(100));
+  EXPECT_TRUE(out.accepted);
+  EXPECT_EQ(out.frames_flushed, 0u);
+  ASSERT_EQ(sent_.size(), 1u);
+  EXPECT_EQ(sent_[0].size(), 100u);
+}
+
+TEST_F(BackpressureTest, FlushStopsWhenWatermarkReachedMidFlush) {
+  // Five queued 600-byte frames, watermark 1000. Each send adds 600 to the
+  // socket buffer, so only two may flush before the socket is congested again.
+  for (int i = 0; i < 5; ++i) {
+    backlog_.push_back(frame_of(600));
+  }
+  auto out = run(FramePriority::kNormal, frame_of(600));
+  EXPECT_EQ(out.frames_flushed, 2u) << "flush must recheck the watermark and stop early";
+  EXPECT_EQ(sent_.size(), 2u);
+  // Three unflushed backlog frames remain, plus the current frame gets queued.
+  EXPECT_EQ(backlog_.size(), 4u);
+}
+
+TEST_F(BackpressureTest, HeavyFrameShedWhenCongested) {
+  buffered_ = watermark_;  // already congested
+  auto out = run(FramePriority::kHeavy, frame_of(5000));
+  EXPECT_TRUE(out.shed_heavy);
+  EXPECT_TRUE(out.accepted);
+  EXPECT_TRUE(sent_.empty());
+  EXPECT_TRUE(backlog_.empty()) << "a heavy frame must be shed, never queued";
+}
+
+TEST_F(BackpressureTest, NormalFrameQueuedWhenCongested) {
+  buffered_ = watermark_;  // congested
+  auto out = run(FramePriority::kNormal, frame_of(100));
+  EXPECT_TRUE(out.accepted);
+  EXPECT_FALSE(out.shed_heavy);
+  EXPECT_TRUE(sent_.empty());
+  ASSERT_EQ(backlog_.size(), 1u);
+}
+
+TEST_F(BackpressureTest, SendFailureDuringFlushIsNotAccepted) {
+  backlog_.push_back(frame_of(100));
+  auto out = run_backpressure(
+      FramePriority::kNormal, frame_of(100), watermark_, buffered_amount(), pop_pending(),
+      [](const std::vector<uint8_t>&) { return false; },  // send fails (client gone)
+      queue_pending());
+  EXPECT_FALSE(out.accepted);
+  EXPECT_TRUE(out.send_failed);
+}

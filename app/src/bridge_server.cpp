@@ -1171,7 +1171,8 @@ void BridgeServer::publish_aggregated_messages() {
         if (it != paused_state.end() && it->second) {
           continue;
         }
-        if (middleware_->send_binary(client_id, frame.compressed_data)) {
+        const FramePriority priority = frame.is_heavy ? FramePriority::kHeavy : FramePriority::kNormal;
+        if (middleware_->send_binary(client_id, frame.compressed_data, priority)) {
           any_sent = true;
         } else {
           spdlog::debug("Failed to send binary frame to client '{}'", client_id);

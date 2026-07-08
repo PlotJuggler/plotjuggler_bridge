@@ -85,7 +85,9 @@ class MockMiddleware : public MiddlewareInterface {
     return true;
   }
 
-  bool send_binary(const std::string& client_identity, const std::vector<uint8_t>& data) override {
+  bool send_binary(
+      const std::string& client_identity, const std::vector<uint8_t>& data,
+      FramePriority priority = FramePriority::kNormal) override {
     // Test seam: simulate a client vanishing right before a heavy frame is
     // delivered (send returns false), so partial-send stats can be exercised.
     if (fail_heavy_sends_ && data.size() >= 16) {
@@ -98,6 +100,7 @@ class MockMiddleware : public MiddlewareInterface {
     log_send(SendKind::kBinary, client_identity);
     std::lock_guard<std::mutex> lock(binary_mutex_);
     binary_sends_.emplace_back(client_identity, data);
+    binary_priorities_.push_back(priority);
     return true;
   }
 
@@ -182,6 +185,13 @@ class MockMiddleware : public MiddlewareInterface {
   void clear_binary_sends() {
     std::lock_guard<std::mutex> lock(binary_mutex_);
     binary_sends_.clear();
+    binary_priorities_.clear();
+  }
+
+  /// Priorities passed to send_binary(), in call order (parallel to get_binary_sends()).
+  std::vector<FramePriority> get_binary_priorities() {
+    std::lock_guard<std::mutex> lock(binary_mutex_);
+    return binary_priorities_;
   }
 
   /// When enabled, send_binary() returns false for frames marked kFrameFlagHeavy
@@ -241,6 +251,7 @@ class MockMiddleware : public MiddlewareInterface {
 
   std::mutex binary_mutex_;
   std::vector<std::pair<std::string, std::vector<uint8_t>>> binary_sends_;
+  std::vector<FramePriority> binary_priorities_;
   bool fail_heavy_sends_{false};
 
   std::mutex send_log_mutex_;
@@ -3362,4 +3373,38 @@ TEST_F(BridgeServerTest, LargeLatchedSampleReplayedUnflagged) {
   auto msgs = decode_frame(sends[0].second);
   ASSERT_EQ(msgs.size(), 1u);
   EXPECT_EQ(msgs[0].topic, "/latched");
+}
+
+TEST_F(BridgeServerTest, HeavyFramesSentWithHeavyPriority) {
+  // The bridge must tag heavy frames kHeavy so the middleware can shed them
+  // under congestion; light frames stay kNormal.
+  server_ = std::make_unique<BridgeServer>(
+      mock_topic_source_, mock_sub_manager_, mock_, 19999, 10.0, 50.0, WhitelistFilter{},
+      /*heavy_frame_threshold_bytes=*/64);
+  ASSERT_TRUE(server_->initialize());
+
+  mock_topic_source_->set_topics({{"/small", "std_msgs/msg/String"}, {"/big", "sensor_msgs/msg/PointCloud2"}});
+  mock_sub_manager_->add_known_topic("/small");
+  mock_sub_manager_->add_known_topic("/big");
+
+  json sub;
+  sub["command"] = "subscribe";
+  sub["topics"] = json::array({"/small", "/big"});
+  mock_->push_request("client_a", sub.dump());
+  server_->process_requests();
+  mock_->pop_reply("client_a");
+  mock_->clear_binary_sends();
+
+  mock_sub_manager_->deliver_message("/small", make_bytes(8, 0xAA), 111);
+  mock_sub_manager_->deliver_message("/big", make_bytes(200, 0xBB), 222);
+  server_->publish_aggregated_messages();
+
+  auto sends = mock_->get_binary_sends();
+  auto priorities = mock_->get_binary_priorities();
+  ASSERT_EQ(sends.size(), 2u);
+  ASSERT_EQ(priorities.size(), 2u);
+  for (size_t i = 0; i < sends.size(); ++i) {
+    const bool heavy_frame = (frame_flags(sends[i].second) & kFrameFlagHeavy) != 0;
+    EXPECT_EQ(priorities[i], heavy_frame ? FramePriority::kHeavy : FramePriority::kNormal);
+  }
 }

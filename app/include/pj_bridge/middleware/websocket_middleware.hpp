@@ -33,6 +33,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "pj_bridge/middleware/backpressure.hpp"
 #include "pj_bridge/middleware/bounded_frame_queue.hpp"
 #include "pj_bridge/middleware/middleware_interface.hpp"
 
@@ -61,7 +62,9 @@ class WebSocketMiddleware : public MiddlewareInterface {
   bool receive_request(std::vector<uint8_t>& data, std::string& client_identity) override;
   bool send_reply(const std::string& client_identity, const std::vector<uint8_t>& data) override;
   bool publish_data(const std::vector<uint8_t>& data) override;
-  bool send_binary(const std::string& client_identity, const std::vector<uint8_t>& data) override;
+  bool send_binary(
+      const std::string& client_identity, const std::vector<uint8_t>& data,
+      FramePriority priority = FramePriority::kNormal) override;
   bool is_ready() const override;
   void set_on_connect(ConnectionCallback callback) override;
   void set_on_disconnect(ConnectionCallback callback) override;
@@ -70,6 +73,10 @@ class WebSocketMiddleware : public MiddlewareInterface {
   /// Total number of frames dropped due to slow-client backpressure, summed
   /// across all clients (currently connected and already disconnected).
   uint64_t dropped_frame_count() const;
+
+  /// Total number of kHeavy frames shed before transmit under congestion
+  /// (dropped instead of queued), summed over the middleware's lifetime.
+  uint64_t heavy_shed_count() const;
 
  private:
   struct IncomingRequest {
@@ -97,6 +104,11 @@ class WebSocketMiddleware : public MiddlewareInterface {
   // its count is folded in here to keep dropped_frame_count() a lifetime
   // total). Guarded by clients_mutex_.
   uint64_t dropped_from_disconnected_{0};
+
+  // Lifetime count of kHeavy frames shed before transmit under congestion
+  // (dropped rather than queued). Distinct from dropped_frame_count(), which
+  // counts backlog-overflow drops of kNormal frames. Guarded by clients_mutex_.
+  uint64_t heavy_shed_total_{0};
 
   size_t client_backlog_size_;
   std::optional<TlsConfig> tls_;

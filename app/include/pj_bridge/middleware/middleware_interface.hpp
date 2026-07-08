@@ -28,6 +28,12 @@
 
 namespace pj_bridge {
 
+/// Delivery priority for a per-client binary frame. Under socket congestion a
+/// `kHeavy` (large/size-class) frame is dropped before transmit rather than
+/// queued, so one big frame cannot starve the small frames behind it; `kNormal`
+/// frames use the queue-with-drop-oldest backlog. See docs/API.md.
+enum class FramePriority { kNormal, kHeavy };
+
 /// Abstract transport layer between BridgeServer and clients.
 ///
 /// Implementations handle connection management and bidirectional messaging.
@@ -65,8 +71,13 @@ class MiddlewareInterface {
   virtual bool publish_data(const std::vector<uint8_t>& data) = 0;
 
   /// Send binary data to a specific client (used for per-client aggregated frames).
-  /// @return true if the message was sent, false if the client is gone.
-  virtual bool send_binary(const std::string& client_identity, const std::vector<uint8_t>& data) = 0;
+  /// @param priority kHeavy frames are shed before transmit under congestion
+  ///        instead of queued (default kNormal preserves the legacy behavior).
+  /// @return true if the message was sent or accepted for later delivery,
+  ///         false if the client is gone.
+  virtual bool send_binary(
+      const std::string& client_identity, const std::vector<uint8_t>& data,
+      FramePriority priority = FramePriority::kNormal) = 0;
 
   /// Discard any queued outbound data for this client (e.g. when its session
   /// is destroyed server-side while the socket stays open). Default no-op for
