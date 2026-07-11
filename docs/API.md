@@ -97,7 +97,7 @@ fully match any whitelist pattern are omitted from the response entirely (see
 Every `get_topics` response carries a `server` object:
 
 ```json
-{"server": {"name": "pj_bridge", "version": "0.8.0",
+{"server": {"name": "pj_bridge", "version": "0.9.0",
             "capabilities": ["include_schemas", "latched_badge",
                              "latched_replay", "topics_changed",
                              "per_topic_rate_limit", "size_class_frames"]}}

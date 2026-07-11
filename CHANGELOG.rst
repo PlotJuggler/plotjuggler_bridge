@@ -2,6 +2,21 @@
 Changelog for package pj_ros_bridge
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+0.9.0 (2026-07-11)
+------------------
+* Size-class frames: isolate heavy messages (``>= heavy_frame_threshold_bytes``)
+  into their own binary frames so a single large message can no longer stall
+  delivery of small, high-rate topics that would otherwise share a frame.
+* Backpressure shedding: heavy frames are shed before transmit when a slow
+  client's bounded send queue is under pressure, preserving liveness for the
+  remaining topics instead of blocking the publish loop.
+* ``heavy_frame_threshold_bytes`` exposed on all three backends (ROS2 param,
+  RTI/FastDDS ``--heavy-frame-threshold-bytes``); ``0`` disables the split.
+* Wire compatibility preserved: heavy frames are not wire-flagged, keeping the
+  existing PlotJuggler plugin (which rejects non-zero frame flags) compatible.
+* New ``size_class_frames`` capability advertised in the ``get_topics``
+  ``server`` object.
+
 0.8.0 (2026-07-07)
 ------------------
 * Foxglove-parity feature set, closing the gap with foxglove_bridge's
