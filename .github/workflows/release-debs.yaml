@@ -27,6 +27,10 @@ jobs:
             os_codename: noble
             container: rostooling/setup-ros-docker:ubuntu-noble-ros-kilted-ros-base-latest
             runner: ubuntu-24.04
+          - ros_distro: lyrical
+            os_codename: resolute
+            container: rostooling/setup-ros-docker:ubuntu-resolute-ros-lyrical-ros-base-latest
+            runner: ubuntu-24.04
 
     runs-on: ${{ matrix.runner }}
     container:
