@@ -213,7 +213,25 @@ int main(int argc, char** argv) {
     // long publish cycle never delays ingest.
     rclcpp::executors::SingleThreadedExecutor timer_executor;
     timer_executor.add_callback_group(timer_group, node->get_node_base_interface());
-    std::thread timer_thread([&timer_executor]() { timer_executor.spin(); });
+    // Joins on every exit path: an exception unwinding past a joinable
+    // std::thread would call std::terminate().
+    struct TimerThread {
+      rclcpp::executors::SingleThreadedExecutor& executor;
+      std::thread thread;
+      ~TimerThread() {
+        executor.cancel();
+        if (thread.joinable()) {
+          thread.join();
+        }
+      }
+    } timer_thread{timer_executor, std::thread([&timer_executor, &node]() {
+                     try {
+                       timer_executor.spin();
+                     } catch (const std::exception& e) {
+                       RCLCPP_FATAL(node->get_logger(), "Timer thread failed: %s", e.what());
+                       rclcpp::shutdown();
+                     }
+                   })};
 
     // Every executor wait cycle rebuilds the whole wait set, O(subscriptions);
     // with blocking spin() that is one rebuild per received message (>50% of
@@ -238,7 +256,7 @@ int main(int argc, char** argv) {
     }
 
     timer_executor.cancel();
-    timer_thread.join();
+    timer_thread.thread.join();
 
     // Graceful shutdown
     RCLCPP_INFO(node->get_logger(), "Shutting down bridge server...");
