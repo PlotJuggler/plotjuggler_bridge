@@ -2,7 +2,6 @@
 #include <spdlog/sinks/ostream_sink.h>
 #include <spdlog/spdlog.h>
 
-#include <algorithm>
 #include <atomic>
 #include <sstream>
 #include <stdexcept>
@@ -152,7 +151,13 @@ TEST(TransformSetTest, RunIsSafeConcurrentlyWithBindFindAndStats) {
 // set up must be reported once, not once per second.
 TEST(TransformSetTest, SetupErrorIsLoggedOncePerTopic) {
   std::ostringstream captured;
-  auto previous = spdlog::default_logger();
+  // Restored on every exit path: the sink points at `captured`, which dies with this test.
+  struct RestoreLogger {
+    std::shared_ptr<spdlog::logger> previous = spdlog::default_logger();
+    ~RestoreLogger() {
+      spdlog::set_default_logger(previous);
+    }
+  } restore_logger;
   spdlog::set_default_logger(
       std::make_shared<spdlog::logger>("capture", std::make_shared<spdlog::sinks::ostream_sink_mt>(captured)));
 
@@ -166,10 +171,14 @@ TEST(TransformSetTest, SetupErrorIsLoggedOncePerTopic) {
   EXPECT_EQ((*set)->bind("/a", "pkg/msg/In"), nullptr);
   (*set)->bind("/a", "pkg/msg/In");  // second poll
   (*set)->bind("/b", "pkg/msg/In");  // another topic is reported separately
-  spdlog::set_default_logger(previous);
 
   const std::string log = captured.str();
-  EXPECT_EQ(std::count(log.begin(), log.end(), '\n'), 2) << log;
+  size_t reports = 0;
+  for (size_t at = log.find("could not be set up"); at != std::string::npos;
+       at = log.find("could not be set up", at + 1)) {
+    ++reports;
+  }
+  EXPECT_EQ(reports, 2u) << log;
   EXPECT_NE(log.find("'/a'"), std::string::npos) << log;
   EXPECT_NE(log.find("'/b'"), std::string::npos) << log;
 }
@@ -211,30 +220,47 @@ TEST(TransformSetTest, RunCountsSamplesBytesAndDrops) {
 struct BadProfile {
   const char* name;
   json profile;
+  const char* expected_in_error;  // the operator must be told WHY, not just "no"
 };
 
 class TransformSetBadProfileTest : public ::testing::TestWithParam<BadProfile> {};
 
-TEST_P(TransformSetBadProfileTest, IsRejectedAtStartup) {
+TEST_P(TransformSetBadProfileTest, IsRejectedAtStartupWithAClearReason) {
   auto set = TransformSet::create(GetParam().profile, factories());
-  EXPECT_FALSE(set.has_value());
+  ASSERT_FALSE(set.has_value());
+  EXPECT_NE(set.error().find(GetParam().expected_in_error), std::string::npos) << set.error();
 }
 
 INSTANTIATE_TEST_SUITE_P(
     All, TransformSetBadProfileTest,
     ::testing::Values(
-        BadProfile{"not_an_object", json::array()}, BadProfile{"missing_transforms", json::object()},
-        BadProfile{"unknown_top_level_key", json{{"transforms", json::array()}, {"extra", 1}}},
-        BadProfile{"transforms_not_an_array", json{{"transforms", 5}}},
-        BadProfile{"rule_not_an_object", json{{"transforms", json::array({5})}}},
-        BadProfile{"mistyped_rule_key", rule({{"match_type", 5}, {"transform", "fake"}})},
-        BadProfile{"topic_only_rule", rule({{"match_topic", "/lidar/.*"}, {"transform", "fake"}})},
-        BadProfile{"rule_without_matcher", rule({{"transform", "fake"}})},
-        BadProfile{"rule_without_transform", rule({{"match_type", "pkg/msg/In"}})},
-        BadProfile{"unknown_rule_key", rule({{"match_type", "pkg/msg/In"}, {"transform", "fake"}, {"oops", 1}})},
-        BadProfile{"unknown_transform", rule({{"match_type", "pkg/msg/In"}, {"transform", "nope"}})},
-        BadProfile{"invalid_regex", rule({{"match_type", "pkg/msg/In"}, {"match_topic", "("}, {"transform", "fake"}})},
+        BadProfile{"not_an_object", json::array(), "'transforms' array"},
+        BadProfile{"missing_transforms", json::object(), "'transforms' array"},
+        BadProfile{"unknown_top_level_key", json{{"transforms", json::array()}, {"extra", 1}}, "unknown key 'extra'"},
+        BadProfile{"transforms_not_an_array", json{{"transforms", 5}}, "'transforms' array"},
+        BadProfile{"rule_not_an_object", json{{"transforms", json::array({5})}}, "rule 0: must be an object"},
         BadProfile{
-            "unknown_param", rule({{"match_type", "pkg/msg/In"}, {"transform", "fake"}, {"params", {{"q", 1}}}})},
-        BadProfile{"type_not_accepted", rule({{"match_type", "pkg/msg/Unrelated"}, {"transform", "fake"}})}),
+            "mistyped_rule_key", rule({{"match_type", 5}, {"transform", "fake"}}),
+            "key 'match_type' is unknown or has the wrong JSON type"},
+        BadProfile{"empty_match_type", rule({{"match_type", ""}, {"transform", "fake"}}), "non-empty 'match_type'"},
+        BadProfile{
+            "topic_only_rule", rule({{"match_topic", "/lidar/.*"}, {"transform", "fake"}}), "non-empty 'match_type'"},
+        BadProfile{"rule_without_matcher", rule({{"transform", "fake"}}), "non-empty 'match_type'"},
+        BadProfile{"rule_without_transform", rule({{"match_type", "pkg/msg/In"}}), "missing 'transform'"},
+        BadProfile{
+            "unknown_rule_key", rule({{"match_type", "pkg/msg/In"}, {"transform", "fake"}, {"oops", 1}}),
+            "key 'oops' is unknown"},
+        BadProfile{
+            "unknown_transform", rule({{"match_type", "pkg/msg/In"}, {"transform", "nope"}}),
+            "unknown transform 'nope'"},
+        BadProfile{
+            "invalid_regex", rule({{"match_type", "pkg/msg/In"}, {"match_topic", "("}, {"transform", "fake"}}),
+            "invalid match_topic regex"},
+        BadProfile{
+            "unknown_param", rule({{"match_type", "pkg/msg/In"}, {"transform", "fake"}, {"params", {{"q", 1}}}}),
+            "unknown param 'q'"},
+        // the short / ROS1 spelling is the likely real-world mistake: the message must show the expected form
+        BadProfile{
+            "type_not_accepted", rule({{"match_type", "pkg/In"}, {"transform", "fake"}}),
+            "does not accept type 'pkg/In' (use the full type name, e.g. 'sensor_msgs/msg/PointCloud2')"}),
     [](const auto& info) { return std::string(info.param.name); });

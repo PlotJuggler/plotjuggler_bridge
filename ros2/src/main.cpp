@@ -69,7 +69,7 @@ std::shared_ptr<pj_bridge::TransformSet> load_transforms(const std::string& prof
 
   auto transforms = pj_bridge::TransformSet::create(profile, std::move(factories));
   if (!transforms) {
-    throw std::runtime_error(transforms.error());
+    throw std::runtime_error("transform_profile '" + profile_path + "': " + transforms.error());
   }
   if (strip_large_messages) {  // after the profile's rules, so an explicit rule wins
     if (auto added = pj_bridge::append_strip_rules(**transforms); !added) {

@@ -76,7 +76,7 @@ tl::expected<std::shared_ptr<TransformSet>, std::string> TransformSet::create(
 
   size_t index = 0;
   for (const auto& entry : profile["transforms"]) {
-    const std::string where = "transform profile rule " + std::to_string(index++) + ": ";
+    const std::string where = "rule " + std::to_string(index++) + ": ";
     if (!entry.is_object()) {
       return tl::make_unexpected(where + "must be an object");
     }
@@ -96,7 +96,7 @@ tl::expected<std::shared_ptr<TransformSet>, std::string> TransformSet::create(
       } else if (key == "params" && it->is_object()) {
         rule.params = *it;
       } else {
-        return tl::make_unexpected(where + "unknown or mistyped key '" + key + "'");
+        return tl::make_unexpected(where + "key '" + key + "' is unknown or has the wrong JSON type");
       }
     }
     if (auto added = set->add_rule(std::move(rule)); !added) {
@@ -110,7 +110,7 @@ tl::expected<void, std::string> TransformSet::add_rule(Rule rule) {
   // Mandatory, so that a transform applied to a type it cannot handle is a
   // startup error: topic types are only known once topics are discovered.
   if (rule.match_type.empty()) {
-    return tl::make_unexpected(std::string("needs 'match_type' ('match_topic' can only narrow it)"));
+    return tl::make_unexpected(std::string("needs a non-empty 'match_type' ('match_topic' can only narrow it)"));
   }
   if (rule.transform.empty()) {
     return tl::make_unexpected(std::string("missing 'transform'"));
@@ -123,7 +123,9 @@ tl::expected<void, std::string> TransformSet::add_rule(Rule rule) {
     return tl::make_unexpected("transform '" + rule.transform + "': " + ok.error());
   }
   if (!factory->second.accepts(rule.match_type)) {
-    return tl::make_unexpected("transform '" + rule.transform + "' does not accept type '" + rule.match_type + "'");
+    return tl::make_unexpected(
+        "transform '" + rule.transform + "' does not accept type '" + rule.match_type +
+        "' (use the full type name, e.g. 'sensor_msgs/msg/PointCloud2')");
   }
   std::lock_guard<std::mutex> lock(mutex_);
   rules_.push_back(std::move(rule));
@@ -138,19 +140,14 @@ tl::expected<void, std::string> TransformSet::append_type_rule(
   return add_rule(std::move(rule));
 }
 
-// bind() runs for every topic on every topic poll: each (topic, transform) problem is reported once.
-bool TransformSet::log_once(const std::string& topic, const std::string& transform) {
-  return logged_.emplace(topic, transform).second;
-}
-
 std::shared_ptr<BoundTransform> TransformSet::bind(const std::string& topic, const std::string& source_type) {
   std::lock_guard<std::mutex> lock(mutex_);
   if (auto it = bindings_.find(topic); it != bindings_.end()) {
     if (it->second->source_type == source_type) {
       return it->second;
     }
-    bindings_.erase(it);  // the topic's type changed: match again, and let it be reported again
-    std::erase_if(logged_, [&](const auto& entry) { return entry.first == topic; });
+    bindings_.erase(it);  // the topic's type changed: match again, and report a new failure again
+    setup_failed_.erase(topic);
   }
 
   // ponytail: unmatched topics re-run every rule on each call (once per topic poll);
@@ -172,7 +169,7 @@ std::shared_ptr<BoundTransform> TransformSet::bind(const std::string& topic, con
       error = e.what();
     }
     if (!bound->transform) {
-      if (log_once(topic, rule.transform)) {
+      if (setup_failed_.insert(topic).second) {  // bind() runs on every topic poll: report once
         spdlog::error(
             "Transform '{}' could not be set up for '{}': {}; leaving it untransformed", rule.transform, topic, error);
       }

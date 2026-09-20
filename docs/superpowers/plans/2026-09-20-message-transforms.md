@@ -1,5 +1,7 @@
 # Message Transforms (v1: Cloudini) Implementation Plan
 
+> **Historical.** This is the plan as written before implementation. The code diverged during review (output type/schema moved onto `MessageTransform`, `match_type` became mandatory, Cloudini 1.3.1 removed the CMake workarounds). The design doc in `docs/superpowers/specs/` and `docs/API.md` describe what was built.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Operator-configured, per-topic payload transforms in pj_bridge, with Cloudini point cloud compression and the existing stripper as the two implementations.

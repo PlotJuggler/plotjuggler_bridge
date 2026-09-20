@@ -205,7 +205,7 @@ Then, for each message in the (compressed) payload:
 
 ## Testing
 
-### Test Count: 303 unit tests
+### Test Count: 304 unit tests
 
 ### Commands
 ```bash
@@ -291,5 +291,5 @@ identity/capabilities object, and TLS setup).
 
 **Last Updated**: 2026-07-06
 **Project Phase**: Unified multi-backend architecture
-**Test Status**: 303 unit tests passing (all sanitizers clean)
+**Test Status**: 304 unit tests passing (all sanitizers clean)
 **Executables**: `pj_bridge_ros2` (ROS2), `pj_bridge_rti` (RTI DDS, disabled), `pj_bridge_fastdds` (FastDDS)

@@ -26,10 +26,9 @@
 #include <mutex>
 #include <optional>
 #include <regex>
-#include <set>
 #include <string>
 #include <unordered_map>
-#include <utility>
+#include <unordered_set>
 #include <vector>
 
 #include "pj_bridge/message_transform.hpp"
@@ -87,13 +86,12 @@ class TransformSet {
 
   TransformSet() = default;
   tl::expected<void, std::string> add_rule(Rule rule);
-  bool log_once(const std::string& topic, const std::string& transform);
 
   FactoryMap factories_;
   std::vector<Rule> rules_;
   mutable std::mutex mutex_;
   std::unordered_map<std::string, std::shared_ptr<BoundTransform>> bindings_;
-  std::set<std::pair<std::string, std::string>> logged_;  // (topic, transform) already reported
+  std::unordered_set<std::string> setup_failed_;  // topics whose setup error was already reported
 };
 
 }  // namespace pj_bridge
