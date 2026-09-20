@@ -1,7 +1,9 @@
 # CPU Optimization — Findings and Next Steps
 
-Status: **analysis only, no code changed.** This is a working document for a
-profiling pass on a machine with ROS2 installed.
+Status: **measured, first fix pass done.** The ROS2 profiling pass this
+document called for was done on 2026-09-20 (results in §2.0) and the fixes it
+justified are on branch `perf/cpu-fixes` (outcome in §2.9). §1's micro-benchmarks were also re-run on a second machine (see
+[docs/perf/README.md](./perf/README.md)) and the ratios hold.
 
 Baseline commit: `f344cca` (0.9.0).
 
@@ -15,9 +17,9 @@ Every claim is tagged with how it was established:
 - **[derived]** — arithmetic on top of a measured number (e.g. scaling a
   per-frame cost to a frame rate).
 - **[inferred]** — reasoned from the code plus known rclcpp/rmw behavior, and
-  **not verified**. Everything ROS2-specific in §2 is in this category, because
-  the analysis environment had no ROS2 installation. Treat these as hypotheses
-  to confirm with `perf`, not as conclusions.
+  **not verified**. §2.0 now holds ROS2-specific measurements (`perf`/
+  `pidstat` on a real bag); §2.5–2.7 remain in this category. Treat these as
+  hypotheses to confirm with `perf`, not as conclusions.
 
 Measurements were taken on a 4-core Intel Xeon @ 2.10 GHz, g++ 13.3.0 `-O2`,
 libzstd 1.5.5. Absolute values will differ on other hardware; the *ratios*
@@ -153,6 +155,9 @@ per group **and one per heavy message**, so every frame pays
   1 MiB        0.5765       0.5788      1.00x
 ```
 
+On a second machine (i7-13700H, see `docs/perf/README.md`): 3.9x at 4 KiB,
+~1.0–1.1x at ≥64 KiB — so the "~5×" figure applies to small frames only.
+
 Direction: hold one serializer (or a small pool) as a member and `clear()` it
 between frames. The gain is concentrated in the many-small-frames case, which
 is the common one. For the heavy path there is also a redundant memcpy of the
@@ -233,13 +238,21 @@ Recorded so nobody re-investigates these.
 
 - **Lower zstd compression levels.** Measured `-1`, `-3`, `-5` against level 1
   (`docs/perf/bench_zstd_levels.cpp`): at best 6% faster, and `-3` drops the
-  ratio on float-heavy CDR from 3.98 to 2.65. **Level 1 is the right choice —
-  keep it.**
+  ratio on float-heavy CDR from 3.98 to 2.65. **Level 1 remains right for
+  light (small-message) frames — keep it there.**
 - **Skipping compression for already-compressed payloads.** zstd level 1 bails
   early on incompressible data (**[measured]** ~6 GB/s, 0.17 ms/MiB), so
-  compressing a JPEG is nearly free. It is *not* the heavy-frame bottleneck —
-  the copies in §1.2 are. The `flags` header field could not signal it anyway
-  (see `protocol_constants.hpp:24`).
+  compressing a JPEG is nearly free. That benchmark used
+  `bench_zstd_levels.cpp`'s synthetic "image-like" payload, which is
+  incompressible — **not representative of real sensor data, and the
+  rejection is REVERSED for heavy frames by §2.0's real-payload sweep**: real
+  point clouds/images are only partially compressible, so zstd does full work
+  at ~350–420 MB/s and *is* the heavy-frame bottleneck, not the copies in
+  §1.2 as originally claimed here. A negative level on heavy size-class
+  frames (e.g. `-5`: 1.9–3× less compression CPU for a 7–20% larger wire
+  size) is therefore a legitimate CPU/bandwidth knob for heavy frames. It is
+  wire-compatible: any zstd decoder accepts a negative-level frame, and the
+  `flags` header field stays 0 either way (see `protocol_constants.hpp:24`).
 - **The `compressBound` output-buffer zeroing** in `finalize()`: suspected, but
   harmless at large sizes because glibc serves those allocations from fresh
   zero pages. Only the cctx churn matters, and only for small frames.
@@ -248,11 +261,133 @@ Recorded so nobody re-investigates these.
 
 ## 2. ROS2 backend — deep dive
 
-> **Everything in this section is [inferred].** It was not measured: the
-> analysis environment had no ROS2 installation. §2.8 is the recipe to confirm
-> or falsify it. The single most valuable thing to check first is whether
-> `perf` actually shows executor machinery dominating, or whether it is all
-> `memcpy` and zstd — that determines which half of this section matters.
+### 2.0 Measured results (2026-09-20)
+
+**[measured]** Setup: i7-13700H, RoboStack Humble (pixi), rmw_fastrtps (Fast
+DDS 2.6.10), Release build of `f344cca`. Load: `ros2 bag play --loop` of a
+5-minute slice of a real warehouse-robot bag — 83 playable topics, ~1000
+msg/s, almost all small messages (Float32/Bool/PoseStamped/JointState at
+10–100 Hz, a few PointCloud2/OccupancyGrid at 1–5 Hz). Clients: a minimal
+Python `websockets` client subscribing to all 83 topics, heartbeating at
+1 Hz. CPU via `pidstat` (20 s averages), percent of one core.
+
+| Scenario | total %CPU | main (executor) thread | all `Srv:ws:*` threads |
+|---|---|---|---|
+| bag 1×, 0 clients (no subscriptions) | 0.85 | 0.8 | – |
+| bag 1×, 1 client | 19.2 | ~19.9 | 0.0 |
+| bag 1×, 2 clients | 28.1 | ~32 | 0.0 |
+| bag 1×, 4 clients | 31.5 | ~25 | 0.0 |
+| bag 4×, 1 client | 45.8 | ~41.8 | 0.0 |
+| bag 4×, 4 clients | 52.9 | ~47.8 | 0.0 |
+| bag 10×, 1 client | 53.3 | ~44.7 | 0.0 |
+| no bag, no clients (idle floor) | 1.85 | 2.0 | – |
+
+(Per-thread and total columns are separate sampling windows over a bursty
+source, so they don't add exactly.) Client-side frame rate stayed at exactly
+50/s per client in every scenario; no drop/backlog warnings were logged. Wire
+throughput was only 0.07 MB/s per client at 1× — the cost is per-message/
+per-cycle overhead, not bytes.
+
+`perf record -F 999 --call-graph dwarf`, 15 s, bag 1×, 1 client — inclusive
+share of process samples:
+
+- `Executor::wait_for_work` 56–58%, of which `rcl_wait`/`__rmw_wait` 45–48%.
+  Top self-time symbols: `pthread_mutex_lock` 12.5% + `pthread_mutex_unlock`
+  8.2% (almost entirely under `__rmw_wait`), `WaitSetImpl::attach_condition`
+  9.3%, `WaitSetImpl::detach_condition` 4.7%, `CallbackGroup::collect_all_ptrs`
+  2.9%, `remove_null_handles` 2.1%. I.e. rmw_fastrtps attaches and detaches
+  every subscription's condition to the Fast DDS WaitSet, each under a mutex,
+  on every wait cycle.
+- `publish_aggregated_messages` 15–17%, of which
+  **`ix::WebSocketPerMessageDeflateCompressor::compress` (zlib) 7–11%** vs
+  `ZSTD_compressCCtx` 0.8–2%.
+- `execute_subscription` (the actual ingest callbacks: copy +
+  `MessageBuffer::add_message`) 2.6–3.8%.
+- By DSO: libfastrtps 28%, libc 27% (mostly mutex), librclcpp 12%, libz 11%,
+  rmw_fastrtps 5%, librcl 3%, **pj_bridge_ros2 itself 1.5%**, libzstd 0.9%.
+
+Conclusions:
+
+1. §2.1 confirmed [measured]: one thread does everything; WebSocket threads
+   ~0%.
+2. §2.2's wait-set theory confirmed [measured] and is THE dominant cost in the
+   many-small-messages regime: over half of all CPU is wait-set rebuild, not
+   memcpy/zstd. The bridge's own code is ~1.5%. Consequently most of §1.2's
+   per-message items (stats mutex, cleanup scan, zero-init) are noise for
+   ROS2 at this topic count; §2.3–2.5 are where the CPU is.
+3. §2.4 confirmed [measured]: idle floor with zero subscriptions is
+   0.85–1.85% of a core, purely timers + wait-set.
+4. NEW finding, not in the original analysis: IXWebSocket negotiates
+   permessage-deflate when the client offers it, so every already-zstd-
+   compressed binary frame is deflated again with zlib on the executor
+   thread, costing ~5× more CPU than the zstd pass itself. Re-running the
+   1-client scenario with the client's deflate offer disabled dropped total
+   CPU from 19.2% to 12.9% [measured]. Caveat: this only triggers for clients
+   that offer the extension (Python `websockets` does by default); whether
+   the PlotJuggler plugin's WebSocket client offers it has NOT been checked —
+   verify before prioritizing. Direction: disable per-message deflate
+   server-side (`ix::WebSocketPerMessageDeflateOptions(false)` on the server)
+   since payloads are already zstd; text frames are tiny.
+5. Not measured here: DDS-level sample loss (the ROS2 entry point has no
+   periodic stats log — that block only exists in
+   `standalone_event_loop.cpp`; see §2.8 step 2), the §2.6 mmap question, and
+   everything FastDDS-backend-specific. The large-message regime *is* now
+   measured — see the subsection below.
+
+#### Large-message regime
+
+**[measured]** Same machine/setup as above. Client had WebSocket
+permessage-deflate disabled to isolate the bridge's own path (see conclusion
+4 above — deflate would otherwise dominate these numbers too).
+
+| Workload | in | clients | bridge %CPU (one core) | wire out per client |
+|---|---|---|---|---|
+| 4× PointCloud2 @10 Hz (~1.3 MB each) + Imu 400 Hz + tf 480 Hz + odom 71 Hz | ~52 MiB/s | 0 | 0.9 | – |
+| same | same | 1 | 33.9 | 31.0 MB/s |
+| same | same | 4 (one subscription group) | 34.0 | 31.0 MB/s each (124 MB/s total) |
+| 2× raw mono Image @20 Hz (~360 KB each) + Imu 200 Hz | ~14 MiB/s | 1 | 11.7 | 12.4 MB/s |
+
+`perf record -F 999 --call-graph dwarf`, point-cloud workload, 1 client —
+inclusive share: `publish_aggregated_messages` 67–77%, of which
+`AggregatedMessageSerializer::finalize` → `ZSTD_compressCCtx` 60–65%;
+`execute_subscription` (ingest incl. rmw take) 6.3%; `wait_for_work` 7.5%;
+`WebSocketMiddleware::send_binary` 2.8%. Self time: `ZSTD_compressBlock_fast`
+43%, `__memmove_avx_unaligned_erms` 9.5%, `ZSTD_encodeSequences` 5.4%,
+`__memset_avx2_unaligned_erms` 3.5%. By DSO: libzstd 60%, libc 19%,
+libfastrtps 6.6%, librclcpp 2.6%. Raw-image workload: libzstd 48%, memmove 9%,
+memset 3%.
+
+Conclusions:
+
+- zstd is THE cost on heavy frames (60–65%), copies are ~13% (memmove +
+  memset). This contradicts §1.4's "compression is not the heavy-frame
+  bottleneck — the copies are": that claim came from `bench_zstd_levels.cpp`'s
+  synthetic "image-like" payload, which is incompressible so zstd bails out at
+  ~6–9 GB/s. Real sensor data is partially compressible (point clouds 1.9×,
+  raw mono images 1.13× at level 1) so zstd does full work at ~350–420 MB/s.
+- Fan-out is nearly free: 1 → 4 clients in the same subscription group added
+  ~0% CPU (compression is done once per group; the per-client `std::string`
+  copy + socket write of 31 MB/s each is lost in the noise, %system rose
+  2.3 → 4.9). So §1.2's per-client frame copy is real but low priority.
+- All of that zstd time runs on the single executor thread (§2.1), i.e. it is
+  time during which no subscription callback runs.
+
+Real-payload zstd level sweep (8 concatenated real messages, single thread,
+i7-13700H) **[measured]**:
+
+| zstd level | point cloud (rslidar, 11.0 MB) | raw mono image (2.9 MB) |
+|---|---|---|
+| 3 | 2.28× @ 186 MB/s | 1.20× @ 144 MB/s |
+| 1 | 1.89× @ 350 MB/s | 1.13× @ 422 MB/s |
+| -1 | 1.79× @ 411 MB/s | 1.07× @ 673 MB/s |
+| -5 | 1.51× @ 652 MB/s | 1.05× @ 1274 MB/s |
+| -20 | 1.27× @ 1417 MB/s | 1.02× @ 2490 MB/s |
+| -100 | 1.15× @ 2997 MB/s | 1.01× @ 3633 MB/s |
+| -1000 | 1.05× @ 5975 MB/s | 1.00× @ 8540 MB/s |
+
+> Originally everything in this section was **[inferred]**: the analysis
+> environment had no ROS2 installation. §2.0 above now confirms §2.1, §2.2
+> and §2.4 by measurement. §2.5–2.7 remain **[inferred]**.
 
 ### 2.1 The headline: the whole bridge runs on one thread
 
@@ -287,6 +422,11 @@ does little for the other.
 measurements (~14 GB/s for a full pass; zstd-1 at ~0.17 ms/MiB on incompressible
 image data): one 2 MiB image costs roughly 0.9 ms in copies + 0.34 ms in zstd.
 Four 30 Hz cameras ≈ 15% of a core. Annoying, not fatal.
+
+**Correction (§2.0, [measured]):** wrong on both counts. Real point-cloud
+traffic (~52 MiB/s) cost 34% of a core, dominated by zstd (60–65%), not
+copies (~13%) — because real data compresses and the estimate above assumed
+incompressible payload.
 
 **Many small messages are the problem.** Per message the executor must
 dispatch, rmw allocates a `SerializedMessage`, then the bridge pays copy +
@@ -354,6 +494,10 @@ installable in the target environment before planning around it.** If §2.3 is
 done first, the subscription-only executor does far less per cycle anyway and
 this drops in priority.
 
+§2.0 measured the wait-set cost at 45–58% of process CPU with 83
+subscriptions on rmw_fastrtps; trying rmw_cyclonedds is a cheap experiment
+worth doing before an executor swap.
+
 ### 2.6 The ROS2 copy chain — six passes, three removable
 
 | # | Where | Note |
@@ -419,7 +563,10 @@ perf report --sort=dso,symbol
 
 # 2. Is DDS dropping before the bridge ever sees it?
 ros2 topic hz /your/high_rate_topic      # publisher-side rate
-# Compare against "DDS receive rates" in the 5s stats log. A gap is rmw-level loss.
+# Compare against the bridge's own received count. Note: the ROS2 entry point
+# has no periodic stats log (that 5s log block only exists in
+# standalone_event_loop.cpp, i.e. the RTI/FastDDS backends) — for ROS2, add a
+# temporary counter or read topic_receive_counts_ via a debug hook instead.
 
 # 3. Idle floor, with no clients connected at all:
 pidstat -p $(pgrep -f pj_bridge_ros2) 1 10
@@ -434,25 +581,94 @@ small messages, and 2 cameras at 30 Hz.
 
 ---
 
+## 2.9 Outcome of the first fix pass (branch `perf/cpu-fixes`)
+
+**Measurement rig note (important).** The §2.0 numbers were taken unpinned
+under the `powersave` governor on a hybrid P/E-core CPU and proved noisy (same
+config varied 30–48%). All before/after numbers below are **[measured]** with
+governor `performance`, bridge pinned to P-cores (`taskset -c 4-7`), bag
+player and client on other cores, CPU from `/proc/<pid>/stat` over 20 s,
+client decoding frames and counting messages per topic to prove losslessness.
+Absolute values are therefore ~half of §2.0's — compare only within this
+table.
+
+| Workload (1 client) | main (`f344cca`) | `perf/cpu-fixes` | notes |
+|---|---|---|---|
+| 83 topics, ~700 msg/s small messages | 7.2–7.6% | 3.4% | identical message totals (20.5k / 30 s) |
+| 4 lidars 52 MiB/s + 400 Hz imu + 480 Hz tf | 17.9–18.6% | 18.8–19.1% (level 1) / 15.0% (level -5) | 31 vs 39 MB/s on the wire |
+| bag playing, no clients | 0.45% | 0.45% | |
+
+Plus the deflate fix from §2.0 (19.2% → 12.9%, unpinned rig) for clients that
+offer permessage-deflate.
+
+**What was done (3 commits):**
+
+1. Server declines permessage-deflate (`server_->disablePerMessageDeflate()`),
+   with a unit test on the handshake.
+2. ROS2 ingest: subscription callbacks drain their reader via
+   `take_serialized()`; ingest executor polls every `ingest_poll_interval_ms`
+   (default 5; 0 = blocking spin; blocks instead of polling while there are no
+   subscriptions so idle is unchanged); `min_qos_depth` default 1 → 10; timers
+   (publish/zstd, requests, timeouts, topic poll) moved to their own callback
+   group + executor thread. Poll-interval sweep on the small-message workload
+   **[measured]**: blocking 7.5%, 2 ms 4.5%, 5 ms 3.3%, 10 ms 2.6%.
+3. `heavy_frame_zstd_level` knob (default 1, unchanged behaviour). End-to-end
+   sweep on the lidar workload **[measured]**: level 1 = 19.0% / 31.0 MB/s; -5
+   = 14.8% / 39.0; -20 = 14.4% / 45.6; -100 = 10.3% / 50.6. The end-to-end gain
+   is smaller than the isolated zstd sweep in §2.0 predicts because the larger
+   frames cost more in socket writes. Non-zeroing copies in ingest +
+   serializer.
+
+**Lessons worth recording:**
+
+- Naive batching (spin_some + sleep WITHOUT draining) silently loses data: the
+  executor takes one message per subscription per wait cycle, so a 5 ms poll
+  capped a 481 Hz `/tf` topic at 154 Hz. Draining in the callback is what
+  makes polling lossless. Draining alone (with blocking spin) gives no CPU
+  gain (7.3% vs 7.5%).
+- A variant that blocked in `spin_once` before every poll was worse than main
+  under load (6.2% small-message, 24% lidar) — rejected.
+- ThreadSanitizer live run (lidar load, clients joining/leaving for 60 s): no
+  races in pj_bridge code between the ingest and timer threads; only the known
+  IXWebSocket teardown warning and rclcpp's signal-handler errno warning.
+
+**Deliberately NOT done, with the measurement that justifies skipping:**
+serializer/cctx pooling (3 µs vs 12 µs per small frame ⇒ ~0.05% of a core at
+50 Hz); `IXWebSocketSendData` zero-copy send and shared_ptr frame fan-out
+(1 → 4 clients added ~0% CPU at 31 MB/s each); cached subscription-group
+signature and `cleanup_old_messages` amortization (bridge's own code was 1.5%
+of the small-message profile). Still open: compression off the publish thread
+/ worker pool for heavy frames (zstd remains ~60% of heavy-regime CPU),
+rmw_cyclonedds comparison, FastDDS-backend items (unmeasured), whether the
+PlotJuggler plugin offers permessage-deflate.
+
+---
+
 ## 3. Suggested order
 
 Effort estimates are rough. Payoff is for the configurations noted in §1–2.
 
-| # | Change | Section | Effort | Payoff | Backend |
-|---|---|---|---|---|---|
-| 1 | `IXWebSocketSendData` at the 3 send sites | 1.2 | ~10 min | up to 3% of a core | all |
-| 2 | `reserve`+`insert` for ingest buffers | 1.2 | ~15 min | 1.5–1.8× on the copy | all |
-| 3 | Deadline-driven standalone loop | 1.1 | ~1 h | 9× lower idle floor | RTI, FastDDS |
-| 4 | Reuse one serializer per publish cycle | 1.2 | ~1 h | ~5× on small frames | all |
-| 5 | Publish work off the executor thread | 2.3 | ~half day | removes ingest stalls | **ROS2** |
-| 6 | Cached subscription signature for grouping | 1.1 | ~3 h | 0.7–7% of a core | all |
-| 7 | Amortize `cleanup_old_messages()` | 1.2 | ~1 h | up to 3.5% of a core | all |
-| 8 | Graph event instead of 1 Hz topic poll | 1.3 | ~3 h | removes steady-state polling | ROS2 |
-| 9 | FastDDS raw-payload reader type | 1.1 | ~1 day | largest single win | FastDDS |
+| # | Change | Section | Effort | Payoff | Backend | Status |
+|---|---|---|---|---|---|---|
+| 1 | Disable WebSocket permessage-deflate server-side | 2.0 | ~10 min | ~6% of a core per deflate-offering client (measured) | all | done (§2.9) |
+| 2 | Lower zstd level for heavy size-class frames (configurable) | 1.4 / 2.0 | ~1 h | ~2–3× less CPU on heavy frames (the dominant cost there) | all | done (§2.9) |
+| 3 | `IXWebSocketSendData` at the 3 send sites | 1.2 | ~10 min | up to 3% of a core — §2.0 measured all copies (this + reserve/insert) together at ~13% of heavy-regime CPU | all | skipped — measured negligible (§2.9) |
+| 4 | `reserve`+`insert` for ingest buffers | 1.2 | ~15 min | 1.5–1.8× on the copy — §2.0 measured all copies together at ~13% of heavy-regime CPU | all | done (§2.9) |
+| 5 | Deadline-driven standalone loop | 1.1 | ~1 h | 9× lower idle floor | RTI, FastDDS | open |
+| 6 | Reuse one serializer per publish cycle | 1.2 | ~1 h | ~4–5× on small frames only | all | skipped — measured negligible (§2.9) |
+| 7 | Publish work off the executor thread | 2.3 | ~half day | removes ingest stalls | **ROS2** | done (§2.9) |
+| 8 | Cached subscription signature for grouping | 1.1 | ~3 h | 0.7–7% of a core | all | skipped — measured negligible (§2.9) |
+| 9 | Amortize `cleanup_old_messages()` | 1.2 | ~1 h | up to 3.5% of a core | all | skipped — measured negligible (§2.9) |
+| 10 | Graph event instead of 1 Hz topic poll | 1.3 | ~3 h | removes steady-state polling | ROS2 | open |
+| 11 | FastDDS raw-payload reader type | 1.1 | ~1 day | largest single win | FastDDS | open |
 
-Items 1, 2 and 4 are near-free and independent — reasonable to land together.
-Item 5 is the one to do first on ROS2 **if** §2.8's profile confirms §2.1.
-Item 9 needs a real Fast DDS environment to verify.
+Items 3, 4 and 6 are near-free and independent — reasonable to land together.
+Item 7 (publish work off the executor thread) is confirmed valuable by §2.0 —
+the executor thread is the whole bottleneck. But note that moving publish
+off-thread removes only the ~15–17% publish share measured in §2.0; the
+>50% wait-set share needs §2.4/§2.5 (fewer wakeups, events executor) or a
+different rmw, so raise §2.5's priority accordingly.
+Item 11 needs a real Fast DDS environment to verify.
 
 ## 4. Related
 

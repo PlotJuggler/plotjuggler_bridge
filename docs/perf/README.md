@@ -82,6 +82,56 @@ image-like     -3       0.1472         1.00       7125
 image-like     -5       0.1500         1.00       6991
 ```
 
+Environment 2: Intel Core i7-13700H (governor powersave, pinned with
+`taskset -c 2`), g++ 15.2.0 `-O2`, libzstd 1.5.7.
+
+```
+=== bench_hotpath ===
+  grouping   100 topics x 1 clients :   0.040 ms/cycle  ->   0.2% of one core @50Hz
+  grouping   500 topics x 1 clients :   0.158 ms/cycle  ->   0.8% of one core @50Hz
+  grouping   500 topics x 4 clients :   0.528 ms/cycle  ->   2.6% of one core @50Hz
+  grouping  2000 topics x 2 clients :   1.112 ms/cycle  ->   5.6% of one core @50Hz
+
+  cleanup scan    50 topics :   0.0000 ms/message -> at 5k msg/s =   0.0% of one core
+  cleanup scan   200 topics :   0.0003 ms/message -> at 5k msg/s =   0.1% of one core
+  cleanup scan  1000 topics :   0.0052 ms/message -> at 5k msg/s =   2.6% of one core
+
+  ingest copy     1024 B : zero+memcpy  0.0000 ms  reserve+insert  0.0000 ms  (1.14x)
+  ingest copy    65536 B : zero+memcpy  0.0024 ms  reserve+insert  0.0013 ms  (1.83x)
+  ingest copy  2097152 B : zero+memcpy  0.1555 ms  reserve+insert  0.1006 ms  (1.55x)
+
+  per-msg cb copy + stats mutex :   0.0438 us/msg  vs direct   0.0016 us/msg  (27.7x)
+
+=== bench_loop ===
+  today  (1 ms sleep) :  0.96% of one core idle  (905 wakeups/s)
+  deadline-driven     :  0.18% of one core idle  ( 50 wakeups/s)
+
+  frame     8192 B x 1 clients :  0.0004 ms/frame ->  0.0% of a core @50Hz
+  frame   262144 B x 4 clients :  0.0196 ms/frame ->  0.1% of a core @50Hz
+  frame  2097152 B x 4 clients :  0.3590 ms/frame ->  1.8% of a core @50Hz
+
+=== bench_serializer ===
+     4096B       0.0125       0.0032       0.0001      3.92x
+    65536B       0.0387       0.0372       0.0014      1.04x
+   262144B       0.1244       0.1146       0.0054      1.09x
+  1048576B       0.4678       0.4611       0.0413      1.01x
+  4194304B       1.6706       1.6560       0.1744      1.01x
+
+=== bench_zstd_levels ===
+float-CDR       1       2.2053         3.98        475
+float-CDR      -1       2.1174         3.98        495
+float-CDR      -3       2.0758         2.65        505
+float-CDR      -5       2.2985         2.26        456
+image-like      1       0.1395         1.00       7516
+image-like     -1       0.1257         1.00       8342
+image-like     -3       0.1172         1.00       8943
+image-like     -5       0.1083         1.00       9682
+```
+
+Ratios reproduce; the one exception is the pooled-serializer gain at
+64–256 KiB, which shrinks from 1.2–1.3x to 1.04–1.09x (the win is confined to
+small frames).
+
 ## What these do NOT cover
 
 Anything requiring a live middleware — which is most of the ROS2 analysis. In
