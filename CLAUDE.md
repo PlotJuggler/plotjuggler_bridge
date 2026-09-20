@@ -51,7 +51,7 @@ make -j$(nproc)
 - **CLI11** — FetchContent (RTI backend only)
 
 ### FastDDS Backend (Conan-managed)
-- **eProsima Fast DDS 3.4.0** — via Conan (`fast-dds/3.4.0`)
+- **eProsima Fast DDS 3.4.3** — via Conan (`fast-dds/3.4.3`)
 - **eProsima Fast CDR 2.x** — transitive dependency via Conan
 - **CLI11** — FetchContent (for CLI parsing, shared with RTI)
 
@@ -191,7 +191,7 @@ Then, for each message in the (compressed) payload:
 - CLI11 (FetchContent, for CLI parsing)
 
 ### FastDDS Backend
-- eProsima Fast DDS 3.4.0 (Conan: `fast-dds/3.4.0`)
+- eProsima Fast DDS 3.4.3 (Conan: `fast-dds/3.4.3`)
 - eProsima Fast CDR 2.x (transitive Conan dependency)
 - CLI11 (FetchContent, for CLI parsing)
 

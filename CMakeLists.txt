@@ -69,8 +69,8 @@ if(NOT ixwebsocket_FOUND)
   message(STATUS "IXWebSocket not found — fetching via FetchContent")
   FetchContent_Declare(
     ixwebsocket
-    URL https://github.com/machinezone/IXWebSocket/archive/refs/tags/v11.4.6.tar.gz
-    URL_HASH SHA256=c024334f8e45980836c67008979a884d6dcc5ef067dd2eb1fa7241f4c17ddc32
+    URL https://github.com/machinezone/IXWebSocket/archive/refs/tags/v12.0.1.tar.gz
+    URL_HASH SHA256=d23bdc91dbfe2b9ae13c322d539392d7a6b8b506560f41c90e227fa0f86a2405
   )
   set(USE_TLS ${PJ_BRIDGE_TLS} CACHE BOOL "" FORCE)
   if(PJ_BRIDGE_TLS)
@@ -79,6 +79,11 @@ if(NOT ixwebsocket_FOUND)
   set(USE_ZLIB ON CACHE BOOL "" FORCE)
   set(IXWEBSOCKET_INSTALL OFF CACHE BOOL "" FORCE)
   FetchContent_MakeAvailable(ixwebsocket)
+  if(PJ_BRIDGE_TLS)
+    # The static library does not export its OpenSSL dependency to consumers.
+    find_package(OpenSSL REQUIRED)
+    target_link_libraries(ixwebsocket INTERFACE OpenSSL::SSL OpenSSL::Crypto)
+  endif()
 else()
   message(STATUS "Using system IXWebSocket")
 endif()

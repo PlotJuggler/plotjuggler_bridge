@@ -12,6 +12,10 @@ Forthcoming
   executor thread so a long publish cycle never delays ingest.
 * ROS2: ``min_qos_depth`` default raised ``1`` -> ``10`` so the ingest poll
   interval can't overflow a shallow reader between polls.
+* Dependencies: IXWebSocket 11.4.6 -> 12.0.1 (FetchContent and .deb builds),
+  Fast DDS 3.4.0 -> 3.4.3, CLI11 2.6.0 -> 2.6.2. Fixed the FastDDS/RTI
+  link failure when IXWebSocket is fetched with TLS.
+* CI and Debian release for ROS 2 Lyrical.
 * Removed zero-initializing copies in the ingest and serializer hot paths
   (``resize()`` + ``memcpy`` -> direct-construct/``insert``).
 
