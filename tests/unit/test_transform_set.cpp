@@ -165,7 +165,9 @@ TEST(TransformSetTest, RunIsSafeConcurrentlyWithBindFindAndStats) {
       bound->run("/a", in, out);
     }
   });
-  for (int i = 0; i < 2000; ++i) {
+  // Keep going until the ingest thread has really overlapped with us: on a busy
+  // machine 2000 iterations can finish before it is even scheduled.
+  for (int i = 0; i < 2000 || bound->samples.load() < 100; ++i) {
     (*set)->bind("/a", "pkg/msg/In");
     (*set)->bind("/other" + std::to_string(i % 8), "pkg/msg/In");
     (*set)->find("/a");
