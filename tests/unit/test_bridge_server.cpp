@@ -2754,6 +2754,34 @@ TEST_F(BridgeServerTest, GetTopicsMarksLatchedTopics) {
   }
 }
 
+// GetTopicsCarriesSourceTypeOnlyForTransformedTopics
+//
+// A topic whose TopicInfo::source_type is set (i.e. it was rewritten by a
+// TransformingTopicSource) carries `source_type` in its get_topics entry;
+// an untransformed topic (empty source_type) carries no such key.
+TEST_F(BridgeServerTest, GetTopicsCarriesSourceTypeOnlyForTransformedTopics) {
+  ASSERT_TRUE(server_->initialize());
+  mock_topic_source_->set_topics(
+      {{"/cloud", "point_cloud_interfaces/msg/CompressedPointCloud2", "sensor_msgs/msg/PointCloud2"},
+       {"/imu", "sensor_msgs/msg/Imu"}});
+
+  json req;
+  req["command"] = "get_topics";
+  mock_->push_request("client_source_type", req.dump());
+  server_->process_requests();
+
+  auto replies = mock_->get_replies("client_source_type");
+  ASSERT_EQ(replies.size(), 1u);
+  for (const auto& entry : replies[0]["topics"]) {
+    if (entry["name"] == "/cloud") {
+      ASSERT_TRUE(entry.contains("source_type"));
+      EXPECT_EQ(entry["source_type"], "sensor_msgs/msg/PointCloud2");
+    } else {
+      EXPECT_FALSE(entry.contains("source_type")) << entry.dump();
+    }
+  }
+}
+
 // TopicsChangedAddedEntriesCarryLatched
 //
 // A late-appearing transient-local topic is badged in the topics_changed push

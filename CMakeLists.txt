@@ -114,6 +114,7 @@ add_library(pj_bridge_app STATIC
   app/src/standalone_event_loop.cpp
   app/src/whitelist_filter.cpp
   app/src/transform_set.cpp
+  app/src/transforming_topic_source.cpp
 )
 
 target_include_directories(pj_bridge_app PUBLIC
@@ -268,6 +269,7 @@ if(BUILD_TESTING AND ament_cmake_FOUND)
     tests/unit/test_protocol_constants.cpp
     tests/unit/test_whitelist_filter.cpp
     tests/unit/test_transform_set.cpp
+    tests/unit/test_transforming_topic_source.cpp
     tests/unit/test_topic_discovery.cpp
     tests/unit/test_schema_extractor.cpp
     tests/unit/test_generic_subscription_manager.cpp

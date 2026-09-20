@@ -279,6 +279,9 @@ std::string BridgeServer::handle_get_topics(const std::string& client_id, const 
     json topic_entry;
     topic_entry["name"] = topic.name;
     topic_entry["type"] = topic.type;
+    if (!topic.source_type.empty()) {
+      topic_entry["source_type"] = topic.source_type;
+    }
     attach_latched_badge(topic_entry, topic.name);
     if (include_schemas) {
       attach_schema_fields(topic_entry, topic.name);
