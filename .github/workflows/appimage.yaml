@@ -41,62 +41,7 @@ jobs:
 
           CONDA_PREFIX="$(pixi run -e ${{ matrix.environment }} printenv CONDA_PREFIX)"
 
-          # Create AppDir structure
-          mkdir -p AppDir/usr/{bin,lib,share}
-
-          # Copy binary (colcon isolated-install layout)
-          cp install/pj_bridge/lib/pj_bridge/pj_bridge_ros2 AppDir/usr/bin/
-
-          # Bundle shared libraries from the conda environment
-          # (exclude glibc/ld-linux which must come from the host)
-          ldd AppDir/usr/bin/pj_bridge_ros2 | \
-            grep "$CONDA_PREFIX" | \
-            awk '{print $3}' | \
-            xargs -I{} cp --no-dereference {} AppDir/usr/lib/ 2>/dev/null || true
-
-          # Also copy transitive deps from conda lib/
-          for lib in AppDir/usr/lib/*.so*; do
-            ldd "$lib" 2>/dev/null | \
-              grep "$CONDA_PREFIX" | \
-              awk '{print $3}' | \
-              xargs -I{} cp --no-dereference {} AppDir/usr/lib/ 2>/dev/null || true
-          done
-
-          # Copy ament index (needed for schema discovery at runtime)
-          cp -r "$CONDA_PREFIX"/share/ament_index AppDir/usr/share/ 2>/dev/null || true
-
-          # Copy message definitions (.msg/.srv/.idl files)
-          for pkg_dir in "$CONDA_PREFIX"/share/*/msg "$CONDA_PREFIX"/share/*/srv; do
-            [ -d "$pkg_dir" ] || continue
-            pkg_name="$(basename "$(dirname "$pkg_dir")")"
-            mkdir -p "AppDir/usr/share/$pkg_name"
-            cp -r "$pkg_dir" "AppDir/usr/share/$pkg_name/"
-          done
-
-          # Create .desktop file
-          cat > AppDir/pj_bridge.desktop <<'DESKTOP'
-          [Desktop Entry]
-          Name=pj_bridge
-          Exec=pj_bridge_ros2
-          Icon=pj_bridge
-          Type=Application
-          Categories=Science;
-          DESKTOP
-
-          # Create minimal icon
-          convert -size 256x256 xc:transparent AppDir/pj_bridge.png 2>/dev/null || \
-            touch AppDir/pj_bridge.png
-
-          # Create AppRun wrapper that sets environment
-          cat > AppDir/AppRun <<'APPRUN'
-          #!/bin/bash
-          SELF="$(readlink -f "$0")"
-          HERE="${SELF%/*}"
-          export LD_LIBRARY_PATH="${HERE}/usr/lib:${LD_LIBRARY_PATH}"
-          export AMENT_PREFIX_PATH="${AMENT_PREFIX_PATH:+$AMENT_PREFIX_PATH:}${HERE}/usr"
-          exec "${HERE}/usr/bin/pj_bridge_ros2" "$@"
-          APPRUN
-          chmod +x AppDir/AppRun
+          ./packaging/make_appdir.sh "$CONDA_PREFIX" AppDir
 
           # Generate AppImage (LD_LIBRARY_PATH needed for linuxdeploy to find conda libs)
           export LD_LIBRARY_PATH="$CONDA_PREFIX/lib:${LD_LIBRARY_PATH:-}"
