@@ -200,6 +200,37 @@ TEST_F(WebSocketMiddlewareTest, ClientConnectAndSendMessage) {
   std::this_thread::sleep_for(std::chrono::milliseconds(100));
 }
 
+// Binary frames are already zstd-compressed; negotiating permessage-deflate
+// would re-compress them with zlib on the publish thread.
+TEST_F(WebSocketMiddlewareTest, ServerDeclinesPerMessageDeflate) {
+  auto result = middleware_->initialize(18099);
+  ASSERT_TRUE(result.has_value());
+
+  std::mutex headers_mutex;
+  std::string extensions_header;
+  ix::WebSocket client;
+  client.setUrl("ws://127.0.0.1:18099");
+  client.setPerMessageDeflateOptions(ix::WebSocketPerMessageDeflateOptions(true));
+  client.setOnMessageCallback([&](const ix::WebSocketMessagePtr& msg) {
+    if (msg->type == ix::WebSocketMessageType::Open) {
+      std::lock_guard<std::mutex> lock(headers_mutex);
+      auto it = msg->openInfo.headers.find("Sec-WebSocket-Extensions");
+      if (it != msg->openInfo.headers.end()) {
+        extensions_header = it->second;
+      }
+    }
+  });
+  client.start();
+  ASSERT_TRUE(wait_for_client_open(client)) << "Client failed to connect";
+
+  {
+    std::lock_guard<std::mutex> lock(headers_mutex);
+    EXPECT_EQ(extensions_header.find("permessage-deflate"), std::string::npos)
+        << "server negotiated: " << extensions_header;
+  }
+  client.stop();
+}
+
 TEST_F(WebSocketMiddlewareTest, SendReplyToConnectedClient) {
   auto result = middleware_->initialize(18091);
   ASSERT_TRUE(result.has_value());
