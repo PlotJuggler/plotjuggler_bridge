@@ -1,6 +1,6 @@
 # Message Transforms (v1: Cloudini) — Design
 
-Date: 2026-09-20. Status: approved design, not implemented.
+Date: 2026-09-20. Status: implemented (ROS2 backend); see "Measured results".
 Supersedes the exploratory `docs/MESSAGE_TRANSFORMS.md` (PR #14).
 
 ## Goal
@@ -228,6 +228,33 @@ Cloudini off vs on: bridge CPU (% of a core), bytes on the wire, and
 client-side per-topic message counts (must be lossless). If encode time
 starves ingest, the designed-but-unbuilt fallback is a per-topic worker with a
 1-deep latest-wins input slot.
+
+## Measured results (2026-09-20)
+
+Pinned rig (bridge on cores 4-7, player 12-19, client 8-11, governor
+`performance`), 90 s cut of the 4-lidar bag (4 x PointCloud2 at 10 Hz, ~52 MiB/s
+raw, plus /tf, /imu, /odom), one client subscribed to everything, CPU from
+`/proc/<pid>/stat` over 20 s, three runs each.
+
+| Configuration | Bridge CPU (% of a core) | Wire | Encode | Pre-zstd ratio |
+|---|---|---|---|---|
+| no profile | 16.7 / 18.9 / 19.3 | 31.0 MB/s | — | — |
+| `cloudini`, 1 mm | 16.7 / 14.0 / 16.8 | 14.6 MB/s | 1.4 ms/cloud | 2.7–2.9 |
+| `cloudini`, 1 mm, `viz_preprocessing` | 18.3 / 17.9 / 18.3 | 13.8 MB/s | 2.9 ms/cloud | 3.1–3.5 |
+
+Lossless in every run: 300/300 clouds per lidar in 30 s, zero transform drops,
+other topics at their nominal rates. Bandwidth halves at equal or slightly
+lower CPU: the ~6% of a core spent encoding on the ingest thread is paid back
+by zstd having a third of the bytes to compress. Run-to-run CPU noise is about
+±2 points, so "CPU-neutral" is the defensible claim. `viz_preprocessing` doubles
+the encode time for ~5% fewer bytes on this data, which is why it defaults to
+off. Synchronous encoding in the ingest callback is sufficient; the per-topic
+worker fallback was not needed.
+
+Cloudini-side check: reusing the `PointcloudEncoder` across messages instead of
+the one-shot `convertPointCloud2ToCompressedCloud` measured 0% faster with
+second stage `NONE` and ~5% with `ZSTD`, so the scratch-and-copy approach above
+costs nothing measurable.
 
 ## Non-goals (v1)
 
