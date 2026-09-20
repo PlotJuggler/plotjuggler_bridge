@@ -30,6 +30,9 @@
 
 #include "pj_bridge/bridge_server.hpp"
 #include "pj_bridge/middleware/websocket_middleware.hpp"
+#ifdef PJ_BRIDGE_HAS_CLOUDINI
+#include "pj_bridge/cloudini_transform.hpp"
+#endif
 #include "pj_bridge/transform_set.hpp"
 #include "pj_bridge/transforming_topic_source.hpp"
 #include "pj_bridge/whitelist_filter.hpp"
@@ -173,6 +176,9 @@ int main(int argc, char** argv) {
 
       pj_bridge::TransformSet::FactoryMap factories;
       factories["strip"] = pj_bridge::make_strip_transform_factory();
+#ifdef PJ_BRIDGE_HAS_CLOUDINI
+      factories["cloudini"] = pj_bridge::make_cloudini_transform_factory();
+#endif
 
       auto created = pj_bridge::TransformSet::create(profile, std::move(factories));
       if (!created) {

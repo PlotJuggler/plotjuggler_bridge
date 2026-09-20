@@ -88,6 +88,53 @@ else()
   message(STATUS "Using system IXWebSocket")
 endif()
 
+# Cloudini (optional) — point cloud compression transform
+option(PJ_BRIDGE_FETCH_CLOUDINI "Fetch Cloudini when cloudini_lib is not installed" ON)
+find_package(cloudini_lib QUIET)
+if(NOT cloudini_lib_FOUND AND PJ_BRIDGE_FETCH_CLOUDINI)
+  message(STATUS "cloudini_lib not found — fetching via FetchContent")
+  FetchContent_Declare(
+    cloudini
+    URL https://github.com/facontidavide/cloudini/archive/refs/tags/1.3.0.tar.gz
+    URL_HASH SHA256=26c9322d5a08694b9b24bbec975b7814b05cf7d4962327f35266b38bb15b5e66
+  )
+  set(CLOUDINI_BUILD_TOOLS OFF CACHE BOOL "" FORCE)
+  set(CLOUDINI_BUILD_BENCHMARKS OFF CACHE BOOL "" FORCE)
+  # Use the zstd found above instead of a second, vendored copy in the same binary.
+  # FindZSTD already defined zstd::libzstd_static; Cloudini's own
+  # find_package(zstd CONFIG) would clash with those targets, so it is disabled.
+  set(CLOUDINI_FORCE_VENDORED_DEPS OFF CACHE BOOL "" FORCE)
+  set(CMAKE_DISABLE_FIND_PACKAGE_zstd ON)
+  # Cloudini becomes a SHARED ament package (install rules, ament_package()) when
+  # it finds ament_cmake. Hide it while its directory is processed: we want the
+  # plain static library, and EXCLUDE_FROM_ALL keeps its install rules out of ours.
+  set(_pj_build_testing ${BUILD_TESTING})
+  set(BUILD_TESTING OFF)
+  set(CMAKE_DISABLE_FIND_PACKAGE_ament_cmake ON)
+  set(_pj_ament_cmake_found ${ament_cmake_FOUND})
+  set(ament_cmake_FOUND FALSE)  # the disabled find_package() leaves our earlier result in place
+  set(_pj_build_shared_libs ${BUILD_SHARED_LIBS})
+  set(BUILD_SHARED_LIBS OFF)
+  FetchContent_GetProperties(cloudini)
+  if(NOT cloudini_POPULATED)
+    if(POLICY CMP0169)
+      cmake_policy(SET CMP0169 OLD)  # FetchContent_Populate: needed for add_subdirectory(EXCLUDE_FROM_ALL) before CMake 3.28
+    endif()
+    FetchContent_Populate(cloudini)
+    add_subdirectory(${cloudini_SOURCE_DIR}/cloudini_lib ${cloudini_BINARY_DIR} EXCLUDE_FROM_ALL)
+  endif()
+  set(BUILD_SHARED_LIBS ${_pj_build_shared_libs})
+  set(ament_cmake_FOUND ${_pj_ament_cmake_found})
+  set(CMAKE_DISABLE_FIND_PACKAGE_zstd OFF)
+  set(CMAKE_DISABLE_FIND_PACKAGE_ament_cmake OFF)
+  set(BUILD_TESTING ${_pj_build_testing})
+  set_target_properties(cloudini_lib PROPERTIES POSITION_INDEPENDENT_CODE ON)
+  if(NOT TARGET cloudini::cloudini_lib)
+    add_library(cloudini::cloudini_lib ALIAS cloudini_lib)
+  endif()
+  set(cloudini_lib_FOUND TRUE)
+endif()
+
 # spdlog — available via rosdep (libspdlog-dev) or pixi (conda-forge)
 find_package(spdlog REQUIRED)
 
@@ -128,6 +175,15 @@ target_link_libraries(pj_bridge_app PUBLIC
   spdlog::spdlog
   nlohmann_json::nlohmann_json
 )
+
+if(cloudini_lib_FOUND)
+  target_sources(pj_bridge_app PRIVATE app/src/cloudini_transform.cpp)
+  target_link_libraries(pj_bridge_app PRIVATE cloudini::cloudini_lib)
+  target_compile_definitions(pj_bridge_app PUBLIC PJ_BRIDGE_HAS_CLOUDINI)
+  message(STATUS "Cloudini transform: enabled")
+else()
+  message(STATUS "Cloudini transform: disabled (cloudini_lib not found)")
+endif()
 
 # ============================================================================
 # pj_bridge_ros2 — ROS2 backend (only if ament_cmake found)
@@ -276,6 +332,7 @@ if(BUILD_TESTING AND ament_cmake_FOUND)
     tests/unit/test_generic_subscription_manager.cpp
     tests/unit/test_ros2_subscription_manager.cpp
     tests/unit/test_message_stripper.cpp
+    tests/unit/test_cloudini_transform.cpp
   )
 
   target_link_libraries(${PROJECT_NAME}_tests
