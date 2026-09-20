@@ -90,54 +90,20 @@ endif()
 
 # Cloudini (optional) — point cloud compression transform
 option(PJ_BRIDGE_FETCH_CLOUDINI "Fetch Cloudini when cloudini_lib is not installed" ON)
-# 1.2 introduced the v5 codec and applyVizLossyPreprocessing used by the transform.
-find_package(cloudini_lib 1.2 QUIET)
-
-# Builds Cloudini as a plain static library inside this project. A function, so
-# that everything set() below is scoped to Cloudini's directory and needs no restoring.
-function(pj_bridge_fetch_cloudini)
-  FetchContent_Declare(
-    cloudini
-    URL https://github.com/facontidavide/cloudini/archive/refs/tags/1.3.0.tar.gz
-    URL_HASH SHA256=26c9322d5a08694b9b24bbec975b7814b05cf7d4962327f35266b38bb15b5e66
-  )
-  set(CLOUDINI_BUILD_TOOLS OFF CACHE BOOL "" FORCE)
-  set(CLOUDINI_BUILD_BENCHMARKS OFF CACHE BOOL "" FORCE)
-  # Use the zstd found above instead of a second, vendored copy in the same binary.
-  # FindZSTD already defined zstd::libzstd_static; Cloudini's own
-  # find_package(zstd CONFIG) would clash with those targets, so it is disabled.
-  set(CLOUDINI_FORCE_VENDORED_DEPS OFF CACHE BOOL "" FORCE)
-  set(CMAKE_DISABLE_FIND_PACKAGE_zstd ON)
-  # Cloudini becomes a SHARED ament package (install rules, ament_package()) when
-  # it finds ament_cmake: hide it. The disabled find_package() leaves our own
-  # earlier result in place, hence ament_cmake_FOUND as well.
-  set(CMAKE_DISABLE_FIND_PACKAGE_ament_cmake ON)
-  set(ament_cmake_FOUND FALSE)
-  set(BUILD_SHARED_LIBS OFF)
-  set(BUILD_TESTING OFF)
-  set(CMAKE_DISABLE_FIND_PACKAGE_PCL ON)  # optional in Cloudini; would become a PUBLIC link dependency of ours
-  set(build_type_was_set "${CMAKE_BUILD_TYPE}")
-
-  # FetchContent_Populate + add_subdirectory(EXCLUDE_FROM_ALL) keeps Cloudini's
-  # install rules out of ours; FetchContent_Declare(EXCLUDE_FROM_ALL) needs CMake 3.28.
-  if(POLICY CMP0169)
-    cmake_policy(SET CMP0169 OLD)
-  endif()
-  FetchContent_Populate(cloudini)
-  add_subdirectory(${cloudini_SOURCE_DIR}/cloudini_lib ${cloudini_BINARY_DIR} EXCLUDE_FROM_ALL)
-
-  if(NOT build_type_was_set)  # Cloudini forces Release into the cache when no build type is set
-    unset(CMAKE_BUILD_TYPE CACHE)
-  endif()
-  set_target_properties(cloudini_lib PROPERTIES POSITION_INDEPENDENT_CODE ON)
-  if(NOT TARGET cloudini::cloudini_lib)
-    add_library(cloudini::cloudini_lib ALIAS cloudini_lib)
-  endif()
-endfunction()
-
+# 1.3.1 validates malformed clouds itself and can be embedded without workarounds.
+find_package(cloudini_lib 1.3.1 QUIET)
 if(NOT cloudini_lib_FOUND AND PJ_BRIDGE_FETCH_CLOUDINI)
   message(STATUS "cloudini_lib not found — fetching via FetchContent")
-  pj_bridge_fetch_cloudini()
+  FetchContent_Declare(
+    cloudini
+    URL https://github.com/facontidavide/cloudini/archive/refs/tags/1.3.1.tar.gz
+    URL_HASH SHA256=d8c0e265bb841f59002e996bc957b4f0845b5399deb62b3247dc11115b48b4d9
+    SOURCE_SUBDIR cloudini_lib
+  )
+  # Reuse the zstd found above instead of a second, vendored copy in the same binary.
+  set(CLOUDINI_FORCE_VENDORED_DEPS OFF CACHE BOOL "" FORCE)
+  FetchContent_MakeAvailable(cloudini)
+  set_target_properties(cloudini_lib PROPERTIES POSITION_INDEPENDENT_CODE ON)
   set(cloudini_lib_FOUND TRUE)
 endif()
 
@@ -151,10 +117,9 @@ find_package(nlohmann_json REQUIRED)
 # Data path for tests
 # ============================================================================
 get_filename_component(DATA_PATH "${CMAKE_CURRENT_LIST_DIR}/DATA" ABSOLUTE)
-# Own directory: Cloudini writes a data_path.hpp of its own to ${CMAKE_BINARY_DIR}/include.
-configure_file(data_path.hpp.in "${CMAKE_BINARY_DIR}/pj_include/data_path.hpp" @ONLY)
+configure_file(data_path.hpp.in "${CMAKE_BINARY_DIR}/include/data_path.hpp" @ONLY)
 add_library(data_path INTERFACE IMPORTED)
-target_include_directories(data_path INTERFACE ${CMAKE_BINARY_DIR}/pj_include)
+target_include_directories(data_path INTERFACE ${CMAKE_BINARY_DIR}/include)
 
 # ============================================================================
 # pj_bridge_app — backend-agnostic core library

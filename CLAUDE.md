@@ -187,7 +187,7 @@ Then, for each message in the (compressed) payload:
 - **tl::expected** — error handling (header-only, vendored in 3rdparty/)
 
 ### Core (optional)
-- **Cloudini** (`cloudini_lib`) — point cloud compression for the `cloudini` transform. `find_package(cloudini_lib)` first, else fetched at configure time (pinned tag `1.3.0`, static) unless `-DPJ_BRIDGE_FETCH_CLOUDINI=OFF`. A build with neither simply lacks the `cloudini` transform (`PJ_BRIDGE_HAS_CLOUDINI` undefined); `strip` and the rest of the transform machinery are unaffected.
+- **Cloudini** (`cloudini_lib`) — point cloud compression for the `cloudini` transform. `find_package(cloudini_lib)` first, else fetched at configure time (pinned tag `1.3.1`, static) unless `-DPJ_BRIDGE_FETCH_CLOUDINI=OFF`. A build with neither simply lacks the `cloudini` transform (`PJ_BRIDGE_HAS_CLOUDINI` undefined); `strip` and the rest of the transform machinery are unaffected.
 
 ### ROS2 Backend
 - `rclcpp`, `ament_index_cpp`, `ament_cmake`
