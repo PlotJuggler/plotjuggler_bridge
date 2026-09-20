@@ -21,6 +21,7 @@
 
 #include <gtest/gtest.h>
 
+#include <functional>
 #include <rclcpp/serialization.hpp>
 #include <rclcpp/serialized_message.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
@@ -31,7 +32,8 @@
 using namespace pj_bridge;
 
 namespace {
-std::vector<std::byte> make_cloud_cdr(size_t points) {
+std::vector<std::byte> make_cloud_cdr(
+    size_t points, const std::function<void(sensor_msgs::msg::PointCloud2&)>& corrupt = nullptr) {
   sensor_msgs::msg::PointCloud2 cloud;
   cloud.header.frame_id = "lidar";
   sensor_msgs::PointCloud2Modifier modifier(cloud);
@@ -42,6 +44,9 @@ std::vector<std::byte> make_cloud_cdr(size_t points) {
     *x = 0.01f * static_cast<float>(i);
     *y = 1.0f;
     *z = -0.5f;
+  }
+  if (corrupt) {
+    corrupt(cloud);
   }
   rclcpp::SerializedMessage serialized;
   rclcpp::Serialization<sensor_msgs::msg::PointCloud2>().serialize_message(&cloud, &serialized);
@@ -78,6 +83,22 @@ TEST(CloudiniTransformTest, GarbageInputIsAnErrorNotACrash) {
   const std::vector<std::byte> in(7, std::byte{0xFF});
   std::vector<std::byte> out;
   EXPECT_FALSE(transform->apply(in, out).has_value());
+}
+
+// Any DDS peer can publish a PointCloud2 whose metadata lies about its payload.
+// The encoder trusts field offsets and the header repeats width/height, so these
+// must be rejected here: a drop, not an over-read or an undecodable frame.
+TEST(CloudiniTransformTest, InconsistentCloudMetadataIsRejected) {
+  auto transform = make_cloudini_transform_factory().create("sensor_msgs/msg/PointCloud2", nlohmann::json::object());
+  std::vector<std::byte> out;
+
+  const auto field_past_point = make_cloud_cdr(100, [](auto& c) { c.fields[2].offset = c.point_step; });
+  EXPECT_FALSE(transform->apply(field_past_point, out).has_value());
+
+  const auto width_lies = make_cloud_cdr(100, [](auto& c) { c.width = 1000; });
+  EXPECT_FALSE(transform->apply(width_lies, out).has_value());
+
+  EXPECT_TRUE(transform->apply(make_cloud_cdr(100), out).has_value());  // and a sane one still works
 }
 
 #endif  // PJ_BRIDGE_HAS_CLOUDINI

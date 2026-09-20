@@ -90,7 +90,8 @@ endif()
 
 # Cloudini (optional) — point cloud compression transform
 option(PJ_BRIDGE_FETCH_CLOUDINI "Fetch Cloudini when cloudini_lib is not installed" ON)
-find_package(cloudini_lib QUIET)
+# 1.2 introduced the v5 codec and applyVizLossyPreprocessing used by the transform.
+find_package(cloudini_lib 1.2 QUIET)
 if(NOT cloudini_lib_FOUND AND PJ_BRIDGE_FETCH_CLOUDINI)
   message(STATUS "cloudini_lib not found — fetching via FetchContent")
   FetchContent_Declare(
@@ -115,6 +116,8 @@ if(NOT cloudini_lib_FOUND AND PJ_BRIDGE_FETCH_CLOUDINI)
   set(ament_cmake_FOUND FALSE)  # the disabled find_package() leaves our earlier result in place
   set(_pj_build_shared_libs ${BUILD_SHARED_LIBS})
   set(BUILD_SHARED_LIBS OFF)
+  set(CMAKE_DISABLE_FIND_PACKAGE_PCL ON)  # optional in Cloudini; would become a PUBLIC link dependency of ours
+  set(_pj_build_type "${CMAKE_BUILD_TYPE}")
   FetchContent_GetProperties(cloudini)
   if(NOT cloudini_POPULATED)
     if(POLICY CMP0169)
@@ -123,6 +126,10 @@ if(NOT cloudini_lib_FOUND AND PJ_BRIDGE_FETCH_CLOUDINI)
     FetchContent_Populate(cloudini)
     add_subdirectory(${cloudini_SOURCE_DIR}/cloudini_lib ${cloudini_BINARY_DIR} EXCLUDE_FROM_ALL)
   endif()
+  if(NOT _pj_build_type)  # Cloudini forces Release into the cache when no build type is set
+    unset(CMAKE_BUILD_TYPE CACHE)
+  endif()
+  set(CMAKE_DISABLE_FIND_PACKAGE_PCL OFF)
   set(BUILD_SHARED_LIBS ${_pj_build_shared_libs})
   set(ament_cmake_FOUND ${_pj_ament_cmake_found})
   set(CMAKE_DISABLE_FIND_PACKAGE_zstd OFF)
@@ -145,9 +152,10 @@ find_package(nlohmann_json REQUIRED)
 # Data path for tests
 # ============================================================================
 get_filename_component(DATA_PATH "${CMAKE_CURRENT_LIST_DIR}/DATA" ABSOLUTE)
-configure_file(data_path.hpp.in "${CMAKE_BINARY_DIR}/include/data_path.hpp" @ONLY)
+# Own directory: Cloudini writes a data_path.hpp of its own to ${CMAKE_BINARY_DIR}/include.
+configure_file(data_path.hpp.in "${CMAKE_BINARY_DIR}/pj_include/data_path.hpp" @ONLY)
 add_library(data_path INTERFACE IMPORTED)
-target_include_directories(data_path INTERFACE ${CMAKE_BINARY_DIR}/include)
+target_include_directories(data_path INTERFACE ${CMAKE_BINARY_DIR}/pj_include)
 
 # ============================================================================
 # pj_bridge_app — backend-agnostic core library
@@ -177,8 +185,14 @@ target_link_libraries(pj_bridge_app PUBLIC
 )
 
 if(cloudini_lib_FOUND)
+  # A standalone install exports cloudini::cloudini_lib, an ament install cloudini_lib::cloudini_lib.
+  if(TARGET cloudini::cloudini_lib)
+    set(_pj_cloudini_target cloudini::cloudini_lib)
+  else()
+    set(_pj_cloudini_target cloudini_lib::cloudini_lib)
+  endif()
   target_sources(pj_bridge_app PRIVATE app/src/cloudini_transform.cpp)
-  target_link_libraries(pj_bridge_app PRIVATE cloudini::cloudini_lib)
+  target_link_libraries(pj_bridge_app PRIVATE ${_pj_cloudini_target})
   target_compile_definitions(pj_bridge_app PUBLIC PJ_BRIDGE_HAS_CLOUDINI)
   message(STATUS "Cloudini transform: enabled")
 else()

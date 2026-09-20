@@ -115,6 +115,8 @@ All dependencies (spdlog, nlohmann_json, ZSTD) are provided by the dependency ma
 
 TLS (`wss://`) support depends on IXWebSocket being built with OpenSSL. The CMake option `PJ_BRIDGE_TLS` (default `ON`) controls this for the FetchContent path (`-DPJ_BRIDGE_TLS=OFF` to disable); a system/conda-provided IXWebSocket must likewise have been built with TLS. See [docs/API.md](docs/API.md#tls--wss) for details.
 
+Cloudini (the `cloudini` message transform) is optional: `find_package(cloudini_lib)` is tried first (version >= 1.2), otherwise it is fetched at configure time and linked statically. Builds without network access must either have `cloudini_lib` installed or pass `-DPJ_BRIDGE_FETCH_CLOUDINI=OFF`, which builds the bridge without that transform.
+
 ### ROS2 — Pixi
 
 [Pixi](https://pixi.sh) manages the full toolchain including ROS2 via [RoboStack](https://robostack.github.io/).

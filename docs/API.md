@@ -318,8 +318,7 @@ Each rule in `transforms` needs at least one of:
   not a substring search).
 
 When both are present, **both** must match. Rules are evaluated in order
-and the **first match wins** — later rules are never consulted for a topic
-once one has matched (successfully or not; see below).
+and the **first match wins** — with the one exception described next.
 
 A rule that matches a topic by `match_topic` only (no `match_type`) whose
 named transform does not accept that topic's actual type is **skipped**: a
@@ -398,9 +397,25 @@ Params (all optional):
 
 | Key | Default | Meaning |
 |---|---|---|
-| `resolution` | `0.001` | Quantization resolution (metres for `x`/`y`/`z`); must be `> 0` |
+| `resolution` | `0.001` | Quantization resolution applied to **every** `FLOAT32` field not listed in `fields` — metres for `x`/`y`/`z`, but also e.g. `intensity` or a `FLOAT32` time field; must be `> 0` |
 | `fields` | `{}` | Per-field resolution override, `{name: resolution}`; `0` removes that field entirely |
 | `viz_preprocessing` | `false` | Drops NaN/inf points, voxel-deduplicates at the `xyz` resolution, and quantizes `FLOAT64` fields to 1 µs — a lossy preprocessing pass aimed at visualization, not lossless round-tripping |
+
+Things to know before enabling it:
+
+- A coarse `resolution` also coarsens non-geometry `FLOAT32` fields; give
+  those their own value in `fields` (for example `{"intensity": 0.001}`).
+- A field removed with resolution `0` keeps its place in the point layout and
+  decodes as zeros.
+- `viz_preprocessing` returns an unorganized cloud (`height = 1`, `width` =
+  points kept), even when the input was organized.
+- A cloud whose `width * height * point_step` does not equal its data size, or
+  with a field extending past `point_step`, is dropped like any other
+  transform failure.
+- Big-endian clouds are not supported (the flag is not inspected; they would
+  decode as garbage). `PointField.count` is written as 1.
+- The payload uses Cloudini encoding v5: the client needs a Cloudini decoder
+  >= 1.2.0.
 
 ### Backend support
 

@@ -29,6 +29,23 @@ namespace {
 
 constexpr const char* kPointCloud2 = "sensor_msgs/msg/PointCloud2";
 
+// The encoder trusts field offsets, and the output header repeats width/height:
+// a cloud whose metadata disagrees with its payload must not reach it.
+tl::expected<void, std::string> check_cloud(const cloudini_ros::RosPointCloud2& cloud) {
+  const uint64_t declared = uint64_t{cloud.width} * cloud.height * cloud.point_step;
+  if (declared != cloud.data.size()) {
+    return tl::make_unexpected(
+        "width*height*point_step = " + std::to_string(declared) + " but data has " + std::to_string(cloud.data.size()) +
+        " bytes");
+  }
+  for (const auto& field : cloud.fields) {
+    if (uint64_t{field.offset} + static_cast<uint64_t>(Cloudini::SizeOf(field.type)) > cloud.point_step) {
+      return tl::make_unexpected("field '" + field.name + "' extends past point_step");
+    }
+  }
+  return {};
+}
+
 class CloudiniTransform : public MessageTransform {
  public:
   explicit CloudiniTransform(const nlohmann::json& params)
@@ -44,6 +61,9 @@ class CloudiniTransform : public MessageTransform {
     try {
       const Cloudini::ConstBufferView raw(reinterpret_cast<const uint8_t*>(in.data()), in.size());
       auto cloud = cloudini_ros::getDeserializedPointCloudMessage(raw);
+      if (auto valid = check_cloud(cloud); !valid) {
+        return valid;
+      }
       cloudini_ros::applyResolutionProfile(profile_, cloud.fields, resolution_);
       if (viz_preprocessing_) {
         cloudini_ros::applyVizLossyPreprocessing(cloud);
