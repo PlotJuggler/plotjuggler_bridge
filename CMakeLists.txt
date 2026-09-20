@@ -149,11 +149,12 @@ if(ament_cmake_FOUND)
     pj_bridge_app
   )
 
-  ament_target_dependencies(pj_bridge_ros2_lib PUBLIC
-    ament_index_cpp
-    rclcpp
-    sensor_msgs
-    nav_msgs
+  # target_link_libraries, not ament_target_dependencies: removed in newer distros (Lyrical)
+  target_link_libraries(pj_bridge_ros2_lib PUBLIC
+    ament_index_cpp::ament_index_cpp
+    rclcpp::rclcpp
+    ${sensor_msgs_TARGETS}
+    ${nav_msgs_TARGETS}
   )
 
   # ROS2 executable
@@ -163,10 +164,6 @@ if(ament_cmake_FOUND)
 
   target_link_libraries(pj_bridge_ros2
     pj_bridge_ros2_lib
-  )
-
-  ament_target_dependencies(pj_bridge_ros2
-    rclcpp
   )
 
   # Install ROS2 executable
@@ -274,12 +271,6 @@ if(BUILD_TESTING AND ament_cmake_FOUND)
   target_link_libraries(${PROJECT_NAME}_tests
     pj_bridge_ros2_lib
     data_path
-  )
-
-  ament_target_dependencies(${PROJECT_NAME}_tests
-    rclcpp
-    sensor_msgs
-    nav_msgs
   )
 
   # Sanitizer environment settings for CTest
