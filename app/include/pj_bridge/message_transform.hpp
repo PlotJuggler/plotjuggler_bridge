@@ -53,8 +53,7 @@ struct TransformFactory {
   std::function<std::string(const std::string& source_type)> output_type;
   /// Schema advertised to clients. `source_schema` is the untransformed one.
   std::function<std::string(const std::string& source_type, const std::string& source_schema)> output_schema;
-  std::function<std::unique_ptr<MessageTransform>(const std::string& source_type, const nlohmann::json& params)>
-      create;
+  std::function<std::unique_ptr<MessageTransform>(const std::string& source_type, const nlohmann::json& params)> create;
 };
 
 }  // namespace pj_bridge
