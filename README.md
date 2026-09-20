@@ -23,6 +23,7 @@ independently.
 - **Multi-Client Support**: Multiple clients can connect simultaneously with shared subscriptions
 - **Runtime Schema Discovery**: Automatic extraction of message schemas from installed ROS2 packages on the server side.
 - **Large Message Stripping** (opt-in): Optional stripping of large array fields (Image, PointCloud2, LaserScan, OccupancyGrid) to reduce bandwidth while preserving metadata. Disabled by default — full message data is forwarded; enable with `strip_large_messages:=true` for low-bandwidth links
+- **Message Transforms** (opt-in, ROS2 only): Operator-configured per-topic transforms (e.g. `cloudini` point cloud compression) applied before buffering, replacing a topic's payload and advertised type/schema for all subscribers. Off by default (`transform_profile:=""`); see [docs/API.md](docs/API.md#message-transforms-ros2-only)
 - **Topic Whitelist**: Restrict which topics are visible/subscribable via full-match regex patterns (`topic_whitelist` / `--topic-whitelist`), mirroring foxglove_bridge's option of the same name
 - **QoS Depth Heuristics** (ROS2 only): KEEP_LAST subscription depth is derived from the discovered publishers' depths and clamped to a configurable `[min_qos_depth, max_qos_depth]` range
 - **Pushed Topic Advertisement** (opt-in): Clients can subscribe to a `topics_changed` notification instead of polling `get_topics`, at a configurable `topic_poll_interval`
@@ -49,6 +50,7 @@ independently.
 | `publish_rate` | double | 50.0 | Aggregation publish rate in Hz |
 | `session_timeout` | double | 10.0 | Client timeout duration in seconds |
 | `strip_large_messages` | bool | false | Opt-in: strip large arrays from Image, PointCloud2, LaserScan, OccupancyGrid messages |
+| `transform_profile` | string | `""` | ROS2 only: path to a JSON profile of per-topic message transforms (e.g. Cloudini point cloud compression); empty disables the feature |
 | `topic_whitelist` | string array | `[".*"]` | Full-match regex patterns (ECMAScript) restricting visible/subscribable topics |
 | `min_qos_depth` | int | 10 | ROS2 only: minimum KEEP_LAST subscription depth after aggregating publisher depths |
 | `max_qos_depth` | int | 100 | ROS2 only: maximum KEEP_LAST subscription depth after aggregating publisher depths |
@@ -112,6 +114,8 @@ chmod +x pj_bridge_ros2-humble-x86_64.AppImage
 All dependencies (spdlog, nlohmann_json, ZSTD) are provided by the dependency manager. IXWebSocket is resolved via `find_package` first, with a FetchContent fallback for colcon builds. Only `tl::expected` is vendored.
 
 TLS (`wss://`) support depends on IXWebSocket being built with OpenSSL. The CMake option `PJ_BRIDGE_TLS` (default `ON`) controls this for the FetchContent path (`-DPJ_BRIDGE_TLS=OFF` to disable); a system/conda-provided IXWebSocket must likewise have been built with TLS. See [docs/API.md](docs/API.md#tls--wss) for details.
+
+Cloudini (the `cloudini` message transform) is optional: `find_package(cloudini_lib)` is tried first (version >= 1.3.1), otherwise it is fetched at configure time and linked statically. Builds without network access must either have `cloudini_lib` installed or pass `-DPJ_BRIDGE_FETCH_CLOUDINI=OFF`, which builds the bridge without that transform.
 
 ### ROS2 — Pixi
 

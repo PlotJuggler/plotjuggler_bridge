@@ -54,6 +54,10 @@ bool MessageStripper::should_strip(const std::string& message_type) {
   return kStrippableTypes.find(message_type) != kStrippableTypes.end();
 }
 
+const std::unordered_set<std::string>& MessageStripper::strippable_types() {
+  return kStrippableTypes;
+}
+
 rclcpp::SerializedMessage MessageStripper::strip(
     const std::string& message_type, const rclcpp::SerializedMessage& input) {
   if (message_type == "sensor_msgs/msg/Image") {

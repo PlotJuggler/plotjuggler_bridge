@@ -26,8 +26,9 @@ namespace pj_bridge {
 
 /// A discovered topic with its fully-qualified name and message type.
 struct TopicInfo {
-  std::string name;  ///< e.g. "/sensor/imu"
-  std::string type;  ///< e.g. "sensor_msgs/msg/Imu"
+  std::string name;           ///< e.g. "/sensor/imu"
+  std::string type;           ///< e.g. "sensor_msgs/msg/Imu"
+  std::string source_type{};  ///< set only for transformed topics: the type before the transform
 };
 
 /// Abstract interface for discovering topics and retrieving their schemas.

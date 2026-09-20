@@ -15,7 +15,7 @@ if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
   add_compile_options(-Wall -Wextra -Wpedantic)
 endif()
 
-set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # Sanitizer options
@@ -88,6 +88,25 @@ else()
   message(STATUS "Using system IXWebSocket")
 endif()
 
+# Cloudini (optional) — point cloud compression transform
+option(PJ_BRIDGE_FETCH_CLOUDINI "Fetch Cloudini when cloudini_lib is not installed" ON)
+# 1.3.1 validates malformed clouds itself and can be embedded without workarounds.
+find_package(cloudini_lib 1.3.1 QUIET)
+if(NOT cloudini_lib_FOUND AND PJ_BRIDGE_FETCH_CLOUDINI)
+  message(STATUS "cloudini_lib not found — fetching via FetchContent")
+  FetchContent_Declare(
+    cloudini
+    URL https://github.com/facontidavide/cloudini/archive/refs/tags/1.3.1.tar.gz
+    URL_HASH SHA256=d8c0e265bb841f59002e996bc957b4f0845b5399deb62b3247dc11115b48b4d9
+    SOURCE_SUBDIR cloudini_lib
+  )
+  # Reuse the zstd found above instead of a second, vendored copy in the same binary.
+  set(CLOUDINI_FORCE_VENDORED_DEPS OFF CACHE BOOL "" FORCE)
+  FetchContent_MakeAvailable(cloudini)
+  set_target_properties(cloudini_lib PROPERTIES POSITION_INDEPENDENT_CODE ON)
+  set(cloudini_lib_FOUND TRUE)
+endif()
+
 # spdlog — available via rosdep (libspdlog-dev) or pixi (conda-forge)
 find_package(spdlog REQUIRED)
 
@@ -113,6 +132,8 @@ add_library(pj_bridge_app STATIC
   app/src/bridge_server.cpp
   app/src/standalone_event_loop.cpp
   app/src/whitelist_filter.cpp
+  app/src/transform_set.cpp
+  app/src/transforming_topic_source.cpp
 )
 
 target_include_directories(pj_bridge_app PUBLIC
@@ -126,6 +147,21 @@ target_link_libraries(pj_bridge_app PUBLIC
   spdlog::spdlog
   nlohmann_json::nlohmann_json
 )
+
+if(cloudini_lib_FOUND)
+  # A standalone install exports cloudini::cloudini_lib, an ament install cloudini_lib::cloudini_lib.
+  if(TARGET cloudini::cloudini_lib)
+    set(_pj_cloudini_target cloudini::cloudini_lib)
+  else()
+    set(_pj_cloudini_target cloudini_lib::cloudini_lib)
+  endif()
+  target_sources(pj_bridge_app PRIVATE app/src/cloudini_transform.cpp)
+  target_link_libraries(pj_bridge_app PRIVATE ${_pj_cloudini_target})
+  target_compile_definitions(pj_bridge_app PUBLIC PJ_BRIDGE_HAS_CLOUDINI)
+  message(STATUS "Cloudini transform: enabled")
+else()
+  message(STATUS "Cloudini transform: disabled (cloudini_lib not found)")
+endif()
 
 # ============================================================================
 # pj_bridge_ros2 — ROS2 backend (only if ament_cmake found)
@@ -142,6 +178,7 @@ if(ament_cmake_FOUND)
     ros2/src/schema_extractor.cpp
     ros2/src/generic_subscription_manager.cpp
     ros2/src/message_stripper.cpp
+    ros2/src/strip_transform.cpp
     ros2/src/ros2_topic_source.cpp
     ros2/src/ros2_subscription_manager.cpp
   )
@@ -266,11 +303,14 @@ if(BUILD_TESTING AND ament_cmake_FOUND)
     tests/unit/test_bridge_server.cpp
     tests/unit/test_protocol_constants.cpp
     tests/unit/test_whitelist_filter.cpp
+    tests/unit/test_transform_set.cpp
+    tests/unit/test_transforming_topic_source.cpp
     tests/unit/test_topic_discovery.cpp
     tests/unit/test_schema_extractor.cpp
     tests/unit/test_generic_subscription_manager.cpp
     tests/unit/test_ros2_subscription_manager.cpp
     tests/unit/test_message_stripper.cpp
+    tests/unit/test_cloudini_transform.cpp
   )
 
   target_link_libraries(${PROJECT_NAME}_tests

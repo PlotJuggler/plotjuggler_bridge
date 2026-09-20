@@ -21,6 +21,7 @@
 
 #include <rclcpp/rclcpp.hpp>
 #include <string>
+#include <unordered_set>
 
 namespace pj_bridge {
 
@@ -40,6 +41,9 @@ class MessageStripper {
  public:
   static bool should_strip(const std::string& message_type);
   static rclcpp::SerializedMessage strip(const std::string& message_type, const rclcpp::SerializedMessage& input);
+
+  /// The message types should_strip() accepts.
+  static const std::unordered_set<std::string>& strippable_types();
 };
 
 }  // namespace pj_bridge

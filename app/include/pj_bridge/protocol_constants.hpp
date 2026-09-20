@@ -65,6 +65,7 @@ inline constexpr const char* kServerCapabilities[] = {
     "topics_changed",        // pushed topic advertisement (subscribe_topic_updates)
     "per_topic_rate_limit",  // subscribe entries accept {name, max_rate_hz}
     "size_class_frames",     // large topics isolated into own frames (header flag bit0 = heavy)
+    "message_transforms",    // topics may be advertised with a transformed type (+ source_type)
 };
 
 }  // namespace pj_bridge

@@ -2,6 +2,38 @@
 Changelog for package pj_ros_bridge
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+Forthcoming
+-----------
+* Message transforms (ROS2 only): operator-configured, off by default, a
+  topic is transformed for all subscribers or none — no per-client
+  negotiation. New ``transform_profile`` parameter points to a JSON file of
+  ordered per-topic rules (``match_type`` exact and required, optionally
+  narrowed by a ``match_topic`` full-match regex; first match wins; a transform
+  paired with a type it cannot handle is a startup error). A transformed topic is advertised
+  with its transform's output type/schema, plus an optional ``source_type``
+  on ``get_topics`` entries (not yet on ``topics_changed`` entries); new
+  ``message_transforms`` server capability.
+* New ``cloudini`` transform: ``sensor_msgs/msg/PointCloud2`` ->
+  ``point_cloud_interfaces/msg/CompressedPointCloud2`` using `Cloudini
+  <https://github.com/facontidavide/cloudini>`_ point cloud compression
+  (lossy at a configurable resolution; its own second compression stage is
+  disabled since the bridge already ZSTD-compresses every frame). Only
+  built when ``cloudini_lib`` is available (``find_package``, else fetched
+  at configure time unless ``-DPJ_BRIDGE_FETCH_CLOUDINI=OFF``); a profile
+  naming ``cloudini`` on a build without it fails at startup.
+* ``strip_large_messages`` is now sugar for a ``strip`` transform rule
+  appended after the profile's own rules (an explicit profile rule for the
+  same type wins).
+* **Behavior change:** a transform (including ``strip``) that fails on a
+  message now drops the sample instead of forwarding it — previously
+  ``strip_large_messages`` forwarded the original, unstripped message on
+  failure.
+* Per-topic transform statistics (samples, drops, compression ratio,
+  microseconds/sample) logged with the final statistics at shutdown.
+* The project now requires **C++20** (``std::span``, and ``cloudini_lib``'s
+  PUBLIC ``cxx_std_20`` requirement).
+* 304 unit tests passing.
+
 0.10.0 (2026-09-20)
 -------------------
 * WebSocket permessage-deflate declined server-side (redundant with our own
