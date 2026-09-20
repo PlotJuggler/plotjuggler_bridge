@@ -67,7 +67,7 @@ size_t AggregatedMessageSerializer::get_message_count() const {
   return message_count_;
 }
 
-std::vector<uint8_t> AggregatedMessageSerializer::finalize(uint32_t flags, int compression_level) {
+std::vector<uint8_t> AggregatedMessageSerializer::finalize(uint32_t flags) {
   // Build 16-byte header (uncompressed)
   std::vector<uint8_t> header(kBinaryHeaderSize);
 
@@ -101,7 +101,8 @@ std::vector<uint8_t> AggregatedMessageSerializer::finalize(uint32_t flags, int c
   // Compress payload after header using persistent context
   size_t compressed_size = ZSTD_compressCCtx(
       cctx_, result.data() + kBinaryHeaderSize, max_compressed, serialized_data_.data(), serialized_data_.size(),
-      compression_level);
+      1  // compression level
+  );
 
   if (ZSTD_isError(compressed_size)) {
     throw std::runtime_error(std::string("ZSTD compression failed: ") + ZSTD_getErrorName(compressed_size));

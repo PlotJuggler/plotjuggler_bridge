@@ -18,7 +18,6 @@
  */
 
 #include <spdlog/spdlog.h>
-#include <zstd.h>
 
 #include <chrono>
 #include <memory>
@@ -53,7 +52,6 @@ int main(int argc, char** argv) {
   node->declare_parameter<double>("topic_poll_interval", 1.0);
   node->declare_parameter<int>("client_backlog_size", 100);
   node->declare_parameter<int>("heavy_frame_threshold_bytes", 262144);
-  node->declare_parameter<int>("heavy_frame_zstd_level", pj_bridge::kDefaultHeavyFrameZstdLevel);
   node->declare_parameter<bool>("tls", false);
   node->declare_parameter<std::string>("certfile", "");
   node->declare_parameter<std::string>("keyfile", "");
@@ -69,7 +67,6 @@ int main(int argc, char** argv) {
   double topic_poll_interval = node->get_parameter("topic_poll_interval").as_double();
   int64_t client_backlog_size = node->get_parameter("client_backlog_size").as_int();
   int64_t heavy_frame_threshold_bytes = node->get_parameter("heavy_frame_threshold_bytes").as_int();
-  int64_t heavy_frame_zstd_level = node->get_parameter("heavy_frame_zstd_level").as_int();
   bool tls_enabled = node->get_parameter("tls").as_bool();
   std::string certfile = node->get_parameter("certfile").as_string();
   std::string keyfile = node->get_parameter("keyfile").as_string();
@@ -78,10 +75,9 @@ int main(int argc, char** argv) {
       node->get_logger(),
       "Configuration: port=%d, publish_rate=%.1f Hz, session_timeout=%.1f s, strip_large_messages=%s, "
       "min_qos_depth=%ld, max_qos_depth=%ld, ingest_poll_interval_ms=%.1f, topic_poll_interval=%.1f s, "
-      "client_backlog_size=%ld, heavy_frame_zstd_level=%ld, tls=%s",
+      "client_backlog_size=%ld, tls=%s",
       port, publish_rate, session_timeout, strip_large_messages ? "true" : "false", min_qos_depth, max_qos_depth,
-      ingest_poll_interval_ms, topic_poll_interval, client_backlog_size, heavy_frame_zstd_level,
-      tls_enabled ? "true" : "false");
+      ingest_poll_interval_ms, topic_poll_interval, client_backlog_size, tls_enabled ? "true" : "false");
 
   if (tls_enabled && (certfile.empty() || keyfile.empty())) {
     RCLCPP_ERROR(node->get_logger(), "tls=true requires both 'certfile' and 'keyfile' parameters to be set");
@@ -101,14 +97,6 @@ int main(int argc, char** argv) {
     RCLCPP_ERROR(
         node->get_logger(), "Invalid ingest_poll_interval_ms: %.1f (must be >= 0; 0 uses blocking spin)",
         ingest_poll_interval_ms);
-    rclcpp::shutdown();
-    return 1;
-  }
-
-  if (heavy_frame_zstd_level < ZSTD_minCLevel() || heavy_frame_zstd_level > ZSTD_maxCLevel()) {
-    RCLCPP_ERROR(
-        node->get_logger(), "Invalid heavy_frame_zstd_level: %ld (must be in [%d, %d])", heavy_frame_zstd_level,
-        ZSTD_minCLevel(), ZSTD_maxCLevel());
     rclcpp::shutdown();
     return 1;
   }
@@ -169,7 +157,7 @@ int main(int argc, char** argv) {
     pj_bridge::BridgeServer server(
         topic_source, sub_manager, middleware,
         {port, session_timeout, publish_rate, std::move(whitelist_result.value()),
-         static_cast<size_t>(heavy_frame_threshold_bytes), static_cast<int>(heavy_frame_zstd_level)});
+         static_cast<size_t>(heavy_frame_threshold_bytes)});
 
     if (!server.initialize()) {
       RCLCPP_ERROR(node->get_logger(), "Failed to initialize bridge server");
@@ -234,10 +222,10 @@ int main(int argc, char** argv) {
                    })};
 
     // Every executor wait cycle rebuilds the whole wait set, O(subscriptions);
-    // with blocking spin() that is one rebuild per received message (>50% of
-    // CPU with ~80 subscriptions). Polling amortizes one rebuild over every
-    // message that arrived in the interval; subscription callbacks drain their
-    // reader, so nothing is lost as long as the reader depth covers a burst.
+    // with blocking spin() that is one rebuild per received message. Polling
+    // amortizes one rebuild over every message that arrived in the interval;
+    // subscription callbacks drain their reader, so nothing is lost as long
+    // as the reader depth covers a burst.
     rclcpp::executors::SingleThreadedExecutor executor;
     executor.add_node(node);
     if (ingest_poll_interval_ms > 0.0) {

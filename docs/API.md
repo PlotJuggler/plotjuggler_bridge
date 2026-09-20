@@ -588,22 +588,6 @@ frame is configurable:
 Keep the threshold below the 1 MiB socket watermark so a single heavy message
 does not fill the socket buffer on its own.
 
-Heavy frames use a separately configurable zstd compression level — a
-CPU-vs-bandwidth knob independent of the threshold above. Light (aggregated)
-frames always compress at level `1`. Any zstd level is valid (negative
-levels trade ratio for speed); the frame `flags` stay `0` either way, so any
-zstd decoder accepts the output regardless of level:
-
-- **ROS2**: int parameter `heavy_frame_zstd_level`, default `1`. Must be in
-  `[ZSTD_minCLevel(), ZSTD_maxCLevel()]`; the server refuses to start
-  otherwise.
-- **FastDDS / RTI**: CLI flag `--heavy-frame-zstd-level`, default `1`, same
-  valid range.
-
-Measured on 4 lidars, 52 MiB/s in, 1 client (i7-13700H, P-core pinned,
-performance governor): level `1` = 19.0% of a core / 31.0 MB/s out; `-5` =
-14.8% / 39.0; `-20` = 14.4% / 45.6; `-100` = 10.3% / 50.6.
-
 ## TLS / wss://
 
 The bridge can optionally serve the WebSocket endpoint over TLS (`wss://`)

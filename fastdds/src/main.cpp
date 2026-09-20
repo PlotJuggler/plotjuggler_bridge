@@ -18,7 +18,6 @@
  */
 
 #include <spdlog/spdlog.h>
-#include <zstd.h>
 
 #include <CLI/CLI.hpp>
 #include <optional>
@@ -44,7 +43,6 @@ int main(int argc, char* argv[]) {
   double topic_poll_interval = 1.0;
   int client_backlog_size = 100;
   int heavy_frame_threshold_bytes = 262144;
-  int heavy_frame_zstd_level = pj_bridge::kDefaultHeavyFrameZstdLevel;
   std::string certfile;
   std::string keyfile;
 
@@ -69,11 +67,6 @@ int main(int argc, char* argv[]) {
          "0 disables (keep below the 1 MiB socket watermark)")
       ->default_val(262144)
       ->check(CLI::Range(0, 1000000000));
-  app.add_option(
-         "--heavy-frame-zstd-level", heavy_frame_zstd_level,
-         "zstd compression level for heavy (size-class) frames; negative = faster/larger")
-      ->default_val(pj_bridge::kDefaultHeavyFrameZstdLevel)
-      ->check(CLI::Range(ZSTD_minCLevel(), ZSTD_maxCLevel()));
   // Bound variable is already initialized to {".*"} (match everything); CLI11
   // leaves it untouched if the flag is not passed, so no default_val() is
   // needed (and default_val() on a vector<string> would round-trip through a
@@ -101,7 +94,6 @@ int main(int argc, char* argv[]) {
   spdlog::info("  Topic poll interval: {:.1f} s", topic_poll_interval);
   spdlog::info("  Client backlog size: {}", client_backlog_size);
   spdlog::info("  Heavy frame threshold: {} bytes", heavy_frame_threshold_bytes);
-  spdlog::info("  Heavy frame zstd level: {}", heavy_frame_zstd_level);
   spdlog::info("  TLS: {}", tls_enabled ? "enabled" : "disabled");
 
   auto whitelist_result = pj_bridge::WhitelistFilter::create(topic_whitelist);
@@ -136,7 +128,7 @@ int main(int argc, char* argv[]) {
     pj_bridge::BridgeServer server(
         topic_source, sub_manager, middleware,
         {port, session_timeout, publish_rate, std::move(whitelist_result.value()),
-         static_cast<size_t>(heavy_frame_threshold_bytes), heavy_frame_zstd_level});
+         static_cast<size_t>(heavy_frame_threshold_bytes)});
 
     pj_bridge::run_standalone_event_loop(
         server, sub_manager, middleware, {port, publish_rate, session_timeout, stats_enabled, topic_poll_interval});

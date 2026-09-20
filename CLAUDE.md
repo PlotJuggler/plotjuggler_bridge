@@ -240,7 +240,6 @@ ingest_poll_interval_ms: 5.0   # Ingest executor poll interval (drains subscript
 topic_poll_interval: 1.0       # Seconds between topics_changed notification polls; 0 disables polling
 client_backlog_size: 100       # Max frames queued per slow client before dropping the oldest (must be > 0)
 heavy_frame_threshold_bytes: 262144  # Isolate messages >= this size into their own size-class frame; 0 disables
-heavy_frame_zstd_level: 1      # zstd level for heavy frames; any zstd level, negative = faster/larger
 tls: false                     # Enable TLS (wss://); requires certfile and keyfile
 certfile: ""                   # TLS server certificate file
 keyfile: ""                    # TLS private key file
@@ -250,16 +249,14 @@ keyfile: ""                    # TLS private key file
 ```bash
 pj_bridge_rti --domains 0 1 --port 9090 --publish-rate 50 --session-timeout 10 \
   --topic-whitelist ".*" --topic-poll-interval 1.0 --client-backlog-size 100 \
-  --heavy-frame-threshold-bytes 262144 --heavy-frame-zstd-level 1 \
-  --certfile cert.pem --keyfile key.pem
+  --heavy-frame-threshold-bytes 262144 --certfile cert.pem --keyfile key.pem
 ```
 
 ### FastDDS (via CLI flags):
 ```bash
 pj_bridge_fastdds --domains 0 1 --port 9090 --publish-rate 50 --session-timeout 10 \
   --topic-whitelist ".*" --topic-poll-interval 1.0 --client-backlog-size 100 \
-  --heavy-frame-threshold-bytes 262144 --heavy-frame-zstd-level 1 \
-  --certfile cert.pem --keyfile key.pem
+  --heavy-frame-threshold-bytes 262144 --certfile cert.pem --keyfile key.pem
 ```
 
 See `docs/API.md` for full semantics of each option (topic whitelist matching rules,

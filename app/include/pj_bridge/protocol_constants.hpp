@@ -48,11 +48,6 @@ static constexpr uint32_t kFrameFlagHeavy = 0x1;
 /// threshold of 0 disables splitting (single aggregated frame, legacy behavior).
 static constexpr size_t kDefaultHeavyFrameThresholdBytes = 256 * 1024;  // 256 KiB
 
-/// zstd level for aggregated (light) frames.
-static constexpr int kDefaultZstdLevel = 1;
-/// zstd level for heavy frames; see BridgeServerConfig::heavy_frame_zstd_level.
-static constexpr int kDefaultHeavyFrameZstdLevel = 1;
-
 /// Schema encoding identifier for ROS2 message definitions
 inline constexpr const char* kSchemaEncodingRos2Msg = "ros2msg";
 

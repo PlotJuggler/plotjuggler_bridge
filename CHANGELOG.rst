@@ -12,9 +12,6 @@ Forthcoming
   executor thread so a long publish cycle never delays ingest.
 * ROS2: ``min_qos_depth`` default raised ``1`` -> ``10`` so the ingest poll
   interval can't overflow a shallow reader between polls.
-* New ``heavy_frame_zstd_level`` knob (ROS2 param, RTI/FastDDS
-  ``--heavy-frame-zstd-level``, default ``1``): CPU-vs-bandwidth zstd level
-  for heavy (size-class) frames only; wire-compatible (frame flags stay 0).
 * Removed zero-initializing copies in the ingest and serializer hot paths
   (``resize()`` + ``memcpy`` -> direct-construct/``insert``).
 

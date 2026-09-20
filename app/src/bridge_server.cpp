@@ -69,7 +69,6 @@ BridgeServer::BridgeServer(
       publish_rate_(config.publish_rate),
       whitelist_(std::move(config.whitelist)),
       heavy_frame_threshold_bytes_(config.heavy_frame_threshold_bytes),
-      heavy_frame_zstd_level_(config.heavy_frame_zstd_level),
       initialized_(false),
       total_messages_published_(0),
       total_bytes_published_(0),
@@ -1100,7 +1099,7 @@ void BridgeServer::publish_aggregated_messages() {
             AggregatedMessageSerializer heavy_serializer;
             heavy_serializer.serialize_message(topic, msg.timestamp_ns, msg.data->data(), msg.data->size());
             GroupFrame heavy_frame;
-            heavy_frame.compressed_data = heavy_serializer.finalize(0, heavy_frame_zstd_level_);
+            heavy_frame.compressed_data = heavy_serializer.finalize();
             heavy_frame.msg_count = 1;
             heavy_frame.client_ids = client_ids;
             heavy_frame.is_heavy = true;
