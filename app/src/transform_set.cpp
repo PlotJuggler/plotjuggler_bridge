@@ -23,12 +23,18 @@
 
 #include <chrono>
 #include <sstream>
+#include <stdexcept>
 
 namespace pj_bridge {
 
 bool BoundTransform::run(const std::string& topic, std::span<const std::byte> in, std::vector<std::byte>& out) {
   const auto start = std::chrono::steady_clock::now();
-  auto result = transform->apply(in, out);
+  tl::expected<void, std::string> result;
+  try {
+    result = transform->apply(in, out);
+  } catch (const std::exception& e) {  // a codec throwing on bad input costs one sample, not the bridge
+    result = tl::make_unexpected(std::string("exception: ") + e.what());
+  }
   if (!result) {
     const uint64_t n = drops.fetch_add(1) + 1;
     if ((n & (n - 1)) == 0) {  // 1st, 2nd, 4th, 8th... keeps a broken topic from flooding the log
@@ -133,30 +139,41 @@ std::shared_ptr<BoundTransform> TransformSet::bind(const std::string& topic, con
     bindings_.erase(it);  // the topic's type changed: match again
   }
 
+  // ponytail: unmatched topics re-run every rule on each call (once per topic poll);
+  // cache the misses too if topics x rules ever shows up in a profile.
   for (const auto& rule : rules_) {
-    if (rule.match_type && *rule.match_type != source_type) {
-      continue;
-    }
-    if (rule.match_topic && !std::regex_match(topic, *rule.match_topic)) {
-      continue;
-    }
-    const auto& factory = factories_.at(rule.transform);
-    if (!factory.accepts(source_type)) {
-      if (warned_topics_.insert(topic).second) {
-        spdlog::warn(
-            "Transform '{}' matched topic '{}' but does not accept type '{}'; leaving it untransformed", rule.transform,
-            topic, source_type);
+    try {
+      if (rule.match_type && *rule.match_type != source_type) {
+        continue;
       }
+      if (rule.match_topic && !std::regex_match(topic, *rule.match_topic)) {
+        continue;
+      }
+      const auto& factory = factories_.at(rule.transform);
+      if (!factory.accepts(source_type)) {
+        if (warned_topics_.insert(topic).second) {
+          spdlog::warn(
+              "Transform '{}' matched topic '{}' but does not accept type '{}'; rule skipped", rule.transform, topic,
+              source_type);
+        }
+        continue;  // a later rule (e.g. the strip_large_messages sugar) may still apply
+      }
+      auto bound = std::make_shared<BoundTransform>();
+      bound->source_type = source_type;
+      bound->transform_name = rule.transform;
+      bound->output_type = factory.output_type(source_type);
+      bound->transform = factory.create(source_type, rule.params);
+      if (!bound->transform) {
+        throw std::runtime_error("factory returned no transform");
+      }
+      bindings_[topic] = bound;
+      spdlog::info("Topic '{}' ({}) -> transform '{}' -> {}", topic, source_type, rule.transform, bound->output_type);
+      return bound;
+    } catch (const std::exception& e) {
+      spdlog::error(
+          "Transform '{}' could not be set up for '{}': {}; leaving it untransformed", rule.transform, topic, e.what());
       return nullptr;
     }
-    auto bound = std::make_shared<BoundTransform>();
-    bound->source_type = source_type;
-    bound->transform_name = rule.transform;
-    bound->output_type = factory.output_type(source_type);
-    bound->transform = factory.create(source_type, rule.params);
-    bindings_[topic] = bound;
-    spdlog::info("Topic '{}' ({}) -> transform '{}' -> {}", topic, source_type, rule.transform, bound->output_type);
-    return bound;
   }
   return nullptr;
 }

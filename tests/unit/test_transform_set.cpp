@@ -1,5 +1,9 @@
 #include <gtest/gtest.h>
 
+#include <atomic>
+#include <stdexcept>
+#include <thread>
+
 #include "pj_bridge/transform_set.hpp"
 
 using namespace pj_bridge;
@@ -60,6 +64,7 @@ TEST(TransformSetTest, MatchesByType) {
   EXPECT_EQ(bound->output_type, "pkg/msg/Out");
   EXPECT_EQ((*set)->bind("/b", "pkg/msg/Unrelated"), nullptr);
   EXPECT_EQ((*set)->find("/a"), bound);
+  EXPECT_EQ((*set)->bind("/a", "pkg/msg/In"), bound);  // cached: counters and codec state survive topic polls
   EXPECT_EQ((*set)->find("/b"), nullptr);
 }
 
@@ -91,6 +96,84 @@ TEST(TransformSetTest, TopicOnlyRuleWithNonAcceptedTypeLeavesTopicUntransformed)
   auto set = TransformSet::create(rule({{"match_topic", "/a"}, {"transform", "fake"}}), factories());
   ASSERT_TRUE(set.has_value()) << set.error();
   EXPECT_EQ((*set)->bind("/a", "pkg/msg/Unrelated"), nullptr);
+}
+
+TEST(TransformSetTest, NonAcceptingRuleIsSkippedSoLaterRulesStillApply) {
+  auto set = TransformSet::create(rule({{"match_topic", "/lidar/.*"}, {"transform", "fake"}}), factories());
+  ASSERT_TRUE(set.has_value()) << set.error();
+  ASSERT_TRUE((*set)->append_type_rule("pkg/msg/Other", "other").has_value());
+  auto bound = (*set)->bind("/lidar/image", "pkg/msg/Other");
+  ASSERT_NE(bound, nullptr);
+  EXPECT_EQ(bound->transform_name, "other");
+}
+
+TEST(TransformSetTest, FactoryReturningNullOrThrowingLeavesTopicUntransformed) {
+  auto broken = fake_factory("pkg/msg/In");
+  broken.create = [](const std::string&, const json& p) -> std::unique_ptr<MessageTransform> {
+    if (p.value("fail", false)) {
+      throw std::runtime_error("no codec");
+    }
+    return nullptr;
+  };
+  json profile = {
+      {"transforms", json::array(
+                         {{{"match_topic", "/throws"}, {"transform", "broken"}, {"params", {{"fail", true}}}},
+                          {{"match_type", "pkg/msg/In"}, {"transform", "broken"}}})}};
+  auto set = TransformSet::create(profile, {{"broken", broken}});
+  ASSERT_TRUE(set.has_value()) << set.error();
+  EXPECT_EQ((*set)->bind("/throws", "pkg/msg/In"), nullptr);
+  EXPECT_EQ((*set)->bind("/null", "pkg/msg/In"), nullptr);
+  EXPECT_EQ((*set)->find("/null"), nullptr);
+}
+
+TEST(TransformSetTest, ThrowingApplyIsADropNotACrash) {
+  struct Thrower : MessageTransform {
+    tl::expected<void, std::string> apply(std::span<const std::byte>, std::vector<std::byte>&) override {
+      throw std::length_error("corrupt size field");
+    }
+  };
+  auto f = fake_factory("pkg/msg/In");
+  f.create = [](const std::string&, const json&) { return std::make_unique<Thrower>(); };
+  auto set = TransformSet::create(rule({{"match_type", "pkg/msg/In"}, {"transform", "t"}}), {{"t", f}});
+  ASSERT_TRUE(set.has_value()) << set.error();
+  auto bound = (*set)->bind("/a", "pkg/msg/In");
+  std::vector<std::byte> in(4), out;
+  EXPECT_FALSE(bound->run("/a", in, out));
+  EXPECT_EQ(bound->drops.load(), 1u);
+}
+
+TEST(TransformSetTest, StatsSummaryListsOnlyTopicsThatProcessedSamples) {
+  auto set = TransformSet::create(rule({{"match_type", "pkg/msg/In"}, {"transform", "fake"}}), factories());
+  ASSERT_TRUE(set.has_value()) << set.error();
+  std::vector<std::byte> in(4), out;
+  (*set)->bind("/busy", "pkg/msg/In")->run("/busy", in, out);
+  (*set)->bind("/idle", "pkg/msg/In");
+  const auto summary = (*set)->stats_summary();
+  EXPECT_NE(summary.find("/busy"), std::string::npos);
+  EXPECT_EQ(summary.find("/idle"), std::string::npos);
+}
+
+// Gives TSAN the real threading model: run() on one thread, everything else on another.
+TEST(TransformSetTest, RunIsSafeConcurrentlyWithBindFindAndStats) {
+  auto set = TransformSet::create(rule({{"match_type", "pkg/msg/In"}, {"transform", "fake"}}), factories());
+  ASSERT_TRUE(set.has_value()) << set.error();
+  auto bound = (*set)->bind("/a", "pkg/msg/In");
+  std::atomic<bool> stop{false};
+  std::thread ingest([&] {
+    std::vector<std::byte> in(64), out;
+    while (!stop) {
+      bound->run("/a", in, out);
+    }
+  });
+  for (int i = 0; i < 2000; ++i) {
+    (*set)->bind("/a", "pkg/msg/In");
+    (*set)->bind("/other" + std::to_string(i % 8), "pkg/msg/In");
+    (*set)->find("/a");
+    (*set)->stats_summary();
+  }
+  stop = true;
+  ingest.join();
+  EXPECT_GT(bound->samples.load(), 0u);
 }
 
 TEST(TransformSetTest, RebindsWhenSourceTypeChanges) {
@@ -141,6 +224,9 @@ INSTANTIATE_TEST_SUITE_P(
     ::testing::Values(
         BadProfile{"not_an_object", json::array()}, BadProfile{"missing_transforms", json::object()},
         BadProfile{"unknown_top_level_key", json{{"transforms", json::array()}, {"extra", 1}}},
+        BadProfile{"transforms_not_an_array", json{{"transforms", 5}}},
+        BadProfile{"rule_not_an_object", json{{"transforms", json::array({5})}}},
+        BadProfile{"mistyped_rule_key", rule({{"match_type", 5}, {"transform", "fake"}})},
         BadProfile{"rule_without_matcher", rule({{"transform", "fake"}})},
         BadProfile{"rule_without_transform", rule({{"match_type", "pkg/msg/In"}})},
         BadProfile{"unknown_rule_key", rule({{"match_type", "pkg/msg/In"}, {"transform", "fake"}, {"oops", 1}})},

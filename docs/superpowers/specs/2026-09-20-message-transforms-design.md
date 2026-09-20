@@ -166,11 +166,13 @@ ROS2 parameter `transform_profile` (string, default empty = disabled).
 
 **Fail at startup** (clear error, non-zero exit): unreadable or malformed
 file, unknown top-level/rule/param key, unknown transform name, `cloudini`
-named in a build without Cloudini, invalid regex, `create()` returning an
-error, a `match_type` the named transform does not `accept()`. A rule without
+named in a build without Cloudini, invalid regex, params rejected by the
+transform's `check_params`, a `match_type` the named transform does not `accept()`. A rule without
 `match_type` whose transform does not `accept()` a topic it matched by
-`match_topic` is reported once as a warning and the topic is left
-untransformed (types are only known at discovery time).
+`match_topic` is reported once as a warning and that rule is skipped for the
+topic — later rules still apply (types are only known at discovery time). A
+transform that cannot be instantiated for a topic (factory throws or returns
+nothing) is logged as an error and the topic is left untransformed.
 
 **At runtime**, `apply()` failure → drop the sample, bump a counter, throttled
 warning. This also applies to `strip` (today it forwards the original; changed
