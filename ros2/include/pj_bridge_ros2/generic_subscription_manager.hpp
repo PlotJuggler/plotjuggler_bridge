@@ -54,6 +54,7 @@ class GenericSubscriptionManager {
   bool unsubscribe(const std::string& topic_name);
   bool is_subscribed(const std::string& topic_name) const;
   size_t get_reference_count(const std::string& topic_name) const;
+  size_t subscription_count() const;
   void unsubscribe_all();
 
   /// True when the subscription for `topic_name` was created with

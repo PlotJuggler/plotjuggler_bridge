@@ -18,13 +18,14 @@
  */
 
 #include <spdlog/spdlog.h>
+#include <zstd.h>
 
 #include <chrono>
 #include <memory>
 #include <optional>
-#include <thread>
 #include <rclcpp/rclcpp.hpp>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "pj_bridge/bridge_server.hpp"
@@ -52,6 +53,7 @@ int main(int argc, char** argv) {
   node->declare_parameter<double>("topic_poll_interval", 1.0);
   node->declare_parameter<int>("client_backlog_size", 100);
   node->declare_parameter<int>("heavy_frame_threshold_bytes", 262144);
+  node->declare_parameter<int>("heavy_frame_zstd_level", pj_bridge::kDefaultHeavyFrameZstdLevel);
   node->declare_parameter<bool>("tls", false);
   node->declare_parameter<std::string>("certfile", "");
   node->declare_parameter<std::string>("keyfile", "");
@@ -67,6 +69,7 @@ int main(int argc, char** argv) {
   double topic_poll_interval = node->get_parameter("topic_poll_interval").as_double();
   int64_t client_backlog_size = node->get_parameter("client_backlog_size").as_int();
   int64_t heavy_frame_threshold_bytes = node->get_parameter("heavy_frame_threshold_bytes").as_int();
+  int64_t heavy_frame_zstd_level = node->get_parameter("heavy_frame_zstd_level").as_int();
   bool tls_enabled = node->get_parameter("tls").as_bool();
   std::string certfile = node->get_parameter("certfile").as_string();
   std::string keyfile = node->get_parameter("keyfile").as_string();
@@ -74,9 +77,11 @@ int main(int argc, char** argv) {
   RCLCPP_INFO(
       node->get_logger(),
       "Configuration: port=%d, publish_rate=%.1f Hz, session_timeout=%.1f s, strip_large_messages=%s, "
-      "min_qos_depth=%ld, max_qos_depth=%ld, topic_poll_interval=%.1f s, client_backlog_size=%ld, tls=%s",
+      "min_qos_depth=%ld, max_qos_depth=%ld, ingest_poll_interval_ms=%.1f, topic_poll_interval=%.1f s, "
+      "client_backlog_size=%ld, heavy_frame_zstd_level=%ld, tls=%s",
       port, publish_rate, session_timeout, strip_large_messages ? "true" : "false", min_qos_depth, max_qos_depth,
-      topic_poll_interval, client_backlog_size, tls_enabled ? "true" : "false");
+      ingest_poll_interval_ms, topic_poll_interval, client_backlog_size, heavy_frame_zstd_level,
+      tls_enabled ? "true" : "false");
 
   if (tls_enabled && (certfile.empty() || keyfile.empty())) {
     RCLCPP_ERROR(node->get_logger(), "tls=true requires both 'certfile' and 'keyfile' parameters to be set");
@@ -88,6 +93,22 @@ int main(int argc, char** argv) {
     RCLCPP_ERROR(
         node->get_logger(), "Invalid topic_poll_interval: %.1f (must be >= 0; 0 disables polling)",
         topic_poll_interval);
+    rclcpp::shutdown();
+    return 1;
+  }
+
+  if (ingest_poll_interval_ms < 0.0) {
+    RCLCPP_ERROR(
+        node->get_logger(), "Invalid ingest_poll_interval_ms: %.1f (must be >= 0; 0 uses blocking spin)",
+        ingest_poll_interval_ms);
+    rclcpp::shutdown();
+    return 1;
+  }
+
+  if (heavy_frame_zstd_level < ZSTD_minCLevel() || heavy_frame_zstd_level > ZSTD_maxCLevel()) {
+    RCLCPP_ERROR(
+        node->get_logger(), "Invalid heavy_frame_zstd_level: %ld (must be in [%d, %d])", heavy_frame_zstd_level,
+        ZSTD_minCLevel(), ZSTD_maxCLevel());
     rclcpp::shutdown();
     return 1;
   }
@@ -148,7 +169,7 @@ int main(int argc, char** argv) {
     pj_bridge::BridgeServer server(
         topic_source, sub_manager, middleware,
         {port, session_timeout, publish_rate, std::move(whitelist_result.value()),
-         static_cast<size_t>(heavy_frame_threshold_bytes)});
+         static_cast<size_t>(heavy_frame_threshold_bytes), static_cast<int>(heavy_frame_zstd_level)});
 
     if (!server.initialize()) {
       RCLCPP_ERROR(node->get_logger(), "Failed to initialize bridge server");
@@ -165,14 +186,16 @@ int main(int argc, char** argv) {
     // Not added to the node's default executor (second argument false).
     auto timer_group = node->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive, false);
 
-    auto request_timer = node->create_wall_timer(10ms, [&server]() { server.process_requests(); }, timer_group);
+    auto request_timer = node->create_wall_timer(
+        10ms, [&server]() { server.process_requests(); }, timer_group);
 
     auto publish_period = std::chrono::duration<double>(1.0 / publish_rate);
     auto publish_timer = node->create_wall_timer(
         std::chrono::duration_cast<std::chrono::nanoseconds>(publish_period),
         [&server]() { server.publish_aggregated_messages(); }, timer_group);
 
-    auto timeout_timer = node->create_wall_timer(1s, [&server]() { server.check_session_timeouts(); }, timer_group);
+    auto timeout_timer = node->create_wall_timer(
+        1s, [&server]() { server.check_session_timeouts(); }, timer_group);
 
     // topic_poll_interval == 0 disables the pushed topic-advertisement poll.
     rclcpp::TimerBase::SharedPtr topic_poll_timer;
@@ -202,6 +225,11 @@ int main(int argc, char** argv) {
     if (ingest_poll_interval_ms > 0.0) {
       const auto poll_interval = std::chrono::duration<double, std::milli>(ingest_poll_interval_ms);
       while (rclcpp::ok()) {
+        if (sub_manager->subscription_count() == 0) {
+          // Nothing to amortize: block instead of polling so idle costs nothing.
+          executor.spin_once(std::chrono::milliseconds(100));
+          continue;
+        }
         executor.spin_some();
         std::this_thread::sleep_for(poll_interval);
       }

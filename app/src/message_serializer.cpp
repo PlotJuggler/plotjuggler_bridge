@@ -53,9 +53,9 @@ void AggregatedMessageSerializer::serialize_message(
   write_le(serialized_data_, msg_size);
 
   // Message data (CDR bytes) using memcpy
-  size_t old_size = serialized_data_.size();
-  serialized_data_.resize(old_size + msg_size);
-  std::memcpy(serialized_data_.data() + old_size, data, msg_size);
+  // insert, not resize+memcpy: resize would zero the bytes first
+  const auto *bytes = reinterpret_cast<const uint8_t *>(data);
+  serialized_data_.insert(serialized_data_.end(), bytes, bytes + msg_size);
 }
 
 void AggregatedMessageSerializer::clear() {
@@ -67,7 +67,7 @@ size_t AggregatedMessageSerializer::get_message_count() const {
   return message_count_;
 }
 
-std::vector<uint8_t> AggregatedMessageSerializer::finalize(uint32_t flags) {
+std::vector<uint8_t> AggregatedMessageSerializer::finalize(uint32_t flags, int compression_level) {
   // Build 16-byte header (uncompressed)
   std::vector<uint8_t> header(kBinaryHeaderSize);
 
@@ -101,8 +101,7 @@ std::vector<uint8_t> AggregatedMessageSerializer::finalize(uint32_t flags) {
   // Compress payload after header using persistent context
   size_t compressed_size = ZSTD_compressCCtx(
       cctx_, result.data() + kBinaryHeaderSize, max_compressed, serialized_data_.data(), serialized_data_.size(),
-      1  // compression level
-  );
+      compression_level);
 
   if (ZSTD_isError(compressed_size)) {
     throw std::runtime_error(std::string("ZSTD compression failed: ") + ZSTD_getErrorName(compressed_size));

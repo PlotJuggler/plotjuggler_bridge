@@ -451,15 +451,13 @@ TEST_F(GenericSubscriptionManagerTest, DrainsAllPendingMessagesInOneExecutorPass
   // Publisher first, with enough depth (>=20) for the subscription's QoS
   // (derived from the publisher via adapt_qos()) to hold a 20-message burst,
   // and RELIABLE so nothing is dropped before the executor ever spins.
-  auto publisher =
-      node_->create_publisher<std_msgs::msg::String>("/drain_burst_topic", rclcpp::QoS(50).reliable());
+  auto publisher = node_->create_publisher<std_msgs::msg::String>("/drain_burst_topic", rclcpp::QoS(50).reliable());
 
   // Wait for the publisher to be discoverable before subscribing so
   // adapt_qos() sees it and derives a >=20 depth.
   {
     auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
-    while (node_->count_publishers("/drain_burst_topic") == 0 &&
-           std::chrono::steady_clock::now() < deadline) {
+    while (node_->count_publishers("/drain_burst_topic") == 0 && std::chrono::steady_clock::now() < deadline) {
       std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
   }
@@ -514,7 +512,7 @@ TEST_F(GenericSubscriptionManagerTest, DrainsAllPendingMessagesInOneExecutorPass
 
   ASSERT_GT(received_count.load(), 0) << "no message delivered after " << spin_calls << " spin_once() call(s)";
   EXPECT_EQ(received_count.load(), 20) << "the wait cycle that delivered the first message only delivered "
-                                        << received_count.load() << " of 20 — drain loop did not run";
+                                       << received_count.load() << " of 20 — drain loop did not run";
 
   executor.remove_node(node_);
   manager_->unsubscribe("/drain_burst_topic");

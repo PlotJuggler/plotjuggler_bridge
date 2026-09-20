@@ -105,7 +105,7 @@ make -j$(nproc)
 ### Event Loop
 
 BridgeServer does NOT own timers. The entry point (`main.cpp`) drives the event loop:
-- **ROS2**: `rclcpp` wall timers call `process_requests()`, `publish_aggregated_messages()`, `check_session_timeouts()`
+- **ROS2**: `rclcpp` wall timers (`process_requests()`, `publish_aggregated_messages()`, `check_session_timeouts()`) run on their own dedicated executor thread, so a long publish/zstd cycle never delays ingest. The ingest executor itself is polled (`ingest_poll_interval_ms`, default 5 ms) via `spin_some()` instead of blocking in `spin()`; subscription callbacks drain their DDS reader on each poll.
 - **RTI**: `std::chrono` loop with `std::this_thread::sleep_for()`
 - **FastDDS**: `std::chrono` loop with `std::this_thread::sleep_for()` (same pattern as RTI)
 
@@ -234,11 +234,13 @@ publish_rate: 50.0             # Hz
 session_timeout: 10.0          # seconds
 strip_large_messages: false    # Opt-in: strip Image/PointCloud2/etc data fields
 topic_whitelist: [".*"]        # Full-match regex patterns restricting visible/subscribable topics
-min_qos_depth: 1               # Minimum KEEP_LAST subscription depth after aggregating publisher depths
+min_qos_depth: 10              # Minimum KEEP_LAST subscription depth after aggregating publisher depths
 max_qos_depth: 100             # Maximum KEEP_LAST subscription depth after aggregating publisher depths
+ingest_poll_interval_ms: 5.0   # Ingest executor poll interval (drains subscriptions each poll); 0 = blocking spin
 topic_poll_interval: 1.0       # Seconds between topics_changed notification polls; 0 disables polling
 client_backlog_size: 100       # Max frames queued per slow client before dropping the oldest (must be > 0)
 heavy_frame_threshold_bytes: 262144  # Isolate messages >= this size into their own size-class frame; 0 disables
+heavy_frame_zstd_level: 1      # zstd level for heavy frames; any zstd level, negative = faster/larger
 tls: false                     # Enable TLS (wss://); requires certfile and keyfile
 certfile: ""                   # TLS server certificate file
 keyfile: ""                    # TLS private key file
@@ -248,14 +250,16 @@ keyfile: ""                    # TLS private key file
 ```bash
 pj_bridge_rti --domains 0 1 --port 9090 --publish-rate 50 --session-timeout 10 \
   --topic-whitelist ".*" --topic-poll-interval 1.0 --client-backlog-size 100 \
-  --heavy-frame-threshold-bytes 262144 --certfile cert.pem --keyfile key.pem
+  --heavy-frame-threshold-bytes 262144 --heavy-frame-zstd-level 1 \
+  --certfile cert.pem --keyfile key.pem
 ```
 
 ### FastDDS (via CLI flags):
 ```bash
 pj_bridge_fastdds --domains 0 1 --port 9090 --publish-rate 50 --session-timeout 10 \
   --topic-whitelist ".*" --topic-poll-interval 1.0 --client-backlog-size 100 \
-  --heavy-frame-threshold-bytes 262144 --certfile cert.pem --keyfile key.pem
+  --heavy-frame-threshold-bytes 262144 --heavy-frame-zstd-level 1 \
+  --certfile cert.pem --keyfile key.pem
 ```
 
 See `docs/API.md` for full semantics of each option (topic whitelist matching rules,

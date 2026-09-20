@@ -26,6 +26,8 @@
 #include <string>
 #include <vector>
 
+#include "pj_bridge/protocol_constants.hpp"
+
 namespace pj_bridge {
 
 /**
@@ -96,7 +98,8 @@ class AggregatedMessageSerializer {
    *              kFrameFlagHeavy to mark an isolated large/size-class frame.
    * @return Vector containing header + compressed payload
    */
-  std::vector<uint8_t> finalize(uint32_t flags = 0);
+  /// @param compression_level any zstd level; negative levels trade ratio for speed.
+  std::vector<uint8_t> finalize(uint32_t flags = 0, int compression_level = kDefaultZstdLevel);
 
   /**
    * @brief Compress data using ZSTD (compression level 1)

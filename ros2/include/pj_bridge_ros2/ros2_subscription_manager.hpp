@@ -50,6 +50,7 @@ class Ros2SubscriptionManager : public SubscriptionManagerInterface {
   void unsubscribe_all() override;
   bool is_transient_local(const std::string& topic_name) const override;
   bool is_subscribed(const std::string& topic_name) const override;
+  size_t subscription_count() const;
 
  private:
   GenericSubscriptionManager inner_manager_;

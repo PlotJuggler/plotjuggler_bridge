@@ -530,3 +530,39 @@ TEST_F(MessageSerializerTest, FinalizeFlagsDoNotAlterPayload) {
   std::vector<uint8_t> heavy_payload(heavy.begin() + 16, heavy.end());
   EXPECT_EQ(plain_payload, heavy_payload);
 }
+
+// ============================================================================
+// Compression level — heavy_frame_zstd_level knob (finalize's 2nd argument)
+// ============================================================================
+
+TEST_F(MessageSerializerTest, FinalizeCompressionLevelRoundTrips) {
+  // A negative (fast) and a positive (default-ish) level should both decode
+  // to the identical uncompressed payload, with header fields unaffected by
+  // the compression level.
+  std::vector<uint8_t> raw_data = {10, 20, 30, 40, 50};
+  auto data = create_test_data(raw_data);
+  serializer_.serialize_message("/test", 12345, data.data(), data.size());
+  const auto expected_payload = serializer_.get_serialized_data();
+
+  for (int level : {-5, 3}) {
+    auto result = serializer_.finalize(0, level);
+    ASSERT_GE(result.size(), 16u);
+
+    uint32_t count;
+    std::memcpy(&count, result.data() + 4, sizeof(count));
+    EXPECT_EQ(count, 1u);
+
+    uint32_t uncompressed_size;
+    std::memcpy(&uncompressed_size, result.data() + 8, sizeof(uncompressed_size));
+    EXPECT_EQ(uncompressed_size, expected_payload.size());
+
+    uint32_t flags;
+    std::memcpy(&flags, result.data() + 12, sizeof(flags));
+    EXPECT_EQ(flags, 0u);
+
+    std::vector<uint8_t> compressed(result.begin() + 16, result.end());
+    std::vector<uint8_t> decompressed;
+    AggregatedMessageSerializer::decompress_zstd(compressed, decompressed);
+    EXPECT_EQ(decompressed, expected_payload);
+  }
+}

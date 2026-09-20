@@ -2,6 +2,22 @@
 Changelog for package pj_ros_bridge
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+Forthcoming
+-----------
+* WebSocket permessage-deflate declined server-side (redundant with our own
+  ZSTD compression; was costing CPU for no bandwidth benefit).
+* ROS2: ingest executor polled and drained (``ingest_poll_interval_ms``,
+  default 5 ms) instead of blocking ``spin()``, amortizing the per-wait-cycle
+  wait-set rebuild; publish/request/timeout timers moved to their own
+  executor thread so a long publish cycle never delays ingest.
+* ROS2: ``min_qos_depth`` default raised ``1`` -> ``10`` so the ingest poll
+  interval can't overflow a shallow reader between polls.
+* New ``heavy_frame_zstd_level`` knob (ROS2 param, RTI/FastDDS
+  ``--heavy-frame-zstd-level``, default ``1``): CPU-vs-bandwidth zstd level
+  for heavy (size-class) frames only; wire-compatible (frame flags stay 0).
+* Removed zero-initializing copies in the ingest and serializer hot paths
+  (``resize()`` + ``memcpy`` -> direct-construct/``insert``).
+
 0.9.0 (2026-07-11)
 ------------------
 * Size-class frames: isolate heavy messages (``>= heavy_frame_threshold_bytes``)

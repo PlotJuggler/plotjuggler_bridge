@@ -61,6 +61,12 @@ struct BridgeServerConfig {
   /// its own size-class ("heavy") frame instead of being aggregated with light
   /// topics. 0 disables splitting (single aggregated frame). Default: 256 KiB.
   size_t heavy_frame_threshold_bytes = kDefaultHeavyFrameThresholdBytes;
+  /// zstd level for heavy frames; a CPU-vs-bandwidth knob (any zstd level,
+  /// negative = faster). Compression is ~60% of CPU on point-cloud workloads.
+  /// Measured on 4 lidars, 52 MiB/s in: level 1 = 19% of a core, 31 MB/s out;
+  /// -5 = 15%, 39 MB/s; -100 = 10%, 51 MB/s. Light frames always use
+  /// kDefaultZstdLevel.
+  int heavy_frame_zstd_level = kDefaultHeavyFrameZstdLevel;
 };
 
 class BridgeServer {
@@ -226,6 +232,7 @@ class BridgeServer {
   // Per-message byte size at or above which a topic is isolated into its own
   // size-class ("heavy") frame; 0 disables splitting. See publish_aggregated_messages().
   size_t heavy_frame_threshold_bytes_;
+  int heavy_frame_zstd_level_;
 
   // State
   std::atomic<bool> initialized_;

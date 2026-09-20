@@ -171,6 +171,11 @@ bool GenericSubscriptionManager::is_subscribed(const std::string& topic_name) co
   return subscriptions_.find(topic_name) != subscriptions_.end();
 }
 
+size_t GenericSubscriptionManager::subscription_count() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return subscriptions_.size();
+}
+
 size_t GenericSubscriptionManager::get_reference_count(const std::string& topic_name) const {
   std::lock_guard<std::mutex> lock(mutex_);
 
