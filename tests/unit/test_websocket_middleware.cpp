@@ -17,6 +17,7 @@
  * along with pj_bridge. If not, see <https://www.gnu.org/licenses/>.
  */
 
+#include <dlfcn.h>
 #include <gtest/gtest.h>
 #include <ixwebsocket/IXWebSocket.h>
 
@@ -737,6 +738,12 @@ TEST(WebSocketMiddlewareTlsTest, TlsRoundTrip) {
 #endif  // IXWEBSOCKET_USE_TLS
 
 int main(int argc, char** argv) {
+  // rcl_logging_spdlog registers a periodic flush thread on spdlog's global
+  // registry (which we share) and its code lives in that library. rcl unloads
+  // the library on shutdown, so after the suites' init/shutdown cycles the
+  // thread would resume in unmapped memory at exit. Pin the library.
+  dlopen("librcl_logging_spdlog.so", RTLD_NOW | RTLD_NODELETE);
+
   testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();
 }
