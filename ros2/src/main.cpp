@@ -20,6 +20,7 @@
 #include <spdlog/spdlog.h>
 
 #include <chrono>
+#include <fstream>
 #include <memory>
 #include <optional>
 #include <rclcpp/rclcpp.hpp>
@@ -29,9 +30,13 @@
 
 #include "pj_bridge/bridge_server.hpp"
 #include "pj_bridge/middleware/websocket_middleware.hpp"
+#include "pj_bridge/transform_set.hpp"
+#include "pj_bridge/transforming_topic_source.hpp"
 #include "pj_bridge/whitelist_filter.hpp"
+#include "pj_bridge_ros2/message_stripper.hpp"
 #include "pj_bridge_ros2/ros2_subscription_manager.hpp"
 #include "pj_bridge_ros2/ros2_topic_source.hpp"
+#include "pj_bridge_ros2/strip_transform.hpp"
 
 int main(int argc, char** argv) {
   rclcpp::init(argc, argv);
@@ -45,6 +50,7 @@ int main(int argc, char** argv) {
   node->declare_parameter<double>("publish_rate", 50.0);
   node->declare_parameter<double>("session_timeout", 10.0);
   node->declare_parameter<bool>("strip_large_messages", false);
+  node->declare_parameter<std::string>("transform_profile", "");
   node->declare_parameter<std::vector<std::string>>("topic_whitelist", {".*"});
   node->declare_parameter<int>("min_qos_depth", 10);
   node->declare_parameter<double>("ingest_poll_interval_ms", 5.0);
@@ -60,6 +66,7 @@ int main(int argc, char** argv) {
   double publish_rate = node->get_parameter("publish_rate").as_double();
   double session_timeout = node->get_parameter("session_timeout").as_double();
   bool strip_large_messages = node->get_parameter("strip_large_messages").as_bool();
+  std::string transform_profile = node->get_parameter("transform_profile").as_string();
   std::vector<std::string> topic_whitelist = node->get_parameter("topic_whitelist").as_string_array();
   int64_t min_qos_depth = node->get_parameter("min_qos_depth").as_int();
   double ingest_poll_interval_ms = node->get_parameter("ingest_poll_interval_ms").as_double();
@@ -74,10 +81,11 @@ int main(int argc, char** argv) {
   RCLCPP_INFO(
       node->get_logger(),
       "Configuration: port=%d, publish_rate=%.1f Hz, session_timeout=%.1f s, strip_large_messages=%s, "
-      "min_qos_depth=%ld, max_qos_depth=%ld, ingest_poll_interval_ms=%.1f, topic_poll_interval=%.1f s, "
-      "client_backlog_size=%ld, tls=%s",
-      port, publish_rate, session_timeout, strip_large_messages ? "true" : "false", min_qos_depth, max_qos_depth,
-      ingest_poll_interval_ms, topic_poll_interval, client_backlog_size, tls_enabled ? "true" : "false");
+      "transform_profile='%s', min_qos_depth=%ld, max_qos_depth=%ld, ingest_poll_interval_ms=%.1f, "
+      "topic_poll_interval=%.1f s, client_backlog_size=%ld, tls=%s",
+      port, publish_rate, session_timeout, strip_large_messages ? "true" : "false", transform_profile.c_str(),
+      min_qos_depth, max_qos_depth, ingest_poll_interval_ms, topic_poll_interval, client_backlog_size,
+      tls_enabled ? "true" : "false");
 
   if (tls_enabled && (certfile.empty() || keyfile.empty())) {
     RCLCPP_ERROR(node->get_logger(), "tls=true requires both 'certfile' and 'keyfile' parameters to be set");
@@ -143,9 +151,51 @@ int main(int argc, char** argv) {
 
   try {
     // Create backend components
-    auto topic_source = std::make_shared<pj_bridge::Ros2TopicSource>(node);
+    std::shared_ptr<pj_bridge::TopicSourceInterface> topic_source = std::make_shared<pj_bridge::Ros2TopicSource>(node);
+
+    std::shared_ptr<pj_bridge::TransformSet> transforms;
+    if (!transform_profile.empty() || strip_large_messages) {
+      nlohmann::json profile = {{"transforms", nlohmann::json::array()}};
+      if (!transform_profile.empty()) {
+        std::ifstream file(transform_profile);
+        if (!file) {
+          RCLCPP_ERROR(node->get_logger(), "Cannot open transform_profile '%s'", transform_profile.c_str());
+          rclcpp::shutdown();
+          return 1;
+        }
+        profile = nlohmann::json::parse(file, nullptr, /*allow_exceptions=*/false);
+        if (profile.is_discarded()) {
+          RCLCPP_ERROR(node->get_logger(), "transform_profile '%s' is not valid JSON", transform_profile.c_str());
+          rclcpp::shutdown();
+          return 1;
+        }
+      }
+
+      pj_bridge::TransformSet::FactoryMap factories;
+      factories["strip"] = pj_bridge::make_strip_transform_factory();
+
+      auto created = pj_bridge::TransformSet::create(profile, std::move(factories));
+      if (!created) {
+        RCLCPP_ERROR(node->get_logger(), "%s", created.error().c_str());
+        rclcpp::shutdown();
+        return 1;
+      }
+      transforms = *created;
+
+      if (strip_large_messages) {  // after the profile's rules, so an explicit rule wins
+        for (const auto& type : pj_bridge::MessageStripper::strippable_types()) {
+          // append_type_rule() is [[nodiscard]]; failure here would mean "strip" no longer
+          // accepts one of its own strippable_types(), which should never happen.
+          if (auto added = transforms->append_type_rule(type, "strip"); !added) {
+            RCLCPP_ERROR(node->get_logger(), "strip_large_messages: %s", added.error().c_str());
+          }
+        }
+      }
+      topic_source = std::make_shared<pj_bridge::TransformingTopicSource>(topic_source, transforms);
+    }
+
     auto sub_manager = std::make_shared<pj_bridge::Ros2SubscriptionManager>(
-        node, nullptr, static_cast<size_t>(min_qos_depth), static_cast<size_t>(max_qos_depth));
+        node, transforms, static_cast<size_t>(min_qos_depth), static_cast<size_t>(max_qos_depth));
     std::optional<pj_bridge::TlsConfig> tls_config;
     if (tls_enabled) {
       tls_config = pj_bridge::TlsConfig{certfile, keyfile};
@@ -268,6 +318,13 @@ int main(int argc, char** argv) {
         "Final statistics: %lu messages published, %lu bytes transmitted, %lu frames dropped (slow clients), "
         "%lu heavy frames shed (congestion)",
         total_messages, total_bytes, middleware->dropped_frame_count(), middleware->heavy_shed_count());
+
+    if (transforms) {
+      const auto summary = transforms->stats_summary();
+      if (!summary.empty()) {
+        RCLCPP_INFO(node->get_logger(), "Transform statistics:%s", summary.c_str());
+      }
+    }
 
     RCLCPP_INFO(node->get_logger(), "Bridge server shutdown complete");
 
