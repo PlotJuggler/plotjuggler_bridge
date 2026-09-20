@@ -39,7 +39,7 @@ std::vector<TopicInfo> TransformingTopicSource::get_topics() {
 std::string TransformingTopicSource::get_schema(const std::string& topic_name) {
   auto schema = inner_->get_schema(topic_name);
   if (auto bound = transforms_->find(topic_name)) {
-    return transforms_->output_schema(*bound, schema);
+    return bound->transform->output_schema(schema);
   }
   return schema;
 }

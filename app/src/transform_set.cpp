@@ -23,9 +23,19 @@
 
 #include <chrono>
 #include <sstream>
-#include <stdexcept>
 
 namespace pj_bridge {
+
+namespace {
+// regex_match can throw at match time (error_complexity / error_stack): treat as no match.
+bool topic_matches(const std::string& topic, const std::regex& pattern) {
+  try {
+    return std::regex_match(topic, pattern);
+  } catch (const std::regex_error&) {
+    return false;
+  }
+}
+}  // namespace
 
 bool BoundTransform::run(const std::string& topic, std::span<const std::byte> in, std::vector<std::byte>& out) {
   const auto start = std::chrono::steady_clock::now();
@@ -89,9 +99,6 @@ tl::expected<std::shared_ptr<TransformSet>, std::string> TransformSet::create(
         return tl::make_unexpected(where + "unknown or mistyped key '" + key + "'");
       }
     }
-    if (rule.params.is_null()) {
-      rule.params = nlohmann::json::object();
-    }
     if (auto added = set->add_rule(std::move(rule)); !added) {
       return tl::make_unexpected(where + added.error());
     }
@@ -126,8 +133,12 @@ tl::expected<void, std::string> TransformSet::append_type_rule(
   Rule rule;
   rule.match_type = match_type;
   rule.transform = transform;
-  rule.params = nlohmann::json::object();
   return add_rule(std::move(rule));
+}
+
+// bind() runs for every topic on every topic poll: each (topic, transform) problem is reported once.
+bool TransformSet::log_once(const std::string& topic, const std::string& transform) {
+  return logged_.emplace(topic, transform).second;
 }
 
 std::shared_ptr<BoundTransform> TransformSet::bind(const std::string& topic, const std::string& source_type) {
@@ -136,47 +147,49 @@ std::shared_ptr<BoundTransform> TransformSet::bind(const std::string& topic, con
     if (it->second->source_type == source_type) {
       return it->second;
     }
-    bindings_.erase(it);  // the topic's type changed: match again
+    bindings_.erase(it);  // the topic's type changed: match again, and let it be reported again
+    std::erase_if(logged_, [&](const auto& entry) { return entry.first == topic; });
   }
 
   // ponytail: unmatched topics re-run every rule on each call (once per topic poll);
   // cache the misses too if topics x rules ever shows up in a profile.
   for (const auto& rule : rules_) {
+    if (rule.match_type && *rule.match_type != source_type) {
+      continue;
+    }
+    if (rule.match_topic && !topic_matches(topic, *rule.match_topic)) {
+      continue;
+    }
+    const auto& factory = factories_.at(rule.transform);
+    if (!factory.accepts(source_type)) {
+      if (log_once(topic, rule.transform)) {
+        spdlog::warn(
+            "Transform '{}' matched topic '{}' but does not accept type '{}'; rule skipped", rule.transform, topic,
+            source_type);
+      }
+      continue;  // a later rule (e.g. the strip_large_messages sugar) may still apply
+    }
+
+    auto bound = std::make_shared<BoundTransform>();
+    std::string error = "factory returned no transform";
     try {
-      if (rule.match_type && *rule.match_type != source_type) {
-        continue;
-      }
-      if (rule.match_topic && !std::regex_match(topic, *rule.match_topic)) {
-        continue;
-      }
-      const auto& factory = factories_.at(rule.transform);
-      if (!factory.accepts(source_type)) {
-        if (warned_topics_.insert(topic).second) {
-          spdlog::warn(
-              "Transform '{}' matched topic '{}' but does not accept type '{}'; rule skipped", rule.transform, topic,
-              source_type);
-        }
-        continue;  // a later rule (e.g. the strip_large_messages sugar) may still apply
-      }
-      auto bound = std::make_shared<BoundTransform>();
-      bound->source_type = source_type;
-      bound->transform_name = rule.transform;
-      bound->output_type = factory.output_type(source_type);
       bound->transform = factory.create(source_type, rule.params);
-      if (!bound->transform) {
-        throw std::runtime_error("factory returned no transform");
-      }
-      bindings_[topic] = bound;
-      spdlog::info("Topic '{}' ({}) -> transform '{}' -> {}", topic, source_type, rule.transform, bound->output_type);
-      return bound;
     } catch (const std::exception& e) {
-      if (warned_topics_.insert(topic).second) {  // bind() runs on every topic poll: log once
+      error = e.what();
+    }
+    if (!bound->transform) {
+      if (log_once(topic, rule.transform)) {
         spdlog::error(
-            "Transform '{}' could not be set up for '{}': {}; leaving it untransformed", rule.transform, topic,
-            e.what());
+            "Transform '{}' could not be set up for '{}': {}; leaving it untransformed", rule.transform, topic, error);
       }
       return nullptr;
     }
+    bound->source_type = source_type;
+    bound->transform_name = rule.transform;
+    bound->output_type = bound->transform->output_type(source_type);
+    bindings_[topic] = bound;
+    spdlog::info("Topic '{}' ({}) -> transform '{}' -> {}", topic, source_type, rule.transform, bound->output_type);
+    return bound;
   }
   return nullptr;
 }
@@ -187,22 +200,19 @@ std::shared_ptr<BoundTransform> TransformSet::find(const std::string& topic) con
   return it == bindings_.end() ? nullptr : it->second;
 }
 
-std::string TransformSet::output_schema(const BoundTransform& bound, const std::string& source_schema) const {
-  return factories_.at(bound.transform_name).output_schema(bound.source_type, source_schema);
-}
-
 std::string TransformSet::stats_summary() const {
   std::lock_guard<std::mutex> lock(mutex_);
   std::ostringstream os;
   for (const auto& [topic, bound] : bindings_) {
     const uint64_t n = bound->samples.load();
-    if (n == 0 && bound->drops.load() == 0) {
+    const uint64_t dropped = bound->drops.load();
+    if (n == 0 && dropped == 0) {
       continue;
     }
     const double in = static_cast<double>(bound->in_bytes.load());
     const double out = static_cast<double>(bound->out_bytes.load());
-    os << "\n  " << topic << " [" << bound->transform_name << "]: " << n << " samples, " << bound->drops.load()
-       << " drops, ratio " << (out > 0 ? in / out : 0.0) << ", " << (n ? bound->micros.load() / n : 0) << " us/sample";
+    os << "\n  " << topic << " [" << bound->transform_name << "]: " << n << " samples, " << dropped << " drops, ratio "
+       << (out > 0 ? in / out : 0.0) << ", " << (n ? bound->micros.load() / n : 0) << " us/sample";
   }
   return os.str();
 }

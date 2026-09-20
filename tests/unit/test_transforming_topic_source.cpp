@@ -19,6 +19,7 @@
 
 #include <gtest/gtest.h>
 
+#include "fake_transform.hpp"
 #include "pj_bridge/transforming_topic_source.hpp"
 
 using namespace pj_bridge;
@@ -40,23 +41,11 @@ class StubSource : public TopicSourceInterface {
   }
 };
 
-class PassThrough : public MessageTransform {
- public:
-  tl::expected<void, std::string> apply(std::span<const std::byte> in, std::vector<std::byte>& out) override {
-    out.assign(in.begin(), in.end());
-    return {};
-  }
-};
-
 std::shared_ptr<TransformSet> make_set() {
-  TransformFactory f;
-  f.accepts = [](const std::string& t) { return t == "pkg/msg/In"; };
-  f.check_params = [](const nlohmann::json&) -> tl::expected<void, std::string> { return {}; };
-  f.output_type = [](const std::string&) { return std::string("pkg/msg/Out"); };
-  f.output_schema = [](const std::string&, const std::string& s) { return "OUT:" + s; };
-  f.create = [](const std::string&, const nlohmann::json&) { return std::make_unique<PassThrough>(); };
-  nlohmann::json profile = {{"transforms", {{{"match_type", "pkg/msg/In"}, {"transform", "t"}}}}};
-  return TransformSet::create(profile, {{"t", f}}).value();
+  return TransformSet::create(
+             test_helpers::rule({{"match_type", "pkg/msg/In"}, {"transform", "t"}}),
+             {{"t", test_helpers::fake_factory("pkg/msg/In")}})
+      .value();
 }
 }  // namespace
 

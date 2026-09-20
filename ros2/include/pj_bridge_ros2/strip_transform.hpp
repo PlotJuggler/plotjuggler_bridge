@@ -19,12 +19,16 @@
 
 #pragma once
 
-#include "pj_bridge/message_transform.hpp"
+#include "pj_bridge/transform_set.hpp"
 
 namespace pj_bridge {
 
 /// `strip` transform: MessageStripper behind the MessageTransform interface.
 /// Output type and schema equal the input's. Takes no params.
 TransformFactory make_strip_transform_factory();
+
+/// What `strip_large_messages: true` means: one `strip` rule per strippable
+/// type, appended after whatever rules `transforms` already holds.
+tl::expected<void, std::string> append_strip_rules(TransformSet& transforms);
 
 }  // namespace pj_bridge

@@ -85,14 +85,14 @@ class MessageTransform {
   /// the client was told the output type at subscribe time.
   virtual tl::expected<void, std::string> apply(
       std::span<const std::byte> in, std::vector<std::byte>& out) = 0;
+  /// What clients are told they receive. Defaults: unchanged (as for `strip`).
+  virtual std::string output_type(const std::string& source_type) const;
+  virtual std::string output_schema(const std::string& source_schema) const;
 };
 
 struct TransformFactory {
   std::function<bool(const std::string& source_type)> accepts;
   std::function<tl::expected<void, std::string>(const nlohmann::json& params)> check_params;
-  std::function<std::string(const std::string& source_type)> output_type;
-  std::function<std::string(const std::string& source_type,
-                            const std::string& source_schema)> output_schema;
   std::function<std::unique_ptr<MessageTransform>(const std::string& source_type,
                                                   const nlohmann::json& params)> create;
 };

@@ -31,7 +31,7 @@ Forthcoming
   microseconds/sample) logged with the final statistics at shutdown.
 * The project now requires **C++20** (``std::span``, and ``cloudini_lib``'s
   PUBLIC ``cxx_std_20`` requirement).
-* 302 unit tests passing.
+* 303 unit tests passing.
 
 0.10.0 (2026-09-20)
 -------------------

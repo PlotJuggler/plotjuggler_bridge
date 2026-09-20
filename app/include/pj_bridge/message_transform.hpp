@@ -42,6 +42,16 @@ class MessageTransform {
   /// On error the caller DROPS the sample. It must never forward `in` instead:
   /// the client was told the output type at subscribe time.
   virtual tl::expected<void, std::string> apply(std::span<const std::byte> in, std::vector<std::byte>& out) = 0;
+
+  /// Type name advertised to clients in place of `source_type`. Default: unchanged.
+  virtual std::string output_type(const std::string& source_type) const {
+    return source_type;
+  }
+
+  /// Schema advertised to clients, given the untransformed one. Default: unchanged.
+  virtual std::string output_schema(const std::string& source_schema) const {
+    return source_schema;
+  }
 };
 
 struct TransformFactory {
@@ -49,10 +59,6 @@ struct TransformFactory {
   std::function<bool(const std::string& source_type)> accepts;
   /// Reject unknown or malformed params. Called once per rule at startup.
   std::function<tl::expected<void, std::string>(const nlohmann::json& params)> check_params;
-  /// Type name advertised to clients in place of `source_type`.
-  std::function<std::string(const std::string& source_type)> output_type;
-  /// Schema advertised to clients. `source_schema` is the untransformed one.
-  std::function<std::string(const std::string& source_type, const std::string& source_schema)> output_schema;
   std::function<std::unique_ptr<MessageTransform>(const std::string& source_type, const nlohmann::json& params)> create;
 };
 

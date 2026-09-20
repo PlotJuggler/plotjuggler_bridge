@@ -83,6 +83,14 @@ class CloudiniTransform : public MessageTransform {
     }
   }
 
+  std::string output_type(const std::string&) const override {
+    return compressed_schema_name;
+  }
+
+  std::string output_schema(const std::string&) const override {
+    return compressed_schema_data;
+  }
+
  private:
   float resolution_;
   bool viz_preprocessing_;
@@ -123,8 +131,6 @@ TransformFactory make_cloudini_transform_factory() {
   TransformFactory f;
   f.accepts = [](const std::string& type) { return type == kPointCloud2; };
   f.check_params = check_cloudini_params;
-  f.output_type = [](const std::string&) { return std::string(compressed_schema_name); };
-  f.output_schema = [](const std::string&, const std::string&) { return std::string(compressed_schema_data); };
   f.create = [](const std::string&, const nlohmann::json& params) {
     return std::make_unique<CloudiniTransform>(params);
   };

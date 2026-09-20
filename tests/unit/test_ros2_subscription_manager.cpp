@@ -21,13 +21,14 @@
 
 #include <atomic>
 #include <chrono>
+#include <functional>
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/image.hpp>
 #include <std_msgs/msg/string.hpp>
 #include <thread>
 
+#include "fake_transform.hpp"
 #include "pj_bridge/transform_set.hpp"
-#include "pj_bridge_ros2/message_stripper.hpp"
 #include "pj_bridge_ros2/ros2_subscription_manager.hpp"
 #include "pj_bridge_ros2/strip_transform.hpp"
 
@@ -41,10 +42,23 @@ std::shared_ptr<TransformSet> strip_everything() {
   auto set = TransformSet::create(
                  nlohmann::json{{"transforms", nlohmann::json::array()}}, {{"strip", make_strip_transform_factory()}})
                  .value();
-  for (const auto& type : MessageStripper::strippable_types()) {
-    EXPECT_TRUE(set->append_type_rule(type, "strip").has_value());
-  }
+  EXPECT_TRUE(append_strip_rules(*set).has_value());
   return set;
+}
+
+// Publish `msg` and spin until `done()` or 5 s have passed.
+template <typename MsgT>
+void publish_until(
+    const rclcpp::Node::SharedPtr& node, const typename rclcpp::Publisher<MsgT>::SharedPtr& publisher, const MsgT& msg,
+    const std::function<bool()>& done) {
+  rclcpp::executors::SingleThreadedExecutor executor;
+  executor.add_node(node);
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  while (!done() && std::chrono::steady_clock::now() < deadline) {
+    publisher->publish(msg);
+    executor.spin_some();
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
 }
 
 // Publish an Image with a large data payload through the manager and return
@@ -76,15 +90,7 @@ size_t roundtrip_image_bytes(std::shared_ptr<TransformSet> transforms, bool use_
   img.encoding = "rgb8";
   img.data.assign(static_cast<size_t>(img.height) * img.step, 0xAB);
 
-  rclcpp::executors::SingleThreadedExecutor executor;
-  executor.add_node(node);
-
-  auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
-  while (received_size.load() == 0 && std::chrono::steady_clock::now() < deadline) {
-    publisher->publish(img);
-    executor.spin_some();
-    std::this_thread::sleep_for(std::chrono::milliseconds(10));
-  }
+  publish_until<sensor_msgs::msg::Image>(node, publisher, img, [&] { return received_size.load() != 0; });
 
   manager->unsubscribe_all();
   return received_size.load();
@@ -130,25 +136,11 @@ TEST_F(Ros2SubscriptionManagerTest, OptInStrippingRemovesData) {
 // output type) and forwards whatever bytes the bound transform produces.
 // ---------------------------------------------------------------------------
 TEST_F(Ros2SubscriptionManagerTest, SubscribesWithSourceTypeAndForwardsTransformedBytes) {
-  // A transform whose output type differs from the source type: the manager is
-  // asked to subscribe with the ADVERTISED type and must use the source type.
-  TransformFactory f;
-  f.accepts = [](const std::string& t) { return t == "std_msgs/msg/String"; };
-  f.check_params = [](const nlohmann::json&) -> tl::expected<void, std::string> { return {}; };
-  f.output_type = [](const std::string&) { return std::string("fake_msgs/msg/Out"); };
-  f.output_schema = [](const std::string&, const std::string& s) { return s; };
-  f.create = [](const std::string&, const nlohmann::json&) -> std::unique_ptr<MessageTransform> {
-    struct Marker : MessageTransform {
-      tl::expected<void, std::string> apply(std::span<const std::byte>, std::vector<std::byte>& out) override {
-        out.assign(3, std::byte{0x5A});
-        return {};
-      }
-    };
-    return std::make_unique<Marker>();
-  };
+  // The output type differs from the source type: the manager is asked to
+  // subscribe with the ADVERTISED type and must use the source type.
   auto set = TransformSet::create(
-                 nlohmann::json{{"transforms", {{{"match_topic", "/transform_me"}, {"transform", "marker"}}}}},
-                 {{"marker", f}})
+                 test_helpers::rule({{"match_topic", "/transform_me"}, {"transform", "fake"}}),
+                 {{"fake", test_helpers::fake_factory("std_msgs/msg/String", "fake_msgs/msg/Out")}})
                  .value();
   ASSERT_NE(set->bind("/transform_me", "std_msgs/msg/String"), nullptr);  // what get_topics would have done
 
@@ -164,40 +156,20 @@ TEST_F(Ros2SubscriptionManagerTest, SubscribesWithSourceTypeAndForwardsTransform
   auto publisher = node->create_publisher<std_msgs::msg::String>("/transform_me", rclcpp::QoS(10));
   std_msgs::msg::String msg;
   msg.data = "hello";
+  publish_until<std_msgs::msg::String>(node, publisher, msg, [&] { return !received.empty(); });
 
-  rclcpp::executors::SingleThreadedExecutor executor;
-  executor.add_node(node);
-
-  auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
-  while (received.empty() && std::chrono::steady_clock::now() < deadline) {
-    publisher->publish(msg);
-    executor.spin_some();
-    std::this_thread::sleep_for(std::chrono::milliseconds(10));
-  }
-
-  EXPECT_EQ(received, std::vector<std::byte>(3, std::byte{0x5A}));
+  ASSERT_FALSE(received.empty());
+  EXPECT_EQ(received.back(), std::byte{0xAB});  // FakeTransform's marker: the transform ran
 }
 
 // The client was told the output type at subscribe time, so a sample whose
 // transform fails must be dropped, never forwarded untransformed.
 TEST_F(Ros2SubscriptionManagerTest, FailedTransformDropsTheSample) {
-  TransformFactory f;
-  f.accepts = [](const std::string& t) { return t == "std_msgs/msg/String"; };
-  f.check_params = [](const nlohmann::json&) -> tl::expected<void, std::string> { return {}; };
-  f.output_type = [](const std::string& t) { return t; };
-  f.output_schema = [](const std::string&, const std::string& s) { return s; };
-  f.create = [](const std::string&, const nlohmann::json&) -> std::unique_ptr<MessageTransform> {
-    struct Failing : MessageTransform {
-      tl::expected<void, std::string> apply(std::span<const std::byte>, std::vector<std::byte>&) override {
-        return tl::make_unexpected(std::string("boom"));
-      }
-    };
-    return std::make_unique<Failing>();
-  };
-  auto set = TransformSet::create(
-                 nlohmann::json{{"transforms", {{{"match_topic", "/always_fails"}, {"transform", "failing"}}}}},
-                 {{"failing", f}})
-                 .value();
+  auto set =
+      TransformSet::create(
+          test_helpers::rule({{"match_topic", "/always_fails"}, {"transform", "fake"}, {"params", {{"fail", true}}}}),
+          {{"fake", test_helpers::fake_factory("std_msgs/msg/String", "std_msgs/msg/String")}})
+          .value();
   auto bound = set->bind("/always_fails", "std_msgs/msg/String");
   ASSERT_NE(bound, nullptr);
 
@@ -211,15 +183,7 @@ TEST_F(Ros2SubscriptionManagerTest, FailedTransformDropsTheSample) {
   auto publisher = node->create_publisher<std_msgs::msg::String>("/always_fails", rclcpp::QoS(10));
   std_msgs::msg::String msg;
   msg.data = "hello";
-  rclcpp::executors::SingleThreadedExecutor executor;
-  executor.add_node(node);
-
-  auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
-  while (bound->drops.load() < 3 && std::chrono::steady_clock::now() < deadline) {
-    publisher->publish(msg);
-    executor.spin_some();
-    std::this_thread::sleep_for(std::chrono::milliseconds(10));
-  }
+  publish_until<std_msgs::msg::String>(node, publisher, msg, [&] { return bound->drops.load() >= 3; });
 
   EXPECT_GE(bound->drops.load(), 3u);
   EXPECT_EQ(forwarded.load(), 0);

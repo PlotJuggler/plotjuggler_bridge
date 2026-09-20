@@ -66,10 +66,17 @@ TransformFactory make_strip_transform_factory() {
     }
     return {};
   };
-  f.output_type = [](const std::string& type) { return type; };
-  f.output_schema = [](const std::string&, const std::string& schema) { return schema; };
   f.create = [](const std::string& type, const nlohmann::json&) { return std::make_unique<StripTransform>(type); };
   return f;
+}
+
+tl::expected<void, std::string> append_strip_rules(TransformSet& transforms) {
+  for (const auto& type : MessageStripper::strippable_types()) {
+    if (auto added = transforms.append_type_rule(type, "strip"); !added) {
+      return added;
+    }
+  }
+  return {};
 }
 
 }  // namespace pj_bridge

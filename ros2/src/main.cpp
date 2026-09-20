@@ -24,6 +24,7 @@
 #include <memory>
 #include <optional>
 #include <rclcpp/rclcpp.hpp>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <vector>
@@ -36,10 +37,49 @@
 #include "pj_bridge/transform_set.hpp"
 #include "pj_bridge/transforming_topic_source.hpp"
 #include "pj_bridge/whitelist_filter.hpp"
-#include "pj_bridge_ros2/message_stripper.hpp"
 #include "pj_bridge_ros2/ros2_subscription_manager.hpp"
 #include "pj_bridge_ros2/ros2_topic_source.hpp"
 #include "pj_bridge_ros2/strip_transform.hpp"
+
+namespace {
+
+// The rules of `profile_path` followed by the strip_large_messages sugar, or
+// nullptr when neither is set. Throws on any profile error: main() exits 1.
+std::shared_ptr<pj_bridge::TransformSet> load_transforms(const std::string& profile_path, bool strip_large_messages) {
+  if (profile_path.empty() && !strip_large_messages) {
+    return nullptr;
+  }
+  nlohmann::json profile = {{"transforms", nlohmann::json::array()}};
+  if (!profile_path.empty()) {
+    std::ifstream file(profile_path);
+    if (!file) {
+      throw std::runtime_error("Cannot open transform_profile '" + profile_path + "'");
+    }
+    profile = nlohmann::json::parse(file, nullptr, /*allow_exceptions=*/false);
+    if (profile.is_discarded()) {
+      throw std::runtime_error("transform_profile '" + profile_path + "' is not valid JSON");
+    }
+  }
+
+  pj_bridge::TransformSet::FactoryMap factories;
+  factories["strip"] = pj_bridge::make_strip_transform_factory();
+#ifdef PJ_BRIDGE_HAS_CLOUDINI
+  factories["cloudini"] = pj_bridge::make_cloudini_transform_factory();
+#endif
+
+  auto transforms = pj_bridge::TransformSet::create(profile, std::move(factories));
+  if (!transforms) {
+    throw std::runtime_error(transforms.error());
+  }
+  if (strip_large_messages) {  // after the profile's rules, so an explicit rule wins
+    if (auto added = pj_bridge::append_strip_rules(**transforms); !added) {
+      throw std::runtime_error(added.error());
+    }
+  }
+  return *transforms;
+}
+
+}  // namespace
 
 int main(int argc, char** argv) {
   rclcpp::init(argc, argv);
@@ -156,47 +196,8 @@ int main(int argc, char** argv) {
     // Create backend components
     std::shared_ptr<pj_bridge::TopicSourceInterface> topic_source = std::make_shared<pj_bridge::Ros2TopicSource>(node);
 
-    std::shared_ptr<pj_bridge::TransformSet> transforms;
-    if (!transform_profile.empty() || strip_large_messages) {
-      nlohmann::json profile = {{"transforms", nlohmann::json::array()}};
-      if (!transform_profile.empty()) {
-        std::ifstream file(transform_profile);
-        if (!file) {
-          RCLCPP_ERROR(node->get_logger(), "Cannot open transform_profile '%s'", transform_profile.c_str());
-          rclcpp::shutdown();
-          return 1;
-        }
-        profile = nlohmann::json::parse(file, nullptr, /*allow_exceptions=*/false);
-        if (profile.is_discarded()) {
-          RCLCPP_ERROR(node->get_logger(), "transform_profile '%s' is not valid JSON", transform_profile.c_str());
-          rclcpp::shutdown();
-          return 1;
-        }
-      }
-
-      pj_bridge::TransformSet::FactoryMap factories;
-      factories["strip"] = pj_bridge::make_strip_transform_factory();
-#ifdef PJ_BRIDGE_HAS_CLOUDINI
-      factories["cloudini"] = pj_bridge::make_cloudini_transform_factory();
-#endif
-
-      auto created = pj_bridge::TransformSet::create(profile, std::move(factories));
-      if (!created) {
-        RCLCPP_ERROR(node->get_logger(), "%s", created.error().c_str());
-        rclcpp::shutdown();
-        return 1;
-      }
-      transforms = *created;
-
-      if (strip_large_messages) {  // after the profile's rules, so an explicit rule wins
-        for (const auto& type : pj_bridge::MessageStripper::strippable_types()) {
-          // append_type_rule() is [[nodiscard]]; failure here would mean "strip" no longer
-          // accepts one of its own strippable_types(), which should never happen.
-          if (auto added = transforms->append_type_rule(type, "strip"); !added) {
-            RCLCPP_ERROR(node->get_logger(), "strip_large_messages: %s", added.error().c_str());
-          }
-        }
-      }
+    auto transforms = load_transforms(transform_profile, strip_large_messages);
+    if (transforms) {
       topic_source = std::make_shared<pj_bridge::TransformingTopicSource>(topic_source, transforms);
     }
 

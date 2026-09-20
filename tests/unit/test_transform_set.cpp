@@ -1,56 +1,23 @@
 #include <gtest/gtest.h>
+#include <spdlog/sinks/ostream_sink.h>
+#include <spdlog/spdlog.h>
 
 #include <atomic>
+#include <sstream>
 #include <stdexcept>
 #include <thread>
 
+#include "fake_transform.hpp"
 #include "pj_bridge/transform_set.hpp"
 
 using namespace pj_bridge;
+using namespace pj_bridge::test_helpers;
 using nlohmann::json;
 
 namespace {
 
-/// Appends one marker byte to the input. `fail` makes apply() return an error.
-class FakeTransform : public MessageTransform {
- public:
-  explicit FakeTransform(bool fail) : fail_(fail) {}
-  tl::expected<void, std::string> apply(std::span<const std::byte> in, std::vector<std::byte>& out) override {
-    if (fail_) {
-      return tl::make_unexpected(std::string("boom"));
-    }
-    out.assign(in.begin(), in.end());
-    out.push_back(std::byte{0xAB});
-    return {};
-  }
-
- private:
-  bool fail_;
-};
-
-TransformFactory fake_factory(const std::string& accepted_type) {
-  TransformFactory f;
-  f.accepts = [accepted_type](const std::string& t) { return t == accepted_type; };
-  f.check_params = [](const json& p) -> tl::expected<void, std::string> {
-    for (auto it = p.begin(); it != p.end(); ++it) {
-      if (it.key() != "fail") {
-        return tl::make_unexpected("unknown param '" + it.key() + "'");
-      }
-    }
-    return {};
-  };
-  f.output_type = [](const std::string&) { return std::string("pkg/msg/Out"); };
-  f.output_schema = [](const std::string&, const std::string& s) { return "OUT:" + s; };
-  f.create = [](const std::string&, const json& p) { return std::make_unique<FakeTransform>(p.value("fail", false)); };
-  return f;
-}
-
 TransformSet::FactoryMap factories() {
   return {{"fake", fake_factory("pkg/msg/In")}, {"other", fake_factory("pkg/msg/Other")}};
-}
-
-json rule(json fields) {
-  return json{{"transforms", json::array({std::move(fields)})}};
 }
 
 }  // namespace
@@ -176,6 +143,35 @@ TEST(TransformSetTest, RunIsSafeConcurrentlyWithBindFindAndStats) {
   stop = true;
   ingest.join();
   EXPECT_GT(bound->samples.load(), 0u);
+}
+
+// One log-once set serves two conditions. A "does not accept" warning for a
+// topic must not swallow the later, more serious "could not be set up" error.
+TEST(TransformSetTest, SkippedRuleWarningDoesNotHideALaterSetupError) {
+  std::ostringstream captured;
+  auto previous = spdlog::default_logger();
+  spdlog::set_default_logger(
+      std::make_shared<spdlog::logger>("capture", std::make_shared<spdlog::sinks::ostream_sink_mt>(captured)));
+
+  auto broken = fake_factory("pkg/msg/In");
+  broken.create = [](const std::string&, const json&) -> std::unique_ptr<MessageTransform> {
+    throw std::runtime_error("no codec");
+  };
+  json profile = {
+      {"transforms", json::array(
+                         {{{"match_topic", "/a"}, {"transform", "other"}},  // accepts Other only
+                          {{"match_type", "pkg/msg/In"}, {"transform", "broken"}}})}};
+  auto set = TransformSet::create(profile, {{"other", fake_factory("pkg/msg/Other")}, {"broken", broken}});
+  ASSERT_TRUE(set.has_value()) << set.error();
+
+  EXPECT_EQ((*set)->bind("/a", "pkg/msg/In"), nullptr);
+  (*set)->bind("/a", "pkg/msg/In");  // second poll: nothing new may be logged
+  spdlog::set_default_logger(previous);
+
+  const std::string log = captured.str();
+  EXPECT_NE(log.find("does not accept"), std::string::npos) << log;
+  EXPECT_NE(log.find("could not be set up"), std::string::npos) << log;
+  EXPECT_EQ(log.find("could not be set up"), log.rfind("could not be set up")) << "logged more than once:\n" << log;
 }
 
 TEST(TransformSetTest, RebindsWhenSourceTypeChanges) {

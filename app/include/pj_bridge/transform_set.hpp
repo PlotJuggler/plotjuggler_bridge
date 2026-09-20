@@ -29,6 +29,7 @@
 #include <set>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "pj_bridge/message_transform.hpp"
@@ -73,9 +74,6 @@ class TransformSet {
   /// Binding previously created by bind(), or nullptr.
   std::shared_ptr<BoundTransform> find(const std::string& topic) const;
 
-  /// Schema to advertise for a bound topic.
-  std::string output_schema(const BoundTransform& bound, const std::string& source_schema) const;
-
   /// One line per bound topic that processed at least one sample.
   std::string stats_summary() const;
 
@@ -84,17 +82,18 @@ class TransformSet {
     std::optional<std::string> match_type;
     std::optional<std::regex> match_topic;
     std::string transform;
-    nlohmann::json params;
+    nlohmann::json params = nlohmann::json::object();
   };
 
   TransformSet() = default;
   tl::expected<void, std::string> add_rule(Rule rule);
+  bool log_once(const std::string& topic, const std::string& transform);
 
   FactoryMap factories_;
   std::vector<Rule> rules_;
   mutable std::mutex mutex_;
   std::unordered_map<std::string, std::shared_ptr<BoundTransform>> bindings_;
-  std::set<std::string> warned_topics_;
+  std::set<std::pair<std::string, std::string>> logged_;  // (topic, transform) already reported
 };
 
 }  // namespace pj_bridge

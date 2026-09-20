@@ -92,8 +92,10 @@ endif()
 option(PJ_BRIDGE_FETCH_CLOUDINI "Fetch Cloudini when cloudini_lib is not installed" ON)
 # 1.2 introduced the v5 codec and applyVizLossyPreprocessing used by the transform.
 find_package(cloudini_lib 1.2 QUIET)
-if(NOT cloudini_lib_FOUND AND PJ_BRIDGE_FETCH_CLOUDINI)
-  message(STATUS "cloudini_lib not found — fetching via FetchContent")
+
+# Builds Cloudini as a plain static library inside this project. A function, so
+# that everything set() below is scoped to Cloudini's directory and needs no restoring.
+function(pj_bridge_fetch_cloudini)
   FetchContent_Declare(
     cloudini
     URL https://github.com/facontidavide/cloudini/archive/refs/tags/1.3.0.tar.gz
@@ -107,38 +109,35 @@ if(NOT cloudini_lib_FOUND AND PJ_BRIDGE_FETCH_CLOUDINI)
   set(CLOUDINI_FORCE_VENDORED_DEPS OFF CACHE BOOL "" FORCE)
   set(CMAKE_DISABLE_FIND_PACKAGE_zstd ON)
   # Cloudini becomes a SHARED ament package (install rules, ament_package()) when
-  # it finds ament_cmake. Hide it while its directory is processed: we want the
-  # plain static library, and EXCLUDE_FROM_ALL keeps its install rules out of ours.
-  set(_pj_build_testing ${BUILD_TESTING})
-  set(BUILD_TESTING OFF)
+  # it finds ament_cmake: hide it. The disabled find_package() leaves our own
+  # earlier result in place, hence ament_cmake_FOUND as well.
   set(CMAKE_DISABLE_FIND_PACKAGE_ament_cmake ON)
-  set(_pj_ament_cmake_found ${ament_cmake_FOUND})
-  set(ament_cmake_FOUND FALSE)  # the disabled find_package() leaves our earlier result in place
-  set(_pj_build_shared_libs ${BUILD_SHARED_LIBS})
+  set(ament_cmake_FOUND FALSE)
   set(BUILD_SHARED_LIBS OFF)
+  set(BUILD_TESTING OFF)
   set(CMAKE_DISABLE_FIND_PACKAGE_PCL ON)  # optional in Cloudini; would become a PUBLIC link dependency of ours
-  set(_pj_build_type "${CMAKE_BUILD_TYPE}")
-  FetchContent_GetProperties(cloudini)
-  if(NOT cloudini_POPULATED)
-    if(POLICY CMP0169)
-      cmake_policy(SET CMP0169 OLD)  # FetchContent_Populate: needed for add_subdirectory(EXCLUDE_FROM_ALL) before CMake 3.28
-    endif()
-    FetchContent_Populate(cloudini)
-    add_subdirectory(${cloudini_SOURCE_DIR}/cloudini_lib ${cloudini_BINARY_DIR} EXCLUDE_FROM_ALL)
+  set(build_type_was_set "${CMAKE_BUILD_TYPE}")
+
+  # FetchContent_Populate + add_subdirectory(EXCLUDE_FROM_ALL) keeps Cloudini's
+  # install rules out of ours; FetchContent_Declare(EXCLUDE_FROM_ALL) needs CMake 3.28.
+  if(POLICY CMP0169)
+    cmake_policy(SET CMP0169 OLD)
   endif()
-  if(NOT _pj_build_type)  # Cloudini forces Release into the cache when no build type is set
+  FetchContent_Populate(cloudini)
+  add_subdirectory(${cloudini_SOURCE_DIR}/cloudini_lib ${cloudini_BINARY_DIR} EXCLUDE_FROM_ALL)
+
+  if(NOT build_type_was_set)  # Cloudini forces Release into the cache when no build type is set
     unset(CMAKE_BUILD_TYPE CACHE)
   endif()
-  set(CMAKE_DISABLE_FIND_PACKAGE_PCL OFF)
-  set(BUILD_SHARED_LIBS ${_pj_build_shared_libs})
-  set(ament_cmake_FOUND ${_pj_ament_cmake_found})
-  set(CMAKE_DISABLE_FIND_PACKAGE_zstd OFF)
-  set(CMAKE_DISABLE_FIND_PACKAGE_ament_cmake OFF)
-  set(BUILD_TESTING ${_pj_build_testing})
   set_target_properties(cloudini_lib PROPERTIES POSITION_INDEPENDENT_CODE ON)
   if(NOT TARGET cloudini::cloudini_lib)
     add_library(cloudini::cloudini_lib ALIAS cloudini_lib)
   endif()
+endfunction()
+
+if(NOT cloudini_lib_FOUND AND PJ_BRIDGE_FETCH_CLOUDINI)
+  message(STATUS "cloudini_lib not found — fetching via FetchContent")
+  pj_bridge_fetch_cloudini()
   set(cloudini_lib_FOUND TRUE)
 endif()
 

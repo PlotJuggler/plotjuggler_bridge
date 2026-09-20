@@ -60,15 +60,14 @@ TEST(CloudiniTransformTest, CompressesPointCloud2) {
   auto factory = make_cloudini_transform_factory();
   EXPECT_TRUE(factory.accepts("sensor_msgs/msg/PointCloud2"));
   EXPECT_FALSE(factory.accepts("sensor_msgs/msg/Image"));
-  EXPECT_EQ(factory.output_type("sensor_msgs/msg/PointCloud2"), "point_cloud_interfaces/msg/CompressedPointCloud2");
-  EXPECT_NE(factory.output_schema("sensor_msgs/msg/PointCloud2", "").find("format"), std::string::npos);
-
   const nlohmann::json params = {{"resolution", 0.001}};
   ASSERT_TRUE(factory.check_params(params).has_value());
   EXPECT_FALSE(factory.check_params({{"resolutoin", 0.001}}).has_value());
   EXPECT_FALSE(factory.check_params({{"resolution", -1.0}}).has_value());
 
   auto transform = factory.create("sensor_msgs/msg/PointCloud2", params);
+  EXPECT_EQ(transform->output_type("sensor_msgs/msg/PointCloud2"), "point_cloud_interfaces/msg/CompressedPointCloud2");
+  EXPECT_NE(transform->output_schema("").find("format"), std::string::npos);
   const auto in = make_cloud_cdr(10000);
   std::vector<std::byte> out;
   ASSERT_TRUE(transform->apply(in, out).has_value());
