@@ -92,6 +92,15 @@ fully match any whitelist pattern are omitted from the response entirely (see
 }
 ```
 
+A topic rewritten by a [message transform](#message-transforms-ros2-only) is
+advertised with its transform **output** type, plus an extra `source_type`
+field carrying the original type:
+
+```json
+{"name": "/lidar/points", "type": "point_cloud_interfaces/msg/CompressedPointCloud2",
+ "source_type": "sensor_msgs/msg/PointCloud2"}
+```
+
 ### Server identity and capabilities (`server`)
 
 Every `get_topics` response carries a `server` object:
@@ -100,7 +109,8 @@ Every `get_topics` response carries a `server` object:
 {"server": {"name": "pj_bridge", "version": "0.10.0",
             "capabilities": ["include_schemas", "latched_badge",
                              "latched_replay", "topics_changed",
-                             "per_topic_rate_limit", "size_class_frames"]}}
+                             "per_topic_rate_limit", "size_class_frames",
+                             "message_transforms"]}}
 ```
 
 Compatibility policy for clients:
@@ -242,6 +252,160 @@ the reader depth (`min_qos_depth`) covers a burst.
 
 Publish/request/session-timeout timers run on their own executor thread so a
 long publish (zstd-compression) cycle never delays ingest.
+
+## Message Transforms (ROS2 only)
+
+The server operator can configure per-topic transforms that replace a
+topic's payload — and, optionally, its type — before it is buffered and
+sent. This is operator-only configuration: there is no per-client
+negotiation, and a transformed topic is transformed for **all** subscribers
+or none. With no profile configured and `strip_large_messages: false`, no
+transform machinery is created at all and behavior/wire output are
+byte-identical to a server without this feature.
+
+- **ROS2**: string parameter `transform_profile`, default `""` (disabled),
+  pointing to a JSON profile file.
+
+Advertised by the `message_transforms` capability (always present in
+`server.capabilities`, whether or not a profile is configured).
+
+### Wire protocol
+
+Unchanged. A transformed topic is simply advertised with its transform's
+**output** type instead of its real one:
+
+- `get_topics` entries carry the output `type`, plus an optional
+  `source_type` field with the original type (see
+  [Get Topics](#get-topics)).
+- `subscribe` returns the output schema (`encoding` + `definition`) for that
+  topic — a client never sees the source schema.
+- `topics_changed` `added` entries carry the output `type` only; they do
+  **not** carry `source_type` in this version (see
+  [Pushed Topic Advertisement](#pushed-topic-advertisement-topics_changed)).
+
+Everything downstream — latched replay, size-class framing, rate limiting,
+the binary frame format — operates on the transformed bytes with no special
+case; a transform is invisible past the subscription layer.
+
+Client requirement: a client that subscribes to a transformed topic needs a
+parser for the **output** type. In particular, older PlotJuggler clients
+without a `CompressedPointCloud2` parser see a topic they cannot decode —
+enabling the `cloudini` transform on a topic is the operator's call to make
+for their fleet of clients.
+
+### Profile format
+
+```json
+{
+  "transforms": [
+    {
+      "match_type": "sensor_msgs/msg/PointCloud2",
+      "match_topic": "/lidar/.*",
+      "transform": "cloudini",
+      "params": {"resolution": 0.001, "fields": {"intensity": 0.01}, "viz_preprocessing": true}
+    }
+  ]
+}
+```
+
+See also `docs/transform_profile.example.json`.
+
+Each rule in `transforms` needs at least one of:
+
+- `match_type` — the topic's type, matched **exactly**.
+- `match_topic` — full-match ECMAScript regex against the topic name, same
+  semantics as [`topic_whitelist`](#topic-whitelist) (`std::regex_match`,
+  not a substring search).
+
+When both are present, **both** must match. Rules are evaluated in order
+and the **first match wins** — later rules are never consulted for a topic
+once one has matched (successfully or not; see below).
+
+A rule that matches a topic by `match_topic` only (no `match_type`) whose
+named transform does not accept that topic's actual type is **skipped**: a
+one-time warning is logged for that topic and evaluation continues with the
+next rule. A `match_type` rule can never hit this case — `TransformSet`
+rejects a rule at startup whose transform does not accept its declared
+`match_type` (see below).
+
+### `strip_large_messages` interaction
+
+`strip_large_messages: true` is sugar for one `strip` rule per strippable
+type (`sensor_msgs/msg/Image`, `sensor_msgs/msg/CompressedImage`,
+`sensor_msgs/msg/PointCloud2`, `sensor_msgs/msg/LaserScan`,
+`nav_msgs/msg/OccupancyGrid`), appended **after** the profile's own rules —
+so an explicit rule in `transform_profile` for one of those types always
+wins over the boolean.
+
+### Startup errors
+
+The server refuses to start (exits with a non-zero status) on any of:
+
+- `transform_profile` names a file that cannot be opened/read.
+- The file is not valid JSON.
+- An unknown top-level key (anything other than `transforms`).
+- An unknown or mistyped rule key (e.g. `params` that isn't an object).
+- A rule with neither `match_type` nor `match_topic`.
+- A rule missing `transform`.
+- A rule naming an unknown transform — including `cloudini` in a build
+  without Cloudini compiled in (see `CLAUDE.md` / `README.md` for the build
+  configuration).
+- An invalid `match_topic` regex.
+- Params rejected by the transform (unknown key, wrong type, out-of-range
+  value).
+- A `match_type` rule whose transform does not accept that type.
+
+### Runtime behavior
+
+If `apply()` fails for a message (bad/unexpected input, codec exception),
+the sample is **dropped** — it is never forwarded untransformed, because
+the client was told the output type/schema at subscribe time. Drops are
+counted per topic and logged with a throttled warning (1st, 2nd, 4th, 8th…
+occurrence).
+
+**Behavior change:** this also applies to `strip` messages. Previously,
+a stripping failure forwarded the original, unstripped message; as a
+transform, a `strip` failure now drops the sample instead (see
+`CHANGELOG.rst`).
+
+Per-topic transform statistics (sample count, drop count, compression
+ratio, mean microseconds/sample) are logged together with the server's
+final statistics at shutdown.
+
+### Transforms
+
+#### `strip`
+
+Thin wrapper around the pre-existing message-stripping behavior
+(`strip_large_messages`): output type and schema equal the input's, no
+params accepted.
+
+#### `cloudini`
+
+`sensor_msgs/msg/PointCloud2` → `point_cloud_interfaces/msg/CompressedPointCloud2`,
+using [Cloudini](https://github.com/facontidavide/cloudini) point cloud
+compression. **Lossy** at the configured resolution. Only registered when
+the server was built with Cloudini available; naming it in a profile on a
+build without it is a startup error. The output schema is embedded in
+Cloudini's own headers, so the robot does **not** need
+`point_cloud_interfaces` installed.
+
+Cloudini's own second compression stage is disabled — the bridge already
+ZSTD-compresses every outgoing frame, so a second codec-level compression
+stage would waste CPU for no benefit.
+
+Params (all optional):
+
+| Key | Default | Meaning |
+|---|---|---|
+| `resolution` | `0.001` | Quantization resolution (metres for `x`/`y`/`z`); must be `> 0` |
+| `fields` | `{}` | Per-field resolution override, `{name: resolution}`; `0` removes that field entirely |
+| `viz_preprocessing` | `false` | Drops NaN/inf points, voxel-deduplicates at the `xyz` resolution, and quantizes `FLOAT64` fields to 1 µs — a lossy preprocessing pass aimed at visualization, not lossless round-tripping |
+
+### Backend support
+
+Only wired for the ROS2 backend in this version; FastDDS and RTI do not
+apply transforms yet.
 
 ## Subscribe
 
@@ -486,6 +650,10 @@ additionally carries `encoding` + `definition` (the same fields as
   when at least one of them is non-empty.
 - A topic whose type changes (same name, different type) is reported as both
   removed and added.
+- `added` entries do **not** carry `source_type`, unlike `get_topics`
+  (see [Message Transforms](#message-transforms-ros2-only)): the poll that
+  builds them tracks a plain name → type map. Clients that need the source
+  type of a transformed topic should call `get_topics`.
 - **Per-topic schema failure never drops a topic** (same as `get_topics`): an
   `added` entry whose schema cannot be extracted is delivered with `name` +
   `type` only, no `encoding`/`definition`. Clients must treat the schema

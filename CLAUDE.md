@@ -69,6 +69,7 @@ make -j$(nproc)
 
 ### Code Quality
 
+- **C++ Standard**: C++20 (required for `std::span`, and because `cloudini_lib` exports `cxx_std_20` as a PUBLIC requirement)
 - **Thread Safety**: Use mutexes, document thread safety in class comments
 - **Testing**: Unit tests required for all core components (gtest)
 - **Code Formatting**: `pre-commit run -a` before committing (clang-format)
@@ -123,7 +124,7 @@ BridgeServer does NOT own timers. The entry point (`main.cpp`) drives the event 
 
 6. **Ros2TopicSource** (`ros2/`) — Wraps `TopicDiscovery` + `SchemaExtractor`. Schema encoding: `"ros2msg"`.
 
-7. **Ros2SubscriptionManager** (`ros2/`) — Wraps `GenericSubscriptionManager` + optional `MessageStripper`. Converts `rclcpp::SerializedMessage` → `shared_ptr<vector<byte>>` via memcpy.
+7. **Ros2SubscriptionManager** (`ros2/`) — Wraps `GenericSubscriptionManager`. On `subscribe()`, resolves the topic's `TransformSet` binding (if any) to find the real source type and subscribes with it; in the message callback, a bound transform's `apply()` runs on the rcl buffer before forwarding (replacing the old inline `MessageStripper` call — `strip` is now a transform, see item 13). Converts `rclcpp::SerializedMessage` → `shared_ptr<vector<byte>>` via memcpy (or via the transform's output when one is bound).
 
 8. **RtiTopicSource** (`rti/`) — Wraps `DdsTopicDiscovery`. Schema encoding: `"omgidl"`. (Build disabled)
 
@@ -132,6 +133,10 @@ BridgeServer does NOT own timers. The entry point (`main.cpp`) drives the event 
 10. **FastDdsTopicSource** (`fastdds/`) — Directly implements `TopicSourceInterface`. Discovers topics via `on_data_writer_discovery()`, resolves `DynamicType` from `TypeObjectRegistry`, generates IDL via `idl_serialize()`. Schema encoding: `"omgidl"`.
 
 11. **FastDdsSubscriptionManager** (`fastdds/`) — Directly implements `SubscriptionManagerInterface`. Creates `DataReader`s with `DynamicPubSubType`, deserializes into `DynamicData` and re-serializes to extract CDR bytes.
+
+12. **TransformSet** (`app/`) — Owns the ordered `transform_profile` rules, the transform name → `TransformFactory` map, and the per-topic `BoundTransform` instances (created lazily on first match, `first match wins`). Thread-safe: written from the request thread (`get_topics`/`subscribe`), read from the ingest thread. Also tracks per-topic transform statistics (samples, drops, compression ratio, µs/sample), logged at shutdown.
+
+13. **TransformingTopicSource** (`app/`) — Decorator over a `TopicSourceInterface`. Rewrites `get_topics()`/`get_schema()` to the transform's output type/schema for matched topics (recording `source_type`) and passes everything else through unchanged. `strip` and `cloudini` are the two built-in transforms (`ros2/src/strip_transform.cpp`, `app/src/cloudini_transform.cpp`); `strip` replaces the old inline `MessageStripper` call in `Ros2SubscriptionManager` (see item 7).
 
 ### Communication Pattern
 
@@ -181,6 +186,9 @@ Then, for each message in the (compressed) payload:
 - **nlohmann/json** — JSON (`find_package(REQUIRED)`)
 - **tl::expected** — error handling (header-only, vendored in 3rdparty/)
 
+### Core (optional)
+- **Cloudini** (`cloudini_lib`) — point cloud compression for the `cloudini` transform. `find_package(cloudini_lib)` first, else fetched at configure time (pinned tag `1.3.0`, static) unless `-DPJ_BRIDGE_FETCH_CLOUDINI=OFF`. A build with neither simply lacks the `cloudini` transform (`PJ_BRIDGE_HAS_CLOUDINI` undefined); `strip` and the rest of the transform machinery are unaffected.
+
 ### ROS2 Backend
 - `rclcpp`, `ament_index_cpp`, `ament_cmake`
 - `sensor_msgs`, `nav_msgs` (for message stripper)
@@ -197,7 +205,7 @@ Then, for each message in the (compressed) payload:
 
 ## Testing
 
-### Test Count: 231 unit tests across 11 test suites
+### Test Count: 301 unit tests
 
 ### Commands
 ```bash
@@ -233,6 +241,7 @@ port: 9090                     # WebSocket port
 publish_rate: 50.0             # Hz
 session_timeout: 10.0          # seconds
 strip_large_messages: false    # Opt-in: strip Image/PointCloud2/etc data fields
+transform_profile: ""          # Path to a per-topic message-transform profile JSON (e.g. Cloudini); empty disables
 topic_whitelist: [".*"]        # Full-match regex patterns restricting visible/subscribable topics
 min_qos_depth: 10              # Minimum KEEP_LAST subscription depth after aggregating publisher depths
 max_qos_depth: 100             # Maximum KEEP_LAST subscription depth after aggregating publisher depths
@@ -282,5 +291,5 @@ identity/capabilities object, and TLS setup).
 
 **Last Updated**: 2026-07-06
 **Project Phase**: Unified multi-backend architecture
-**Test Status**: 231 unit tests passing (all sanitizers clean)
+**Test Status**: 301 unit tests passing (all sanitizers clean)
 **Executables**: `pj_bridge_ros2` (ROS2), `pj_bridge_rti` (RTI DDS, disabled), `pj_bridge_fastdds` (FastDDS)

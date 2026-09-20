@@ -1,0 +1,9 @@
+{
+  "transforms": [
+    {
+      "match_type": "sensor_msgs/msg/PointCloud2",
+      "transform": "cloudini",
+      "params": {"resolution": 0.001, "viz_preprocessing": false}
+    }
+  ]
+}
