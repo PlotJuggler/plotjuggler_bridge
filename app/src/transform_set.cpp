@@ -107,8 +107,10 @@ tl::expected<std::shared_ptr<TransformSet>, std::string> TransformSet::create(
 }
 
 tl::expected<void, std::string> TransformSet::add_rule(Rule rule) {
-  if (!rule.match_type && !rule.match_topic) {
-    return tl::make_unexpected(std::string("needs match_type and/or match_topic"));
+  // Mandatory, so that a transform applied to a type it cannot handle is a
+  // startup error: topic types are only known once topics are discovered.
+  if (rule.match_type.empty()) {
+    return tl::make_unexpected(std::string("needs 'match_type' ('match_topic' can only narrow it)"));
   }
   if (rule.transform.empty()) {
     return tl::make_unexpected(std::string("missing 'transform'"));
@@ -120,8 +122,8 @@ tl::expected<void, std::string> TransformSet::add_rule(Rule rule) {
   if (auto ok = factory->second.check_params(rule.params); !ok) {
     return tl::make_unexpected("transform '" + rule.transform + "': " + ok.error());
   }
-  if (rule.match_type && !factory->second.accepts(*rule.match_type)) {
-    return tl::make_unexpected("transform '" + rule.transform + "' does not accept type '" + *rule.match_type + "'");
+  if (!factory->second.accepts(rule.match_type)) {
+    return tl::make_unexpected("transform '" + rule.transform + "' does not accept type '" + rule.match_type + "'");
   }
   std::lock_guard<std::mutex> lock(mutex_);
   rules_.push_back(std::move(rule));
@@ -154,21 +156,13 @@ std::shared_ptr<BoundTransform> TransformSet::bind(const std::string& topic, con
   // ponytail: unmatched topics re-run every rule on each call (once per topic poll);
   // cache the misses too if topics x rules ever shows up in a profile.
   for (const auto& rule : rules_) {
-    if (rule.match_type && *rule.match_type != source_type) {
+    if (rule.match_type != source_type) {
       continue;
     }
     if (rule.match_topic && !topic_matches(topic, *rule.match_topic)) {
       continue;
     }
-    const auto& factory = factories_.at(rule.transform);
-    if (!factory.accepts(source_type)) {
-      if (log_once(topic, rule.transform)) {
-        spdlog::warn(
-            "Transform '{}' matched topic '{}' but does not accept type '{}'; rule skipped", rule.transform, topic,
-            source_type);
-      }
-      continue;  // a later rule (e.g. the strip_large_messages sugar) may still apply
-    }
+    const auto& factory = factories_.at(rule.transform);  // accepts(match_type) was checked in add_rule()
 
     auto bound = std::make_shared<BoundTransform>();
     std::string error = "factory returned no transform";

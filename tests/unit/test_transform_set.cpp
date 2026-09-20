@@ -2,6 +2,7 @@
 #include <spdlog/sinks/ostream_sink.h>
 #include <spdlog/spdlog.h>
 
+#include <algorithm>
 #include <atomic>
 #include <sstream>
 #include <stdexcept>
@@ -46,9 +47,10 @@ TEST(TransformSetTest, TopicRegexIsFullMatchAndCombinesWithType) {
 
 TEST(TransformSetTest, FirstMatchingRuleWinsAndAppendedRulesComeLast) {
   json profile = {
-      {"transforms", json::array(
-                         {{{"match_topic", "/a"}, {"transform", "fake"}, {"params", {{"fail", true}}}},
-                          {{"match_type", "pkg/msg/In"}, {"transform", "fake"}}})}};
+      {"transforms",
+       json::array(
+           {{{"match_type", "pkg/msg/In"}, {"match_topic", "/a"}, {"transform", "fake"}, {"params", {{"fail", true}}}},
+            {{"match_type", "pkg/msg/In"}, {"transform", "fake"}}})}};
   auto set = TransformSet::create(profile, factories());
   ASSERT_TRUE(set.has_value()) << set.error();
   ASSERT_TRUE((*set)->append_type_rule("pkg/msg/Other", "other").has_value());
@@ -59,19 +61,17 @@ TEST(TransformSetTest, FirstMatchingRuleWinsAndAppendedRulesComeLast) {
   EXPECT_EQ((*set)->bind("/c", "pkg/msg/Other")->transform_name, "other");
 }
 
-TEST(TransformSetTest, TopicOnlyRuleWithNonAcceptedTypeLeavesTopicUntransformed) {
-  auto set = TransformSet::create(rule({{"match_topic", "/a"}, {"transform", "fake"}}), factories());
-  ASSERT_TRUE(set.has_value()) << set.error();
-  EXPECT_EQ((*set)->bind("/a", "pkg/msg/Unrelated"), nullptr);
-}
-
-TEST(TransformSetTest, NonAcceptingRuleIsSkippedSoLaterRulesStillApply) {
-  auto set = TransformSet::create(rule({{"match_topic", "/lidar/.*"}, {"transform", "fake"}}), factories());
+// A transform can only be paired with a type it accepts, and that is settled at
+// startup: a topic of another type is simply not matched by the rule.
+TEST(TransformSetTest, RuleNeverAppliesToATopicOfAnotherType) {
+  auto set = TransformSet::create(
+      rule({{"match_type", "pkg/msg/In"}, {"match_topic", "/lidar/.*"}, {"transform", "fake"}}), factories());
   ASSERT_TRUE(set.has_value()) << set.error();
   ASSERT_TRUE((*set)->append_type_rule("pkg/msg/Other", "other").has_value());
-  auto bound = (*set)->bind("/lidar/image", "pkg/msg/Other");
+  auto bound = (*set)->bind("/lidar/image", "pkg/msg/Other");  // falls through to the later rule
   ASSERT_NE(bound, nullptr);
   EXPECT_EQ(bound->transform_name, "other");
+  EXPECT_EQ((*set)->bind("/lidar/unrelated", "pkg/msg/Unrelated"), nullptr);
 }
 
 TEST(TransformSetTest, FactoryReturningNullOrThrowingLeavesTopicUntransformed) {
@@ -84,7 +84,10 @@ TEST(TransformSetTest, FactoryReturningNullOrThrowingLeavesTopicUntransformed) {
   };
   json profile = {
       {"transforms", json::array(
-                         {{{"match_topic", "/throws"}, {"transform", "broken"}, {"params", {{"fail", true}}}},
+                         {{{"match_type", "pkg/msg/In"},
+                           {"match_topic", "/throws"},
+                           {"transform", "broken"},
+                           {"params", {{"fail", true}}}},
                           {{"match_type", "pkg/msg/In"}, {"transform", "broken"}}})}};
   auto set = TransformSet::create(profile, {{"broken", broken}});
   ASSERT_TRUE(set.has_value()) << set.error();
@@ -145,9 +148,9 @@ TEST(TransformSetTest, RunIsSafeConcurrentlyWithBindFindAndStats) {
   EXPECT_GT(bound->samples.load(), 0u);
 }
 
-// One log-once set serves two conditions. A "does not accept" warning for a
-// topic must not swallow the later, more serious "could not be set up" error.
-TEST(TransformSetTest, SkippedRuleWarningDoesNotHideALaterSetupError) {
+// bind() runs for every topic on every topic poll: a transform that cannot be
+// set up must be reported once, not once per second.
+TEST(TransformSetTest, SetupErrorIsLoggedOncePerTopic) {
   std::ostringstream captured;
   auto previous = spdlog::default_logger();
   spdlog::set_default_logger(
@@ -157,21 +160,18 @@ TEST(TransformSetTest, SkippedRuleWarningDoesNotHideALaterSetupError) {
   broken.create = [](const std::string&, const json&) -> std::unique_ptr<MessageTransform> {
     throw std::runtime_error("no codec");
   };
-  json profile = {
-      {"transforms", json::array(
-                         {{{"match_topic", "/a"}, {"transform", "other"}},  // accepts Other only
-                          {{"match_type", "pkg/msg/In"}, {"transform", "broken"}}})}};
-  auto set = TransformSet::create(profile, {{"other", fake_factory("pkg/msg/Other")}, {"broken", broken}});
+  auto set = TransformSet::create(rule({{"match_type", "pkg/msg/In"}, {"transform", "broken"}}), {{"broken", broken}});
   ASSERT_TRUE(set.has_value()) << set.error();
 
   EXPECT_EQ((*set)->bind("/a", "pkg/msg/In"), nullptr);
-  (*set)->bind("/a", "pkg/msg/In");  // second poll: nothing new may be logged
+  (*set)->bind("/a", "pkg/msg/In");  // second poll
+  (*set)->bind("/b", "pkg/msg/In");  // another topic is reported separately
   spdlog::set_default_logger(previous);
 
   const std::string log = captured.str();
-  EXPECT_NE(log.find("does not accept"), std::string::npos) << log;
-  EXPECT_NE(log.find("could not be set up"), std::string::npos) << log;
-  EXPECT_EQ(log.find("could not be set up"), log.rfind("could not be set up")) << "logged more than once:\n" << log;
+  EXPECT_EQ(std::count(log.begin(), log.end(), '\n'), 2) << log;
+  EXPECT_NE(log.find("'/a'"), std::string::npos) << log;
+  EXPECT_NE(log.find("'/b'"), std::string::npos) << log;
 }
 
 TEST(TransformSetTest, RebindsWhenSourceTypeChanges) {
@@ -185,7 +185,10 @@ TEST(TransformSetTest, RebindsWhenSourceTypeChanges) {
 TEST(TransformSetTest, RunCountsSamplesBytesAndDrops) {
   json profile = {
       {"transforms", json::array(
-                         {{{"match_topic", "/bad"}, {"transform", "fake"}, {"params", {{"fail", true}}}},
+                         {{{"match_type", "pkg/msg/In"},
+                           {"match_topic", "/bad"},
+                           {"transform", "fake"},
+                           {"params", {{"fail", true}}}},
                           {{"match_type", "pkg/msg/In"}, {"transform", "fake"}}})}};
   auto set = TransformSet::create(profile, factories());
   ASSERT_TRUE(set.has_value()) << set.error();
@@ -225,11 +228,12 @@ INSTANTIATE_TEST_SUITE_P(
         BadProfile{"transforms_not_an_array", json{{"transforms", 5}}},
         BadProfile{"rule_not_an_object", json{{"transforms", json::array({5})}}},
         BadProfile{"mistyped_rule_key", rule({{"match_type", 5}, {"transform", "fake"}})},
+        BadProfile{"topic_only_rule", rule({{"match_topic", "/lidar/.*"}, {"transform", "fake"}})},
         BadProfile{"rule_without_matcher", rule({{"transform", "fake"}})},
         BadProfile{"rule_without_transform", rule({{"match_type", "pkg/msg/In"}})},
         BadProfile{"unknown_rule_key", rule({{"match_type", "pkg/msg/In"}, {"transform", "fake"}, {"oops", 1}})},
         BadProfile{"unknown_transform", rule({{"match_type", "pkg/msg/In"}, {"transform", "nope"}})},
-        BadProfile{"invalid_regex", rule({{"match_topic", "("}, {"transform", "fake"}})},
+        BadProfile{"invalid_regex", rule({{"match_type", "pkg/msg/In"}, {"match_topic", "("}, {"transform", "fake"}})},
         BadProfile{
             "unknown_param", rule({{"match_type", "pkg/msg/In"}, {"transform", "fake"}, {"params", {{"q", 1}}}})},
         BadProfile{"type_not_accepted", rule({{"match_type", "pkg/msg/Unrelated"}, {"transform", "fake"}})}),

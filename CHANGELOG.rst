@@ -7,8 +7,9 @@ Forthcoming
 * Message transforms (ROS2 only): operator-configured, off by default, a
   topic is transformed for all subscribers or none — no per-client
   negotiation. New ``transform_profile`` parameter points to a JSON file of
-  ordered per-topic rules (``match_type`` exact and/or ``match_topic``
-  full-match regex, first match wins). A transformed topic is advertised
+  ordered per-topic rules (``match_type`` exact and required, optionally
+  narrowed by a ``match_topic`` full-match regex; first match wins; a transform
+  paired with a type it cannot handle is a startup error). A transformed topic is advertised
   with its transform's output type/schema, plus an optional ``source_type``
   on ``get_topics`` entries (not yet on ``topics_changed`` entries); new
   ``message_transforms`` server capability.

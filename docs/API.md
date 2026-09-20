@@ -310,22 +310,22 @@ for their fleet of clients.
 
 See also `docs/transform_profile.example.json`.
 
-Each rule in `transforms` needs at least one of:
+Each rule in `transforms` has:
 
-- `match_type` — the topic's type, matched **exactly**.
-- `match_topic` — full-match ECMAScript regex against the topic name, same
-  semantics as [`topic_whitelist`](#topic-whitelist) (`std::regex_match`,
-  not a substring search).
+- `match_type` (**required**) — the topic's type, matched **exactly**.
+- `match_topic` (optional) — full-match ECMAScript regex against the topic
+  name, same semantics as [`topic_whitelist`](#topic-whitelist)
+  (`std::regex_match`, not a substring search). It narrows the rule to some of
+  the topics of that type.
+- `transform` (**required**) and `params` (optional) — see below.
 
-When both are present, **both** must match. Rules are evaluated in order
-and the **first match wins** — with the one exception described next.
+Rules are evaluated in order and the **first match wins**.
 
-A rule that matches a topic by `match_topic` only (no `match_type`) whose
-named transform does not accept that topic's actual type is **skipped**: a
-one-time warning is logged for that topic and evaluation continues with the
-next rule. A `match_type` rule can never hit this case — `TransformSet`
-rejects a rule at startup whose transform does not accept its declared
-`match_type` (see below).
+`match_type` is required so that pairing a transform with a type it cannot
+handle is always a **startup error**: topic types are only known once topics
+are discovered, so a rule matching by name alone could not be checked until a
+mismatching topic appeared. For a transform that handles several types (such
+as `strip`), write one rule per type.
 
 ### `strip_large_messages` interaction
 
@@ -344,7 +344,7 @@ The server refuses to start (exits with a non-zero status) on any of:
 - The file is not valid JSON.
 - An unknown top-level key (anything other than `transforms`).
 - An unknown or mistyped rule key (e.g. `params` that isn't an object).
-- A rule with neither `match_type` nor `match_topic`.
+- A rule without `match_type`.
 - A rule missing `transform`.
 - A rule naming an unknown transform — including `cloudini` in a build
   without Cloudini compiled in (see `CLAUDE.md` / `README.md` for the build

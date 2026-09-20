@@ -79,7 +79,7 @@ class TransformSet {
 
  private:
   struct Rule {
-    std::optional<std::string> match_type;
+    std::string match_type;  // mandatory
     std::optional<std::regex> match_topic;
     std::string transform;
     nlohmann::json params = nlohmann::json::object();

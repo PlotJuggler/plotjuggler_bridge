@@ -139,7 +139,8 @@ TEST_F(Ros2SubscriptionManagerTest, SubscribesWithSourceTypeAndForwardsTransform
   // The output type differs from the source type: the manager is asked to
   // subscribe with the ADVERTISED type and must use the source type.
   auto set = TransformSet::create(
-                 test_helpers::rule({{"match_topic", "/transform_me"}, {"transform", "fake"}}),
+                 test_helpers::rule(
+                     {{"match_type", "std_msgs/msg/String"}, {"match_topic", "/transform_me"}, {"transform", "fake"}}),
                  {{"fake", test_helpers::fake_factory("std_msgs/msg/String", "fake_msgs/msg/Out")}})
                  .value();
   ASSERT_NE(set->bind("/transform_me", "std_msgs/msg/String"), nullptr);  // what get_topics would have done
@@ -165,11 +166,14 @@ TEST_F(Ros2SubscriptionManagerTest, SubscribesWithSourceTypeAndForwardsTransform
 // The client was told the output type at subscribe time, so a sample whose
 // transform fails must be dropped, never forwarded untransformed.
 TEST_F(Ros2SubscriptionManagerTest, FailedTransformDropsTheSample) {
-  auto set =
-      TransformSet::create(
-          test_helpers::rule({{"match_topic", "/always_fails"}, {"transform", "fake"}, {"params", {{"fail", true}}}}),
-          {{"fake", test_helpers::fake_factory("std_msgs/msg/String", "std_msgs/msg/String")}})
-          .value();
+  auto set = TransformSet::create(
+                 test_helpers::rule(
+                     {{"match_type", "std_msgs/msg/String"},
+                      {"match_topic", "/always_fails"},
+                      {"transform", "fake"},
+                      {"params", {{"fail", true}}}}),
+                 {{"fake", test_helpers::fake_factory("std_msgs/msg/String", "std_msgs/msg/String")}})
+                 .value();
   auto bound = set->bind("/always_fails", "std_msgs/msg/String");
   ASSERT_NE(bound, nullptr);
 
