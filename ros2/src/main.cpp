@@ -24,6 +24,7 @@
 #include <optional>
 #include <rclcpp/rclcpp.hpp>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "pj_bridge/bridge_server.hpp"
@@ -45,7 +46,8 @@ int main(int argc, char** argv) {
   node->declare_parameter<double>("session_timeout", 10.0);
   node->declare_parameter<bool>("strip_large_messages", false);
   node->declare_parameter<std::vector<std::string>>("topic_whitelist", {".*"});
-  node->declare_parameter<int>("min_qos_depth", 1);
+  node->declare_parameter<int>("min_qos_depth", 10);
+  node->declare_parameter<double>("ingest_poll_interval_ms", 5.0);
   node->declare_parameter<int>("max_qos_depth", 100);
   node->declare_parameter<double>("topic_poll_interval", 1.0);
   node->declare_parameter<int>("client_backlog_size", 100);
@@ -60,6 +62,7 @@ int main(int argc, char** argv) {
   bool strip_large_messages = node->get_parameter("strip_large_messages").as_bool();
   std::vector<std::string> topic_whitelist = node->get_parameter("topic_whitelist").as_string_array();
   int64_t min_qos_depth = node->get_parameter("min_qos_depth").as_int();
+  double ingest_poll_interval_ms = node->get_parameter("ingest_poll_interval_ms").as_double();
   int64_t max_qos_depth = node->get_parameter("max_qos_depth").as_int();
   double topic_poll_interval = node->get_parameter("topic_poll_interval").as_double();
   int64_t client_backlog_size = node->get_parameter("client_backlog_size").as_int();
@@ -71,9 +74,10 @@ int main(int argc, char** argv) {
   RCLCPP_INFO(
       node->get_logger(),
       "Configuration: port=%d, publish_rate=%.1f Hz, session_timeout=%.1f s, strip_large_messages=%s, "
-      "min_qos_depth=%ld, max_qos_depth=%ld, topic_poll_interval=%.1f s, client_backlog_size=%ld, tls=%s",
+      "min_qos_depth=%ld, max_qos_depth=%ld, ingest_poll_interval_ms=%.1f, topic_poll_interval=%.1f s, "
+      "client_backlog_size=%ld, tls=%s",
       port, publish_rate, session_timeout, strip_large_messages ? "true" : "false", min_qos_depth, max_qos_depth,
-      topic_poll_interval, client_backlog_size, tls_enabled ? "true" : "false");
+      ingest_poll_interval_ms, topic_poll_interval, client_backlog_size, tls_enabled ? "true" : "false");
 
   if (tls_enabled && (certfile.empty() || keyfile.empty())) {
     RCLCPP_ERROR(node->get_logger(), "tls=true requires both 'certfile' and 'keyfile' parameters to be set");
@@ -85,6 +89,14 @@ int main(int argc, char** argv) {
     RCLCPP_ERROR(
         node->get_logger(), "Invalid topic_poll_interval: %.1f (must be >= 0; 0 disables polling)",
         topic_poll_interval);
+    rclcpp::shutdown();
+    return 1;
+  }
+
+  if (ingest_poll_interval_ms < 0.0) {
+    RCLCPP_ERROR(
+        node->get_logger(), "Invalid ingest_poll_interval_ms: %.1f (must be >= 0; 0 uses blocking spin)",
+        ingest_poll_interval_ms);
     rclcpp::shutdown();
     return 1;
   }
@@ -159,14 +171,19 @@ int main(int argc, char** argv) {
     // ROS2 timers drive the event loop
     using namespace std::chrono_literals;
 
-    auto request_timer = node->create_wall_timer(10ms, [&server]() { server.process_requests(); });
+    // Not added to the node's default executor (second argument false).
+    auto timer_group = node->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive, false);
+
+    auto request_timer = node->create_wall_timer(
+        10ms, [&server]() { server.process_requests(); }, timer_group);
 
     auto publish_period = std::chrono::duration<double>(1.0 / publish_rate);
     auto publish_timer = node->create_wall_timer(
         std::chrono::duration_cast<std::chrono::nanoseconds>(publish_period),
-        [&server]() { server.publish_aggregated_messages(); });
+        [&server]() { server.publish_aggregated_messages(); }, timer_group);
 
-    auto timeout_timer = node->create_wall_timer(1s, [&server]() { server.check_session_timeouts(); });
+    auto timeout_timer = node->create_wall_timer(
+        1s, [&server]() { server.check_session_timeouts(); }, timer_group);
 
     // topic_poll_interval == 0 disables the pushed topic-advertisement poll.
     rclcpp::TimerBase::SharedPtr topic_poll_timer;
@@ -177,16 +194,57 @@ int main(int argc, char** argv) {
       server.check_topic_changes();
       topic_poll_timer = node->create_wall_timer(
           std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::duration<double>(topic_poll_interval)),
-          [&server]() { server.check_topic_changes(); });
+          [&server]() { server.check_topic_changes(); }, timer_group);
     }
 
-    // Spin until shutdown. spin() blocks waiting for work and returns when
-    // rclcpp::shutdown() runs (e.g. on SIGINT) — unlike spin_some() in a
-    // loop, which returns immediately when idle and busy-spins a full core.
+    // Timers (publish/zstd, requests, timeouts) run on their own thread so a
+    // long publish cycle never delays ingest.
+    rclcpp::executors::SingleThreadedExecutor timer_executor;
+    timer_executor.add_callback_group(timer_group, node->get_node_base_interface());
+    // Joins on every exit path: an exception unwinding past a joinable
+    // std::thread would call std::terminate().
+    struct TimerThread {
+      rclcpp::executors::SingleThreadedExecutor& executor;
+      std::thread thread;
+      ~TimerThread() {
+        executor.cancel();
+        if (thread.joinable()) {
+          thread.join();
+        }
+      }
+    } timer_thread{timer_executor, std::thread([&timer_executor, &node]() {
+                     try {
+                       timer_executor.spin();
+                     } catch (const std::exception& e) {
+                       RCLCPP_FATAL(node->get_logger(), "Timer thread failed: %s", e.what());
+                       rclcpp::shutdown();
+                     }
+                   })};
+
+    // Every executor wait cycle rebuilds the whole wait set, O(subscriptions);
+    // with blocking spin() that is one rebuild per received message. Polling
+    // amortizes one rebuild over every message that arrived in the interval;
+    // subscription callbacks drain their reader, so nothing is lost as long
+    // as the reader depth covers a burst.
     rclcpp::executors::SingleThreadedExecutor executor;
     executor.add_node(node);
+    if (ingest_poll_interval_ms > 0.0) {
+      const auto poll_interval = std::chrono::duration<double, std::milli>(ingest_poll_interval_ms);
+      while (rclcpp::ok()) {
+        if (sub_manager->subscription_count() == 0) {
+          // Nothing to amortize: block instead of polling so idle costs nothing.
+          executor.spin_once(std::chrono::milliseconds(100));
+          continue;
+        }
+        executor.spin_some();
+        std::this_thread::sleep_for(poll_interval);
+      }
+    } else {
+      executor.spin();
+    }
 
-    executor.spin();
+    timer_executor.cancel();
+    timer_thread.thread.join();
 
     // Graceful shutdown
     RCLCPP_INFO(node->get_logger(), "Shutting down bridge server...");

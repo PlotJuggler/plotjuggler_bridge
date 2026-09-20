@@ -55,6 +55,12 @@ void MessageBuffer::set_latched(const std::string& topic_name, bool latched) {
   std::lock_guard<std::mutex> lock(mutex_);
   if (latched) {
     latched_topics_.insert(topic_name);
+    // Ingest may run on another thread: the retained sample can already be
+    // buffered by the time the subscriber's bookkeeping gets here.
+    auto it = topic_buffers_.find(topic_name);
+    if (latched_last_.count(topic_name) == 0 && it != topic_buffers_.end() && !it->second.empty()) {
+      latched_last_[topic_name] = it->second.back();
+    }
   } else {
     latched_topics_.erase(topic_name);
     latched_last_.erase(topic_name);

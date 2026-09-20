@@ -53,9 +53,9 @@ void AggregatedMessageSerializer::serialize_message(
   write_le(serialized_data_, msg_size);
 
   // Message data (CDR bytes) using memcpy
-  size_t old_size = serialized_data_.size();
-  serialized_data_.resize(old_size + msg_size);
-  std::memcpy(serialized_data_.data() + old_size, data, msg_size);
+  // insert, not resize+memcpy: resize would zero the bytes first
+  const auto *bytes = reinterpret_cast<const uint8_t *>(data);
+  serialized_data_.insert(serialized_data_.end(), bytes, bytes + msg_size);
 }
 
 void AggregatedMessageSerializer::clear() {

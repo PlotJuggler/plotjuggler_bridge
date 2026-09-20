@@ -80,8 +80,8 @@ class FastDdsSubscriptionManager::InternalReaderListener : public DataReaderList
           continue;
         }
 
-        auto cdr_data = std::make_shared<std::vector<std::byte>>(payload_.length);
-        std::memcpy(cdr_data->data(), payload_.data, payload_.length);
+        const auto* bytes = reinterpret_cast<const std::byte*>(payload_.data);
+        auto cdr_data = std::make_shared<std::vector<std::byte>>(bytes, bytes + payload_.length);
 
         uint64_t timestamp_ns =
             static_cast<uint64_t>(info.source_timestamp.seconds()) * 1'000'000'000ULL + info.source_timestamp.nanosec();

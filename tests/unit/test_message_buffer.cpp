@@ -442,6 +442,19 @@ TEST_F(MessageBufferTest, GetLatchedReturnsNewestMessage) {
   EXPECT_EQ(latched->timestamp_ns, 2u);
 }
 
+// Ingest runs on a different thread than subscribe bookkeeping, so the sole
+// retained sample of a latched topic can land before set_latched(true).
+TEST_F(MessageBufferTest, SetLatchedSeedsFromAlreadyBufferedSample) {
+  buffer_.add_message("/t", 7, create_test_data({7, 7}));
+
+  buffer_.set_latched("/t", true);
+
+  auto latched = buffer_.get_latched("/t");
+  ASSERT_TRUE(latched.has_value());
+  EXPECT_EQ(latched->timestamp_ns, 7u);
+  EXPECT_EQ(extract_data(latched->data), (std::vector<uint8_t>{7, 7}));
+}
+
 TEST_F(MessageBufferTest, SetLatchedFalseClearsRetainedEntry) {
   buffer_.set_latched("/t", true);
   buffer_.add_message("/t", 1, create_test_data({1, 2, 3}));

@@ -152,7 +152,7 @@ Unlike the RTI backend's 4-class two-level design (discovery + subscription mana
 - **FastDdsTopicSource**: Manages `DomainParticipant`s, discovers topics via `DomainParticipantListener::on_data_writer_discovery()`, resolves `DynamicType` from `TypeObjectRegistry`, generates IDL schema via `idl_serialize()`. Also provides `get_dynamic_type()` / `get_participant()` / `get_domain_id()` for use by the subscription manager.
 - **FastDdsSubscriptionManager**: Creates `DataReader`s with `DynamicPubSubType`, ref-counted subscriptions. Extracts CDR bytes by deserializing into `DynamicData` and re-serializing via `DynamicPubSubType::serialize()`.
 
-FastDDS dependencies are managed via Conan (`fast-dds/3.4.0`). The backend is built standalone (not through colcon/ament).
+FastDDS dependencies are managed via Conan (`fast-dds/3.4.3`). The backend is built standalone (not through colcon/ament).
 
 ## Design Decisions
 

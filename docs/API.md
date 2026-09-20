@@ -208,7 +208,7 @@ offers (so a burst from every publisher still fits in the subscription
 queue), then clamping the total to a configurable range — the same heuristic
 `foxglove_bridge`'s `determineQoS()` uses:
 
-- **ROS2**: int parameters `min_qos_depth` (default `1`) and `max_qos_depth`
+- **ROS2**: int parameters `min_qos_depth` (default `10`) and `max_qos_depth`
   (default `100`).
 
 A publisher that reports depth `0` (KEEP_ALL, or an RMW such as
@@ -222,6 +222,26 @@ the subscription's reliability/durability, which is separately adapted to
 match what the discovered publishers offer (a RELIABLE subscription still
 switches to BEST_EFFORT if any publisher is BEST_EFFORT, and to
 TRANSIENT_LOCAL only if every publisher offers it).
+
+`min_qos_depth` defaults to `10` (rather than `1`) so the ingest poll
+interval below can't overflow a shallow reader between polls.
+
+## Ingest Poll Interval (ROS2 only)
+
+The ROS2 backend's ingest executor (the one running subscription callbacks)
+polls via `spin_some()` on a timer instead of blocking in `spin()`: `rclcpp`
+rebuilds its whole wait set — O(subscriptions) — on every wait cycle, which
+with `spin()` means one rebuild per received message. Polling amortizes one
+rebuild over every message that arrived in the poll interval; subscription
+callbacks drain their DDS reader on each poll, so nothing is lost as long as
+the reader depth (`min_qos_depth`) covers a burst.
+
+- **ROS2**: double parameter `ingest_poll_interval_ms` (default `5.0`,
+  milliseconds). `0` reverts to a blocking `spin()`. Must be `>= 0`; the
+  server refuses to start otherwise.
+
+Publish/request/session-timeout timers run on their own executor thread so a
+long publish (zstd-compression) cycle never delays ingest.
 
 ## Subscribe
 

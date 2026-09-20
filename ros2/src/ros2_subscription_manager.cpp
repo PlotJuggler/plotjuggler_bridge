@@ -54,8 +54,8 @@ bool Ros2SubscriptionManager::subscribe(const std::string& topic_name, const std
         }
 
         const auto& rcl_msg = msg_to_use->get_rcl_serialized_message();
-        auto data = std::make_shared<std::vector<std::byte>>(rcl_msg.buffer_length);
-        std::memcpy(data->data(), rcl_msg.buffer, rcl_msg.buffer_length);
+        const auto* bytes = reinterpret_cast<const std::byte*>(rcl_msg.buffer);
+        auto data = std::make_shared<std::vector<std::byte>>(bytes, bytes + rcl_msg.buffer_length);
 
         MessageCallback cb;
         {
@@ -72,6 +72,10 @@ bool Ros2SubscriptionManager::subscribe(const std::string& topic_name, const std
 
 bool Ros2SubscriptionManager::unsubscribe(const std::string& topic_name) {
   return inner_manager_.unsubscribe(topic_name);
+}
+
+size_t Ros2SubscriptionManager::subscription_count() const {
+  return inner_manager_.subscription_count();
 }
 
 void Ros2SubscriptionManager::unsubscribe_all() {

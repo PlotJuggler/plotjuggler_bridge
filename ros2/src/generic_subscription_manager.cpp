@@ -19,11 +19,77 @@
 
 #include "pj_bridge_ros2/generic_subscription_manager.hpp"
 
+#include <rclcpp/version.h>
+
 #include <algorithm>
+#include <rclcpp/typesupport_helpers.hpp>
 
 #include "pj_bridge/time_utils.hpp"
 
 namespace pj_bridge {
+
+namespace {
+constexpr size_t kMaxDrainPerCallback = 1000;
+
+// The executor hands over one message per subscription per wait cycle, and
+// each cycle rebuilds the whole wait set (O(subscriptions)). This subscription
+// drains whatever else its reader holds, so a burst costs one cycle instead of
+// one per message. It overrides handle_serialized_message() rather than using
+// a callback because only this hook sees the MessageInfo of the first message:
+// with batched delivery, "now" is no longer a usable receive time.
+class DrainingSubscription : public rclcpp::GenericSubscription {
+ public:
+  using Handler = std::function<void(const std::shared_ptr<rclcpp::SerializedMessage>&, uint64_t)>;
+
+  DrainingSubscription(
+      rclcpp::node_interfaces::NodeBaseInterface* node_base, std::shared_ptr<rcpputils::SharedLibrary> ts_lib,
+      const std::string& topic_name, const std::string& topic_type, const rclcpp::QoS& qos, Handler handler)
+      : rclcpp::GenericSubscription(
+            node_base, std::move(ts_lib), topic_name, topic_type, qos, unused_callback(),
+            rclcpp::SubscriptionOptions()),
+        handler_(std::move(handler)) {}
+
+  void handle_serialized_message(
+      const std::shared_ptr<rclcpp::SerializedMessage>& message, const rclcpp::MessageInfo& info) override {
+    handler_(message, receive_time_ns(info));
+    // Bounded so a publisher faster than we can drain cannot starve other topics.
+    for (size_t i = 0; i < kMaxDrainPerCallback; ++i) {
+      auto extra = std::make_shared<rclcpp::SerializedMessage>();
+      rclcpp::MessageInfo extra_info;
+      try {
+        if (!take_serialized(*extra, extra_info)) {
+          break;
+        }
+      } catch (const std::exception& e) {
+        RCLCPP_WARN(rclcpp::get_logger("pj_bridge"), "take failed on '%s': %s", get_topic_name(), e.what());
+        break;
+      }
+      handler_(extra, receive_time_ns(extra_info));
+    }
+  }
+
+ private:
+  static uint64_t receive_time_ns(const rclcpp::MessageInfo& info) {
+    // Not every RMW fills received_timestamp.
+    const auto received = info.get_rmw_message_info().received_timestamp;
+    return received > 0 ? static_cast<uint64_t>(received) : get_current_time_ns();
+  }
+
+#if RCLCPP_VERSION_MAJOR >= 28  // Jazzy+: the constructor takes an AnySubscriptionCallback
+  static rclcpp::AnySubscriptionCallback<rclcpp::SerializedMessage, std::allocator<void>> unused_callback() {
+    rclcpp::AnySubscriptionCallback<rclcpp::SerializedMessage, std::allocator<void>> callback;
+    callback.set([](std::shared_ptr<const rclcpp::SerializedMessage>){});
+    return callback;
+  }
+#else
+  static std::function<void(std::shared_ptr<rclcpp::SerializedMessage>)> unused_callback() {
+    return [](std::shared_ptr<rclcpp::SerializedMessage>) {};
+  }
+#endif
+
+  Handler handler_;
+};
+}  // namespace
 
 GenericSubscriptionManager::GenericSubscriptionManager(
     rclcpp::Node::SharedPtr node, size_t min_qos_depth, size_t max_qos_depth)
@@ -103,15 +169,16 @@ bool GenericSubscriptionManager::subscribe(
   }
 
   try {
-    auto sub_callback = [topic_name, callback](std::shared_ptr<rclcpp::SerializedMessage> msg) {
-      uint64_t receive_time = get_current_time_ns();
-      callback(topic_name, msg, receive_time);
-    };
-
     rclcpp::QoS qos = adapt_qos(topic_name);
     bool transient_local = (qos.durability() == rclcpp::DurabilityPolicy::TransientLocal);
 
-    auto subscription = node_->create_generic_subscription(topic_name, topic_type, qos, sub_callback);
+    auto subscription = std::make_shared<DrainingSubscription>(
+        node_->get_node_base_interface().get(), rclcpp::get_typesupport_library(topic_type, "rosidl_typesupport_cpp"),
+        topic_name, topic_type, qos,
+        [topic_name, callback](const std::shared_ptr<rclcpp::SerializedMessage>& msg, uint64_t receive_time_ns) {
+          callback(topic_name, msg, receive_time_ns);
+        });
+    node_->get_node_topics_interface()->add_subscription(subscription, nullptr);
 
     subscriptions_[topic_name] = SubscriptionInfo{subscription, 1, transient_local};
 
@@ -148,6 +215,11 @@ bool GenericSubscriptionManager::unsubscribe(const std::string& topic_name) {
 bool GenericSubscriptionManager::is_subscribed(const std::string& topic_name) const {
   std::lock_guard<std::mutex> lock(mutex_);
   return subscriptions_.find(topic_name) != subscriptions_.end();
+}
+
+size_t GenericSubscriptionManager::subscription_count() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return subscriptions_.size();
 }
 
 size_t GenericSubscriptionManager::get_reference_count(const std::string& topic_name) const {

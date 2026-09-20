@@ -74,6 +74,8 @@ tl::expected<void, std::string> WebSocketMiddleware::initialize(uint16_t port) {
   }
 
   server_ = std::make_shared<ix::WebSocketServer>(port, "0.0.0.0");
+  // Binary frames are already zstd-compressed; deflating them again is wasted work.
+  server_->disablePerMessageDeflate();
 
 #ifdef IXWEBSOCKET_USE_TLS
   if (tls_.has_value()) {

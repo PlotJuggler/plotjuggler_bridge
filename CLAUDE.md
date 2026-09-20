@@ -51,7 +51,7 @@ make -j$(nproc)
 - **CLI11** — FetchContent (RTI backend only)
 
 ### FastDDS Backend (Conan-managed)
-- **eProsima Fast DDS 3.4.0** — via Conan (`fast-dds/3.4.0`)
+- **eProsima Fast DDS 3.4.3** — via Conan (`fast-dds/3.4.3`)
 - **eProsima Fast CDR 2.x** — transitive dependency via Conan
 - **CLI11** — FetchContent (for CLI parsing, shared with RTI)
 
@@ -105,7 +105,7 @@ make -j$(nproc)
 ### Event Loop
 
 BridgeServer does NOT own timers. The entry point (`main.cpp`) drives the event loop:
-- **ROS2**: `rclcpp` wall timers call `process_requests()`, `publish_aggregated_messages()`, `check_session_timeouts()`
+- **ROS2**: `rclcpp` wall timers (`process_requests()`, `publish_aggregated_messages()`, `check_session_timeouts()`) run on their own dedicated executor thread, so a long publish/zstd cycle never delays ingest. The ingest executor itself is polled (`ingest_poll_interval_ms`, default 5 ms) via `spin_some()` instead of blocking in `spin()`; subscription callbacks drain their DDS reader on each poll.
 - **RTI**: `std::chrono` loop with `std::this_thread::sleep_for()`
 - **FastDDS**: `std::chrono` loop with `std::this_thread::sleep_for()` (same pattern as RTI)
 
@@ -191,7 +191,7 @@ Then, for each message in the (compressed) payload:
 - CLI11 (FetchContent, for CLI parsing)
 
 ### FastDDS Backend
-- eProsima Fast DDS 3.4.0 (Conan: `fast-dds/3.4.0`)
+- eProsima Fast DDS 3.4.3 (Conan: `fast-dds/3.4.3`)
 - eProsima Fast CDR 2.x (transitive Conan dependency)
 - CLI11 (FetchContent, for CLI parsing)
 
@@ -234,8 +234,9 @@ publish_rate: 50.0             # Hz
 session_timeout: 10.0          # seconds
 strip_large_messages: false    # Opt-in: strip Image/PointCloud2/etc data fields
 topic_whitelist: [".*"]        # Full-match regex patterns restricting visible/subscribable topics
-min_qos_depth: 1               # Minimum KEEP_LAST subscription depth after aggregating publisher depths
+min_qos_depth: 10              # Minimum KEEP_LAST subscription depth after aggregating publisher depths
 max_qos_depth: 100             # Maximum KEEP_LAST subscription depth after aggregating publisher depths
+ingest_poll_interval_ms: 5.0   # Ingest executor poll interval (drains subscriptions each poll); 0 = blocking spin
 topic_poll_interval: 1.0       # Seconds between topics_changed notification polls; 0 disables polling
 client_backlog_size: 100       # Max frames queued per slow client before dropping the oldest (must be > 0)
 heavy_frame_threshold_bytes: 262144  # Isolate messages >= this size into their own size-class frame; 0 disables

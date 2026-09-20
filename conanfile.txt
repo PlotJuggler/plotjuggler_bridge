@@ -1,6 +1,6 @@
 [requires]
-fast-dds/3.4.0
-cli11/2.6.0
+fast-dds/3.4.3
+cli11/2.6.2
 
 [generators]
 CMakeDeps

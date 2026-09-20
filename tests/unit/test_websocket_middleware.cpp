@@ -17,6 +17,7 @@
  * along with pj_bridge. If not, see <https://www.gnu.org/licenses/>.
  */
 
+#include <dlfcn.h>
 #include <gtest/gtest.h>
 #include <ixwebsocket/IXWebSocket.h>
 
@@ -198,6 +199,37 @@ TEST_F(WebSocketMiddlewareTest, ClientConnectAndSendMessage) {
 
   client.stop();
   std::this_thread::sleep_for(std::chrono::milliseconds(100));
+}
+
+// Binary frames are already zstd-compressed; negotiating permessage-deflate
+// would re-compress them with zlib on the publish thread.
+TEST_F(WebSocketMiddlewareTest, ServerDeclinesPerMessageDeflate) {
+  auto result = middleware_->initialize(18099);
+  ASSERT_TRUE(result.has_value());
+
+  std::mutex headers_mutex;
+  std::string extensions_header;
+  ix::WebSocket client;
+  client.setUrl("ws://127.0.0.1:18099");
+  client.setPerMessageDeflateOptions(ix::WebSocketPerMessageDeflateOptions(true));
+  client.setOnMessageCallback([&](const ix::WebSocketMessagePtr& msg) {
+    if (msg->type == ix::WebSocketMessageType::Open) {
+      std::lock_guard<std::mutex> lock(headers_mutex);
+      auto it = msg->openInfo.headers.find("Sec-WebSocket-Extensions");
+      if (it != msg->openInfo.headers.end()) {
+        extensions_header = it->second;
+      }
+    }
+  });
+  client.start();
+  ASSERT_TRUE(wait_for_client_open(client)) << "Client failed to connect";
+
+  {
+    std::lock_guard<std::mutex> lock(headers_mutex);
+    EXPECT_EQ(extensions_header.find("permessage-deflate"), std::string::npos)
+        << "server negotiated: " << extensions_header;
+  }
+  client.stop();
 }
 
 TEST_F(WebSocketMiddlewareTest, SendReplyToConnectedClient) {
@@ -706,6 +738,12 @@ TEST(WebSocketMiddlewareTlsTest, TlsRoundTrip) {
 #endif  // IXWEBSOCKET_USE_TLS
 
 int main(int argc, char** argv) {
+  // rcl_logging_spdlog registers a periodic flush thread on spdlog's global
+  // registry (which we share) and its code lives in that library. rcl unloads
+  // the library on shutdown, so after the suites' init/shutdown cycles the
+  // thread would resume in unmapped memory at exit. Pin the library.
+  dlopen("librcl_logging_spdlog.so", RTLD_NOW | RTLD_NODELETE);
+
   testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();
 }
