@@ -19,12 +19,13 @@
 
 #pragma once
 
+#include <memory>
 #include <mutex>
 #include <rclcpp/rclcpp.hpp>
 
 #include "pj_bridge/subscription_manager_interface.hpp"
+#include "pj_bridge/transform_set.hpp"
 #include "pj_bridge_ros2/generic_subscription_manager.hpp"
-#include "pj_bridge_ros2/message_stripper.hpp"
 
 namespace pj_bridge {
 
@@ -32,13 +33,13 @@ namespace pj_bridge {
  * @brief ROS2 implementation of SubscriptionManagerInterface
  *
  * Wraps GenericSubscriptionManager to provide backend-agnostic subscription
- * management. Handles conversion from rclcpp::SerializedMessage to
- * shared_ptr<vector<byte>> and optional message stripping.
+ * management. Converts rclcpp::SerializedMessage to shared_ptr<vector<byte>>
+ * and applies the topic's transform, if any, on the rcl buffer before copying.
  */
 class Ros2SubscriptionManager : public SubscriptionManagerInterface {
  public:
   explicit Ros2SubscriptionManager(
-      rclcpp::Node::SharedPtr node, bool strip_large_messages = false, size_t min_qos_depth = 1,
+      rclcpp::Node::SharedPtr node, std::shared_ptr<TransformSet> transforms = nullptr, size_t min_qos_depth = 1,
       size_t max_qos_depth = 100);
 
   Ros2SubscriptionManager(const Ros2SubscriptionManager&) = delete;
@@ -54,7 +55,7 @@ class Ros2SubscriptionManager : public SubscriptionManagerInterface {
 
  private:
   GenericSubscriptionManager inner_manager_;
-  bool strip_large_messages_;
+  std::shared_ptr<TransformSet> transforms_;
 
   std::mutex callback_mutex_;
   MessageCallback callback_;

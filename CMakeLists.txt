@@ -144,6 +144,7 @@ if(ament_cmake_FOUND)
     ros2/src/schema_extractor.cpp
     ros2/src/generic_subscription_manager.cpp
     ros2/src/message_stripper.cpp
+    ros2/src/strip_transform.cpp
     ros2/src/ros2_topic_source.cpp
     ros2/src/ros2_subscription_manager.cpp
   )

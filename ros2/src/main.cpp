@@ -145,7 +145,7 @@ int main(int argc, char** argv) {
     // Create backend components
     auto topic_source = std::make_shared<pj_bridge::Ros2TopicSource>(node);
     auto sub_manager = std::make_shared<pj_bridge::Ros2SubscriptionManager>(
-        node, strip_large_messages, static_cast<size_t>(min_qos_depth), static_cast<size_t>(max_qos_depth));
+        node, nullptr, static_cast<size_t>(min_qos_depth), static_cast<size_t>(max_qos_depth));
     std::optional<pj_bridge::TlsConfig> tls_config;
     if (tls_enabled) {
       tls_config = pj_bridge::TlsConfig{certfile, keyfile};

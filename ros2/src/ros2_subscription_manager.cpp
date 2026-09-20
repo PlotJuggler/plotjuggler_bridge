@@ -22,13 +22,12 @@
 #include <spdlog/spdlog.h>
 
 #include <cstring>
-#include <optional>
 
 namespace pj_bridge {
 
 Ros2SubscriptionManager::Ros2SubscriptionManager(
-    rclcpp::Node::SharedPtr node, bool strip_large_messages, size_t min_qos_depth, size_t max_qos_depth)
-    : inner_manager_(node, min_qos_depth, max_qos_depth), strip_large_messages_(strip_large_messages) {}
+    rclcpp::Node::SharedPtr node, std::shared_ptr<TransformSet> transforms, size_t min_qos_depth, size_t max_qos_depth)
+    : inner_manager_(node, min_qos_depth, max_qos_depth), transforms_(std::move(transforms)) {}
 
 void Ros2SubscriptionManager::set_message_callback(MessageCallback callback) {
   std::lock_guard<std::mutex> lock(callback_mutex_);
@@ -36,26 +35,25 @@ void Ros2SubscriptionManager::set_message_callback(MessageCallback callback) {
 }
 
 bool Ros2SubscriptionManager::subscribe(const std::string& topic_name, const std::string& topic_type) {
-  bool needs_stripping = strip_large_messages_ && MessageStripper::should_strip(topic_type);
+  // A transformed topic is advertised with its output type; subscribe with the real one.
+  std::shared_ptr<BoundTransform> bound = transforms_ ? transforms_->find(topic_name) : nullptr;
+  const std::string& source_type = bound ? bound->source_type : topic_type;
 
   Ros2MessageCallback ros2_callback =
-      [this, topic_type, needs_stripping](
+      [this, bound](
           const std::string& topic, const std::shared_ptr<rclcpp::SerializedMessage>& msg, uint64_t receive_time_ns) {
-        const rclcpp::SerializedMessage* msg_to_use = msg.get();
-        std::optional<rclcpp::SerializedMessage> stripped_msg;
-
-        if (needs_stripping) {
-          try {
-            stripped_msg.emplace(MessageStripper::strip(topic_type, *msg));
-            msg_to_use = &*stripped_msg;
-          } catch (const std::exception& e) {
-            spdlog::warn("Failed to strip message on topic '{}': {}. Forwarding original.", topic, e.what());
-          }
-        }
-
-        const auto& rcl_msg = msg_to_use->get_rcl_serialized_message();
+        const auto& rcl_msg = msg->get_rcl_serialized_message();
         const auto* bytes = reinterpret_cast<const std::byte*>(rcl_msg.buffer);
-        auto data = std::make_shared<std::vector<std::byte>>(bytes, bytes + rcl_msg.buffer_length);
+
+        std::shared_ptr<std::vector<std::byte>> data;
+        if (bound) {
+          data = std::make_shared<std::vector<std::byte>>();
+          if (!bound->run(topic, {bytes, rcl_msg.buffer_length}, *data)) {
+            return;  // dropped and counted; never forward the untransformed bytes
+          }
+        } else {
+          data = std::make_shared<std::vector<std::byte>>(bytes, bytes + rcl_msg.buffer_length);
+        }
 
         MessageCallback cb;
         {
@@ -67,7 +65,7 @@ bool Ros2SubscriptionManager::subscribe(const std::string& topic_name, const std
         }
       };
 
-  return inner_manager_.subscribe(topic_name, topic_type, ros2_callback);
+  return inner_manager_.subscribe(topic_name, source_type, ros2_callback);
 }
 
 bool Ros2SubscriptionManager::unsubscribe(const std::string& topic_name) {
