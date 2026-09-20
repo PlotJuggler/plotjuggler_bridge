@@ -170,8 +170,11 @@ std::shared_ptr<BoundTransform> TransformSet::bind(const std::string& topic, con
       spdlog::info("Topic '{}' ({}) -> transform '{}' -> {}", topic, source_type, rule.transform, bound->output_type);
       return bound;
     } catch (const std::exception& e) {
-      spdlog::error(
-          "Transform '{}' could not be set up for '{}': {}; leaving it untransformed", rule.transform, topic, e.what());
+      if (warned_topics_.insert(topic).second) {  // bind() runs on every topic poll: log once
+        spdlog::error(
+            "Transform '{}' could not be set up for '{}': {}; leaving it untransformed", rule.transform, topic,
+            e.what());
+      }
       return nullptr;
     }
   }

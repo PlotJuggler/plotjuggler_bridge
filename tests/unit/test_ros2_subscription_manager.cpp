@@ -177,3 +177,50 @@ TEST_F(Ros2SubscriptionManagerTest, SubscribesWithSourceTypeAndForwardsTransform
 
   EXPECT_EQ(received, std::vector<std::byte>(3, std::byte{0x5A}));
 }
+
+// The client was told the output type at subscribe time, so a sample whose
+// transform fails must be dropped, never forwarded untransformed.
+TEST_F(Ros2SubscriptionManagerTest, FailedTransformDropsTheSample) {
+  TransformFactory f;
+  f.accepts = [](const std::string& t) { return t == "std_msgs/msg/String"; };
+  f.check_params = [](const nlohmann::json&) -> tl::expected<void, std::string> { return {}; };
+  f.output_type = [](const std::string& t) { return t; };
+  f.output_schema = [](const std::string&, const std::string& s) { return s; };
+  f.create = [](const std::string&, const nlohmann::json&) -> std::unique_ptr<MessageTransform> {
+    struct Failing : MessageTransform {
+      tl::expected<void, std::string> apply(std::span<const std::byte>, std::vector<std::byte>&) override {
+        return tl::make_unexpected(std::string("boom"));
+      }
+    };
+    return std::make_unique<Failing>();
+  };
+  auto set = TransformSet::create(
+                 nlohmann::json{{"transforms", {{{"match_topic", "/always_fails"}, {"transform", "failing"}}}}},
+                 {{"failing", f}})
+                 .value();
+  auto bound = set->bind("/always_fails", "std_msgs/msg/String");
+  ASSERT_NE(bound, nullptr);
+
+  auto node = std::make_shared<rclcpp::Node>("test_transform_hook_failure");
+  Ros2SubscriptionManager manager(node, set);
+  std::atomic<int> forwarded{0};
+  manager.set_message_callback(
+      [&](const std::string&, std::shared_ptr<std::vector<std::byte>>, uint64_t) { forwarded++; });
+  ASSERT_TRUE(manager.subscribe("/always_fails", "std_msgs/msg/String"));
+
+  auto publisher = node->create_publisher<std_msgs::msg::String>("/always_fails", rclcpp::QoS(10));
+  std_msgs::msg::String msg;
+  msg.data = "hello";
+  rclcpp::executors::SingleThreadedExecutor executor;
+  executor.add_node(node);
+
+  auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  while (bound->drops.load() < 3 && std::chrono::steady_clock::now() < deadline) {
+    publisher->publish(msg);
+    executor.spin_some();
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+
+  EXPECT_GE(bound->drops.load(), 3u);
+  EXPECT_EQ(forwarded.load(), 0);
+}

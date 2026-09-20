@@ -31,6 +31,9 @@ class StripTransform : public MessageTransform {
   explicit StripTransform(std::string type) : type_(std::move(type)) {}
 
   tl::expected<void, std::string> apply(std::span<const std::byte> in, std::vector<std::byte>& out) override {
+    if (in.empty()) {
+      return tl::make_unexpected(std::string("empty message"));
+    }
     try {
       // MessageStripper needs a SerializedMessage: one copy of the input.
       rclcpp::SerializedMessage input(in.size());
