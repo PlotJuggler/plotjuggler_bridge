@@ -2,8 +2,8 @@
 Changelog for package pj_ros_bridge
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-Forthcoming
------------
+0.10.0 (2026-09-20)
+-------------------
 * WebSocket permessage-deflate declined server-side (redundant with our own
   ZSTD compression; was costing CPU for no bandwidth benefit).
 * ROS2: ingest executor polled and drained (``ingest_poll_interval_ms``,
@@ -16,6 +16,9 @@ Forthcoming
   Fast DDS 3.4.0 -> 3.4.3, CLI11 2.6.0 -> 2.6.2. Fixed the FastDDS/RTI
   link failure when IXWebSocket is fetched with TLS.
 * CI and Debian release for ROS 2 Lyrical.
+* AppImage: bundle the dlopen'd RMW providers and rosidl typesupport
+  libraries, which ``ldd`` never reported — 0.9.0 AppImages aborted at
+  startup on machines without ROS 2 (`#10`).
 * Removed zero-initializing copies in the ingest and serializer hot paths
   (``resize()`` + ``memcpy`` -> direct-construct/``insert``).
 
