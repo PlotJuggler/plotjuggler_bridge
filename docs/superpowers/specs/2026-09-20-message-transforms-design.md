@@ -87,17 +87,14 @@ class MessageTransform {
       std::span<const std::byte> in, std::vector<std::byte>& out) = 0;
 };
 
-struct TransformOutputType {
-  std::string type_name;
-  std::string schema;
-};
-
 struct TransformFactory {
   std::function<bool(const std::string& source_type)> accepts;
-  std::function<TransformOutputType(const std::string& source_type,
-                                    const std::string& source_schema)> output;
-  std::function<tl::expected<std::unique_ptr<MessageTransform>, std::string>(
-      const nlohmann::json& params)> create;
+  std::function<tl::expected<void, std::string>(const nlohmann::json& params)> check_params;
+  std::function<std::string(const std::string& source_type)> output_type;
+  std::function<std::string(const std::string& source_type,
+                            const std::string& source_schema)> output_schema;
+  std::function<std::unique_ptr<MessageTransform>(const std::string& source_type,
+                                                  const nlohmann::json& params)> create;
 };
 ```
 
@@ -118,13 +115,14 @@ no downstream change) if measurement justifies it. Not built in v1.
 ### `cloudini` (`app/`, compiled only when Cloudini is available)
 
 `getDeserializedPointCloudMessage` → `applyResolutionProfile` → optional
-`applyVizLossyPreprocessing` → encode. Encoding uses the lower-level
-`PointcloudEncoder::encode(ConstBufferView, BufferView)` +
-`writePointCloudHeader` so the result is written directly into the
-`std::vector<std::byte>` (the convenience
-`convertPointCloud2ToCompressedCloud` writes a `vector<uint8_t>`, which would
-cost an extra output copy). Second stage `NONE`. The encoder and the
-preprocessing buffer are members, reused while the field layout is unchanged.
+`applyVizLossyPreprocessing` → `toEncodingInfo` →
+`convertPointCloud2ToCompressedCloud`. Cloudini's CDR writer (`nanocdr`) only
+targets `std::vector<uint8_t>`, so the transform encodes into a member scratch
+vector (capacity kept across calls) and copies the result — at compressed size
+— into `out`. v1 accepts that copy and the per-call `PointcloudEncoder`
+construction inside the convenience function; removing both needs a small
+Cloudini API addition (byte-generic output, reusable encoder), tracked
+separately. Second stage `NONE`.
 Output schema comes from Cloudini's embedded `ros_message_definitions.hpp`, so
 `point_cloud_interfaces` need not be installed.
 
@@ -181,9 +179,11 @@ for uniformity).
 ## Informational protocol additions (ignored by old clients)
 
 - `message_transforms` in the server capabilities list.
-- Optional `"source_type"` on `get_topics` entries of transformed topics.
-- Per-transform counters in the 5 s stats line: in bytes, out bytes, drops,
-  mean µs per sample.
+- Optional `"source_type"` on `get_topics` entries of transformed topics
+  (not on `topics_changed` entries in v1).
+- Per-topic transform counters (samples, drops, compression ratio, mean µs per
+  sample) logged with the final statistics at shutdown; the ROS2 entry point
+  has no periodic stats line today.
 
 ## Build
 
