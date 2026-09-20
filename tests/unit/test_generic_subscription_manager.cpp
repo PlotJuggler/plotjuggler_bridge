@@ -24,6 +24,7 @@
 #include <cstdlib>
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/imu.hpp>
+#include <std_msgs/msg/string.hpp>
 #include <thread>
 
 #include "pj_bridge_ros2/generic_subscription_manager.hpp"
@@ -434,4 +435,87 @@ TEST_F(GenericSubscriptionManagerTest, IsTransientLocalFalseForVolatilePublisher
 
 TEST_F(GenericSubscriptionManagerTest, IsTransientLocalFalseForUnsubscribedTopic) {
   EXPECT_FALSE(manager_->is_transient_local("/never_subscribed_topic"));
+}
+
+// ---------------------------------------------------------------------------
+// Draining a burst within one executor wait cycle
+//
+// An rclcpp executor hands over only ONE message per subscription per wait
+// cycle. Without draining, a single spin_once() delivers 1 message even if
+// 20 are queued in the reader's history. subscribe()'s callback must drain
+// the rest via take_serialized() after delivering the one the executor gave
+// it, so a single wait cycle empties a burst instead of taking one cycle per
+// message.
+// ---------------------------------------------------------------------------
+TEST_F(GenericSubscriptionManagerTest, DrainsAllPendingMessagesInOneExecutorPass) {
+  // Publisher first, with enough depth (>=20) for the subscription's QoS
+  // (derived from the publisher via adapt_qos()) to hold a 20-message burst,
+  // and RELIABLE so nothing is dropped before the executor ever spins.
+  auto publisher =
+      node_->create_publisher<std_msgs::msg::String>("/drain_burst_topic", rclcpp::QoS(50).reliable());
+
+  // Wait for the publisher to be discoverable before subscribing so
+  // adapt_qos() sees it and derives a >=20 depth.
+  {
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+    while (node_->count_publishers("/drain_burst_topic") == 0 &&
+           std::chrono::steady_clock::now() < deadline) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+  }
+  ASSERT_GT(node_->count_publishers("/drain_burst_topic"), 0u);
+
+  std::atomic<int> received_count{0};
+  auto callback = [&received_count](const std::string&, const std::shared_ptr<rclcpp::SerializedMessage>&, uint64_t) {
+    received_count++;
+  };
+
+  ASSERT_TRUE(manager_->subscribe("/drain_burst_topic", "std_msgs/msg/String", callback));
+
+  // Wait until the publisher sees the subscription matched. Nothing has been
+  // published yet, so spinning here would be harmless — but no spin is
+  // needed for local graph updates either.
+  {
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+    while (publisher->get_subscription_count() == 0 && std::chrono::steady_clock::now() < deadline) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+  }
+  ASSERT_GT(publisher->get_subscription_count(), 0u);
+
+  // Publish a burst back-to-back with no executor running, so all 20 land in
+  // the reader's history before anything is ever delivered.
+  for (int i = 0; i < 20; ++i) {
+    std_msgs::msg::String msg;
+    msg.data = "msg";
+    publisher->publish(msg);
+  }
+  std::this_thread::sleep_for(std::chrono::milliseconds(300));
+
+  // An executor's wait cycle hands over exactly one message per
+  // subscription; spin_once() (unlike spin_some(), which may loop through
+  // several wait cycles in one call) executes exactly one ready callback per
+  // call. A freshly-added node's very first wait cycle in this environment
+  // can spuriously find nothing ready yet even though data is already
+  // sitting in the reader (an executor/RMW wait-set warm-up quirk, not
+  // something the fix under test controls), so we retry spin_once() calls
+  // until something is delivered — but the discriminating check is that the
+  // *first* non-zero observation must already be all 20: without the drain
+  // loop in subscribe()'s callback, a single ready wait cycle only ever
+  // delivers 1 message, so received_count would stop at 1 instead of
+  // jumping straight to 20.
+  rclcpp::executors::SingleThreadedExecutor executor;
+  executor.add_node(node_);
+  int spin_calls = 0;
+  constexpr int kMaxSpinCalls = 30;
+  for (; spin_calls < kMaxSpinCalls && received_count.load() == 0; ++spin_calls) {
+    executor.spin_once(std::chrono::milliseconds(200));
+  }
+
+  ASSERT_GT(received_count.load(), 0) << "no message delivered after " << spin_calls << " spin_once() call(s)";
+  EXPECT_EQ(received_count.load(), 20) << "the wait cycle that delivered the first message only delivered "
+                                        << received_count.load() << " of 20 — drain loop did not run";
+
+  executor.remove_node(node_);
+  manager_->unsubscribe("/drain_burst_topic");
 }

@@ -25,6 +25,10 @@
 
 namespace pj_bridge {
 
+namespace {
+constexpr size_t kMaxDrainPerCallback = 1000;
+}  // namespace
+
 GenericSubscriptionManager::GenericSubscriptionManager(
     rclcpp::Node::SharedPtr node, size_t min_qos_depth, size_t max_qos_depth)
     : node_(node), min_qos_depth_(min_qos_depth), max_qos_depth_(max_qos_depth) {}
@@ -103,9 +107,25 @@ bool GenericSubscriptionManager::subscribe(
   }
 
   try {
-    auto sub_callback = [topic_name, callback](std::shared_ptr<rclcpp::SerializedMessage> msg) {
-      uint64_t receive_time = get_current_time_ns();
-      callback(topic_name, msg, receive_time);
+    // The executor hands over one message per subscription per wait cycle, and
+    // each cycle rebuilds the whole wait set (O(subscriptions)). Drain whatever
+    // else the reader holds so a burst costs one cycle instead of one per message.
+    auto self = std::make_shared<std::weak_ptr<rclcpp::GenericSubscription>>();
+    auto sub_callback = [topic_name, callback, self](std::shared_ptr<rclcpp::SerializedMessage> msg) {
+      callback(topic_name, msg, get_current_time_ns());
+      auto sub = self->lock();
+      if (!sub) {
+        return;
+      }
+      // Bounded so a publisher faster than we can drain cannot starve other topics.
+      for (size_t i = 0; i < kMaxDrainPerCallback; ++i) {
+        auto extra = std::make_shared<rclcpp::SerializedMessage>();
+        rclcpp::MessageInfo info;
+        if (!sub->take_serialized(*extra, info)) {
+          break;
+        }
+        callback(topic_name, extra, get_current_time_ns());
+      }
     };
 
     rclcpp::QoS qos = adapt_qos(topic_name);
@@ -113,6 +133,7 @@ bool GenericSubscriptionManager::subscribe(
 
     auto subscription = node_->create_generic_subscription(topic_name, topic_type, qos, sub_callback);
 
+    *self = subscription;
     subscriptions_[topic_name] = SubscriptionInfo{subscription, 1, transient_local};
 
     return true;
