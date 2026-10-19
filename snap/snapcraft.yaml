@@ -1,0 +1,73 @@
+name: pj-bridge
+adopt-info: pj_bridge   # version and grade derived from git tags (see pj_bridge part)
+version: git
+title: PlotJuggler Bridge
+summary: ROS2 to WebSocket bridge server — forwards topic content at 50 Hz
+license: AGPL-3.0
+contact: https://github.com/PlotJuggler/plotjuggler_bridge/issues
+issues: https://github.com/PlotJuggler/plotjuggler_bridge/issues
+source-code: https://github.com/PlotJuggler/plotjuggler_bridge
+website: https://github.com/PlotJuggler/plotjuggler_bridge
+description: >
+  ROS 2 bridge server that forwards middleware topic content over WebSocket to
+  PlotJuggler clients and any other WebSocket consumer.
+
+  Clients subscribe to topics and receive ZSTD-compressed aggregated messages at
+  50 Hz without needing a full middleware installation.
+
+  Call the snap with:
+    pj-bridge.pj-bridge-ros2 --ros-args -p port:=9090
+
+confinement: strict
+base: core24
+
+# ROS 2 typesupport and middleware libraries are loaded via dlopen at runtime
+# by the ROS 2 plugin system; the library linter cannot detect this.
+lint:
+  ignore:
+    - library
+
+parts:
+  pj_bridge:
+    plugin: colcon
+    source: .
+    override-pull: |
+      craftctl default
+      # Version/grade from git tag: clean tag -> stable, ahead of tag -> devel.
+      git config --global --add safe.directory '*'
+      version="$(git describe --always --tags | sed -e 's/^v//;s/-/+git/;y/-/./')"
+      if echo "$version" | grep -q '+git'; then grade=devel; else grade=stable; fi
+      craftctl set version="$version"
+      craftctl set grade="$grade"
+    build-packages:
+      - git
+      - libssl-dev
+      - zlib1g-dev
+
+  snap-dependencies:
+    # A separate manifest keeps the broad runtime dependencies (msgs & rmw)
+    plugin: colcon
+    source: snap/local
+    after: [pj_bridge]
+    colcon-packages: [pj_bridge_snap]
+    stage:
+      - -opt/ros/snap/local_setup.sh
+      - -opt/ros/snap/setup.sh
+
+  fastrtps-config:
+    plugin: dump
+    source: snap/local
+    organize:
+      fastrtps_no_shm.xml: etc/pj-bridge/fastrtps_no_shm.xml
+    stage:
+      - etc/pj-bridge/fastrtps_no_shm.xml
+
+apps:
+  pj-bridge-ros2:
+    command: opt/ros/snap/lib/pj_bridge/pj_bridge_ros2
+    extensions: [ros2-jazzy]
+    plugs:
+      - network
+      - network-bind
+    environment:
+      FASTRTPS_DEFAULT_PROFILES_FILE: $SNAP/etc/pj-bridge/fastrtps_no_shm.xml

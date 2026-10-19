@@ -1,0 +1,24 @@
+# =============================================================================
+# Snap Promote — manual gate: jazzy/candidate -> jazzy/stable
+#
+# Run via the Actions tab once a candidate revision has soaked.
+# Uses the canonical reusable promote workflow.
+# =============================================================================
+
+name: Snap Promote
+
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  promote:
+    permissions:
+      contents: read
+    uses: canonical/robotics-actions-workflows/.github/workflows/promote.yaml@main
+    secrets:
+      snapstore-login: ${{ secrets.SNAPSTORE_LOGIN }}
+    with:
+      from-channel: jazzy/candidate
+      to-channel: jazzy/stable

@@ -1,0 +1,81 @@
+# =============================================================================
+# Snap Package — build, test and publish via the canonical reusable workflow.
+#
+# Branch push -> jazzy/edge, tag push -> jazzy/candidate. PRs build+test only.
+# Promotion jazzy/candidate -> jazzy/stable lives in snap-promote.yaml.
+#
+# SETUP: store the credentials from
+#   snapcraft export-login --snaps pj-bridge
+# as the SNAPSTORE_LOGIN repository secret.
+# =============================================================================
+
+name: Snap Package
+
+on:
+  push:
+    branches: [main]
+    tags: ['*']
+  pull_request:
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  snap:
+    permissions:
+      contents: read
+      actions: write
+    uses: canonical/robotics-actions-workflows/.github/workflows/snap.yaml@main
+    secrets:
+      snapstore-login: ${{ secrets.SNAPSTORE_LOGIN }}
+    with:
+      runs-on: '["ubuntu-latest", "ubuntu-24.04-arm"]'
+      snap-track: jazzy
+      # Packaging check: start the bridge snap, have a ros2-cli snap publish a
+      # topic, drive one WebSocket subscribe, and confirm the bridge served it.
+      snap-test-script: |
+        #!/usr/bin/env bash
+        set -euxo pipefail
+
+        sudo snap install ros2-cli --channel jazzy
+        # websocat has no snap; grab the pinned static musl binary for this runner.
+        case "$(uname -m)" in
+          x86_64) websocat_arch=x86_64 ;;
+          aarch64) websocat_arch=aarch64 ;;
+          *) echo "Unsupported architecture: $(uname -m)" >&2; exit 1 ;;
+        esac
+        sudo curl -fsSL -o /usr/local/bin/websocat \
+          "https://github.com/vi/websocat/releases/download/v1.13.0/websocat.${websocat_arch}-unknown-linux-musl"
+        sudo chmod +x /usr/local/bin/websocat
+
+        pj-bridge.pj-bridge-ros2 --ros-args -p port:=9090 \
+          > /tmp/pj_bridge.log 2>&1 &
+        BRIDGE_PID=$!
+
+        ros2-cli.ros2 topic pub -r 1 /hello_world std_msgs/msg/String \
+          "data: 'hello world'" > /tmp/pub_hello.log 2>&1 &
+        PUB_PID=$!
+
+        # Retry while the WebSocket starts up and DDS discovers the topic.
+        for attempt in {1..10}; do
+          echo '{"command":"subscribe","topics":["/hello_world"],"id":"s1"}' \
+            | timeout 5 websocat ws://localhost:9090 || true
+          if grep -q "subscribed to topic '/hello_world'" /tmp/pj_bridge.log; then
+            break
+          fi
+          sleep 1
+        done
+
+        set +e
+        grep -q "subscribed to topic '/hello_world'" /tmp/pj_bridge.log
+        TEST_EXIT=$?
+        set -e
+
+        kill "${BRIDGE_PID}" "${PUB_PID}" 2>/dev/null || true
+        echo "--- Bridge log ---";    cat /tmp/pj_bridge.log
+        echo "--- Publisher log ---"; cat /tmp/pub_hello.log
+        exit "${TEST_EXIT}"

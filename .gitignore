@@ -15,3 +15,6 @@ install_tsan/
 build_asan/
 install_asan/
 log/
+
+# Built snap artifacts
+*.snap
