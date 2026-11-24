@@ -17,9 +17,13 @@
  * along with pj_bridge. If not, see <https://www.gnu.org/licenses/>.
  */
 
+#include <arpa/inet.h>
 #include <dlfcn.h>
 #include <gtest/gtest.h>
 #include <ixwebsocket/IXWebSocket.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <unistd.h>
 
 #include <atomic>
 #include <chrono>
@@ -29,6 +33,7 @@
 #include <functional>
 #include <future>
 #include <mutex>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <vector>
@@ -920,6 +925,99 @@ TEST(WebSocketMiddlewareSlowClientTest, ShutdownWaitsForARunningDisconnectCallba
   ASSERT_TRUE(wait_until([&] { return entered.load(); }, std::chrono::seconds(2)));
   mw.shutdown();
   EXPECT_TRUE(finished) << "shutdown() returned while the disconnect callback was still running";
+}
+
+// BridgeServer's disconnect callback takes locks that its publish cycle can
+// hold while compressing frames: running it on the transport's I/O thread
+// stalled every other client meanwhile.
+TEST(WebSocketMiddlewareSlowClientTest, BlockedDisconnectCallbackDoesNotStallOtherClients) {
+  WebSocketMiddleware mw;
+  std::promise<void> release;
+  std::shared_future<void> released = release.get_future().share();
+  std::atomic<bool> entered{false};
+  mw.set_on_disconnect([&entered, released](const std::string&) {
+    entered = true;
+    released.wait();
+  });
+  ASSERT_TRUE(mw.initialize(18126).has_value());
+
+  ix::WebSocket leaving;
+  ix::WebSocket staying;
+  start_client(leaving, 18126);
+  start_client(staying, 18126);
+  ASSERT_FALSE(register_client(mw, leaving).empty());
+  ASSERT_FALSE(register_client(mw, staying).empty());
+  leaving.stop();
+  ASSERT_TRUE(wait_until([&] { return entered.load(); }, std::chrono::seconds(2)));
+
+  staying.send("still here");
+  std::vector<uint8_t> data;
+  std::string client_id;
+  const bool received = poll_receive_request(mw, data, client_id, 1000);
+  release.set_value();
+  EXPECT_TRUE(received) << "a running disconnect callback stalled another client's requests";
+  staying.stop();
+  mw.shutdown();
+}
+
+// Requests are small JSON: a huge message must not be buffered (Beast's
+// default limit is 16 MiB per message, times 1024 queued requests).
+TEST(WebSocketMiddlewareSlowClientTest, OversizedRequestClosesTheConnection) {
+  WebSocketMiddleware mw;
+  std::atomic<bool> disconnected{false};
+  mw.set_on_disconnect([&](const std::string&) { disconnected = true; });
+  ASSERT_TRUE(mw.initialize(18127).has_value());
+
+  ix::WebSocket client;
+  start_client(client, 18127);
+  ASSERT_FALSE(register_client(mw, client).empty());
+  client.send(std::string(2U << 20, 'x'));  // 2 MiB
+  EXPECT_TRUE(wait_until([&] { return disconnected.load(); }, std::chrono::seconds(2)))
+      << "a 2 MiB request was accepted";
+  std::vector<uint8_t> data;
+  std::string client_id;
+  EXPECT_FALSE(mw.receive_request(data, client_id));
+  client.stop();
+}
+
+// An exception thrown by a callback must not take the server down.
+TEST(WebSocketMiddlewareSlowClientTest, ThrowingCallbackKeepsTheServerRunning) {
+  WebSocketMiddleware mw;
+  mw.set_on_disconnect([](const std::string&) { throw std::runtime_error("callback failed"); });
+  ASSERT_TRUE(mw.initialize(18128).has_value());
+
+  ix::WebSocket first;
+  start_client(first, 18128);
+  ASSERT_FALSE(register_client(mw, first).empty());
+  first.stop();
+  std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+  ix::WebSocket second;
+  start_client(second, 18128);
+  EXPECT_FALSE(register_client(mw, second).empty()) << "the server stopped after a callback threw";
+  second.stop();
+  mw.shutdown();
+}
+
+// A connection that never completes the WebSocket handshake must not keep
+// shutdown() waiting for its deadline.
+TEST(WebSocketMiddlewareSlowClientTest, ShutdownClosesConnectionsStillInTheHandshake) {
+  WebSocketMiddleware mw;
+  ASSERT_TRUE(mw.initialize(18129).has_value());
+
+  const int fd = socket(AF_INET, SOCK_STREAM, 0);
+  sockaddr_in addr{};
+  addr.sin_family = AF_INET;
+  addr.sin_port = htons(18129);
+  addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  ASSERT_EQ(connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)), 0);
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));  // accepted; no upgrade request sent
+
+  const auto start = std::chrono::steady_clock::now();
+  mw.shutdown();
+  const auto elapsed = std::chrono::steady_clock::now() - start;
+  close(fd);
+  EXPECT_LT(elapsed, std::chrono::seconds(1)) << "shutdown() waited for a connection still in the handshake";
 }
 
 int main(int argc, char** argv) {

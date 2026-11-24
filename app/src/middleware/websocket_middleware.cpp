@@ -27,6 +27,8 @@
 #include <algorithm>
 #include <boost/asio/ip/tcp.hpp>
 #include <boost/asio/post.hpp>
+#include <boost/asio/steady_timer.hpp>
+#include <boost/asio/thread_pool.hpp>
 #include <boost/beast/core.hpp>
 #include <boost/beast/websocket.hpp>
 #include <chrono>
@@ -58,7 +60,14 @@ struct WebSocketMiddleware::Io {
 #endif
   asio::io_context ioc{1};
   tcp::acceptor acceptor{ioc};
-  std::promise<void> done;  // set when ioc.run() returns
+  asio::steady_timer accept_retry{ioc};
+  /// Every session not yet destroyed, including those still in the handshake,
+  /// so shutdown() can close them all. Io thread only.
+  std::vector<std::weak_ptr<Session>> sessions;
+  /// Runs the connect/disconnect callbacks, in order, off the io thread: they
+  /// may take locks the bridge holds for a while.
+  asio::thread_pool callbacks{1};
+  std::promise<void> done;  // set when the io thread ends
   std::thread thread;
 };
 
@@ -66,8 +75,9 @@ struct WebSocketMiddleware::Io {
 /// immutable ones and `queue` (thread-safe), which the bridge's threads fill.
 class WebSocketMiddleware::Session : public std::enable_shared_from_this<Session> {
  public:
-  Session(WebSocketMiddleware& mw, std::string client_id, size_t backlog, int socket_fd, asio::any_io_executor ex)
-      : id(std::move(client_id)), queue(backlog), fd(socket_fd), executor(std::move(ex)), mw_(mw) {}
+  Session(
+      WebSocketMiddleware& mw, Io& io, std::string client_id, size_t backlog, int socket_fd, asio::any_io_executor ex)
+      : id(std::move(client_id)), queue(backlog), fd(socket_fd), executor(std::move(ex)), mw_(mw), io_(io) {}
   virtual ~Session() = default;
   Session(const Session&) = delete;
   Session& operator=(const Session&) = delete;
@@ -84,14 +94,16 @@ class WebSocketMiddleware::Session : public std::enable_shared_from_this<Session
 
  protected:
   WebSocketMiddleware& mw_;
+  Io& io_;
 };
 
 template <class Stream>
 class WebSocketMiddleware::SessionImpl final : public WebSocketMiddleware::Session {
  public:
   template <class... Args>
-  SessionImpl(WebSocketMiddleware& mw, std::string client_id, size_t backlog, tcp::socket&& socket, Args&... args)
-      : Session(mw, std::move(client_id), backlog, socket.native_handle(), socket.get_executor()),
+  SessionImpl(
+      WebSocketMiddleware& mw, Io& io, std::string client_id, size_t backlog, tcp::socket&& socket, Args&... args)
+      : Session(mw, io, std::move(client_id), backlog, socket.native_handle(), socket.get_executor()),
         ws_(std::move(socket), args...) {}
 
   void start() override {
@@ -111,7 +123,7 @@ class WebSocketMiddleware::SessionImpl final : public WebSocketMiddleware::Sessi
   }
 
   void kick() override {
-    if (!open_ || closed_ || writing_) {
+    if (!open_ || closing_ || closed_ || writing_) {
       return;
     }
     auto item = queue.try_pop();
@@ -132,12 +144,13 @@ class WebSocketMiddleware::SessionImpl final : public WebSocketMiddleware::Sessi
   }
 
   void close() override {
-    if (closed_) {
+    if (closing_ || closed_) {
       return;
     }
     if (!open_) {
       return abort();
     }
+    closing_ = true;  // no data frame may follow the Close frame
     // Waits behind a write in progress; shutdown() bounds the wait.
     ws_.async_close(websocket::close_code::going_away, [self = shared()](beast::error_code) { self->fail({}); });
   }
@@ -161,13 +174,14 @@ class WebSocketMiddleware::SessionImpl final : public WebSocketMiddleware::Sessi
     // Default options leave permessage-deflate disabled, so the server declines
     // it: binary frames are already zstd-compressed.
     ws_.set_option(websocket::permessage_deflate{});
-    ws_.auto_fragment(false);  // one WebSocket frame per message
+    ws_.auto_fragment(false);                // one WebSocket frame per message
+    ws_.read_message_max(kMaxRequestBytes);  // requests are small JSON; a larger one closes the connection
     ws_.async_accept([self = shared()](beast::error_code ec) {
       if (ec) {
         return self->fail(ec);
       }
       self->open_ = true;
-      self->mw_.on_open(self);
+      self->mw_.on_open(self->io_, self);
       self->read();
       self->kick();
     });
@@ -197,7 +211,7 @@ class WebSocketMiddleware::SessionImpl final : public WebSocketMiddleware::Sessi
       spdlog::debug("WebSocket client '{}': {}", id, ec.message());
     }
     if (open_) {
-      mw_.on_closed(id);
+      mw_.on_closed(io_, id);
     }
     beast::get_lowest_layer(ws_).close();
   }
@@ -206,6 +220,7 @@ class WebSocketMiddleware::SessionImpl final : public WebSocketMiddleware::Sessi
   beast::flat_buffer buffer_;
   std::string out_;  // the item being written
   bool open_ = false;
+  bool closing_ = false;  // close() sent (or is sending) the Close frame
   bool closed_ = false;
   bool writing_ = false;
 };
@@ -264,10 +279,14 @@ tl::expected<void, std::string> WebSocketMiddleware::initialize(uint16_t port) {
 
   do_accept(*io);
   io->thread = std::thread([raw = io.get()] {
-    try {
-      raw->ioc.run();
-    } catch (const std::exception& e) {
-      spdlog::error("WebSocket io thread stopped: {}", e.what());
+    // A handler that throws must not leave the bridge without a server.
+    for (;;) {
+      try {
+        raw->ioc.run();
+        break;
+      } catch (const std::exception& e) {
+        spdlog::error("WebSocket io handler threw: {}", e.what());
+      }
     }
     raw->done.set_value();
   });
@@ -282,9 +301,15 @@ void WebSocketMiddleware::do_accept(Io& io) {
       return;  // shutdown() closed it
     }
     if (ec) {
-      // ponytail: retries at once; a persistent error (EMFILE) spins until it clears.
+      // Back off: an error such as EMFILE persists until descriptors free up.
       spdlog::warn("WebSocket accept failed: {}", ec.message());
-      return do_accept(io);
+      io.accept_retry.expires_after(kAcceptRetryDelay);
+      io.accept_retry.async_wait([this, &io](beast::error_code wait_ec) {
+        if (!wait_ec && io.acceptor.is_open()) {
+          do_accept(io);
+        }
+      });
+      return;
     }
     beast::error_code ignored;
     socket.set_option(tcp::no_delay(true), ignored);
@@ -298,30 +323,50 @@ void WebSocketMiddleware::do_accept(Io& io) {
     std::shared_ptr<Session> session;
 #ifdef PJ_BRIDGE_TLS
     if (io.ssl) {
-      session = std::make_shared<SessionImpl<TlsStream>>(*this, id, client_backlog_size_, std::move(socket), *io.ssl);
+      session =
+          std::make_shared<SessionImpl<TlsStream>>(*this, io, id, client_backlog_size_, std::move(socket), *io.ssl);
     }
 #endif
     if (!session) {
-      session = std::make_shared<SessionImpl<beast::tcp_stream>>(*this, id, client_backlog_size_, std::move(socket));
+      session =
+          std::make_shared<SessionImpl<beast::tcp_stream>>(*this, io, id, client_backlog_size_, std::move(socket));
     }
+    io.sessions.erase(
+        std::remove_if(
+            io.sessions.begin(), io.sessions.end(), [](const std::weak_ptr<Session>& s) { return s.expired(); }),
+        io.sessions.end());
+    io.sessions.push_back(session);
     session->start();
     do_accept(io);
   });
 }
 
-void WebSocketMiddleware::on_open(const std::shared_ptr<Session>& session) {
+void WebSocketMiddleware::on_open(Io& io, const std::shared_ptr<Session>& session) {
   {
     std::lock_guard<std::mutex> lock(clients_mutex_);
     clients_[session->id] = session;
   }
-  ConnectionCallback cb;
-  {
-    std::lock_guard<std::mutex> lock(state_mutex_);
-    cb = on_connect_;
-  }
-  if (cb) {
-    cb(session->id);
-  }
+  notify(io, &WebSocketMiddleware::on_connect_, session->id);
+}
+
+void WebSocketMiddleware::notify(Io& io, ConnectionCallback WebSocketMiddleware::*which, const std::string& client_id) {
+  asio::post(io.callbacks, [this, which, client_id] {
+    ConnectionCallback cb;
+    {
+      std::lock_guard<std::mutex> lock(state_mutex_);
+      cb = this->*which;  // read when it runs: shutdown() clears the callbacks
+    }
+    if (!cb) {
+      return;
+    }
+    try {
+      cb(client_id);
+    } catch (const std::exception& e) {
+      spdlog::error("WebSocket connection callback for client '{}' threw: {}", client_id, e.what());
+    } catch (...) {
+      spdlog::error("WebSocket connection callback for client '{}' threw", client_id);
+    }
+  });
 }
 
 void WebSocketMiddleware::on_message(const std::string& client_id, std::string text) {
@@ -334,7 +379,7 @@ void WebSocketMiddleware::on_message(const std::string& client_id, std::string t
   incoming_queue_.push_back(IncomingRequest{client_id, std::vector<uint8_t>(text.begin(), text.end())});
 }
 
-void WebSocketMiddleware::on_closed(const std::string& client_id) {
+void WebSocketMiddleware::on_closed(Io& io, const std::string& client_id) {
   {
     std::lock_guard<std::mutex> lock(clients_mutex_);
     auto it = clients_.find(client_id);
@@ -354,14 +399,7 @@ void WebSocketMiddleware::on_closed(const std::string& client_id) {
             [&](const IncomingRequest& req) { return req.client_id == client_id; }),
         incoming_queue_.end());
   }
-  ConnectionCallback cb;
-  {
-    std::lock_guard<std::mutex> lock(state_mutex_);
-    cb = on_disconnect_;
-  }
-  if (cb) {
-    cb(client_id);
-  }
+  notify(io, &WebSocketMiddleware::on_disconnect_, client_id);
 }
 
 void WebSocketMiddleware::shutdown() {
@@ -380,25 +418,24 @@ void WebSocketMiddleware::shutdown() {
   // On the io thread: stop accepting and close every connection. The io
   // thread then runs out of work and returns, unless a client stops reading;
   // the deadline below covers that.
-  asio::post(io->ioc, [this, raw = io.get()] {
+  asio::post(io->ioc, [raw = io.get()] {
     beast::error_code ignored;
     raw->acceptor.close(ignored);
-    std::vector<std::shared_ptr<Session>> sessions;
-    {
-      std::lock_guard<std::mutex> lock(clients_mutex_);
-      for (const auto& [id, session] : clients_) {
-        sessions.push_back(session);
+    raw->accept_retry.cancel();
+    for (const auto& weak : raw->sessions) {
+      if (auto session = weak.lock()) {
+        session->close();  // a session still in the handshake is dropped at once
       }
-    }
-    for (const auto& session : sessions) {
-      session->close();
     }
   });
   if (io->done.get_future().wait_for(std::chrono::seconds(kShutdownTimeoutSeconds)) != std::future_status::ready) {
     spdlog::warn("[shutdown] WebSocket clients did not close within {}s; dropping them", kShutdownTimeoutSeconds);
     io->ioc.stop();
   }
-  io->thread.join();  // also waits for a callback still running
+  io->thread.join();
+  // No callback is queued after the io thread ends, and the ones still queued
+  // see the cleared callbacks; this waits for one still running.
+  io->callbacks.join();
 
   {
     std::lock_guard<std::mutex> lock(clients_mutex_);

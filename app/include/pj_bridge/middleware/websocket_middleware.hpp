@@ -59,12 +59,14 @@ namespace pj_bridge {
 /// and the backlog stays in the OutboundQueue, where old frames can still be
 /// dropped (docs/API.md, "Slow clients / backpressure").
 ///
-/// Connect/disconnect callbacks run on the io thread; shutdown() joins it, so
-/// no callback runs after shutdown() returns.
+/// Connect/disconnect callbacks run in order on a dedicated callback thread,
+/// never on the io thread, so a callback that waits for the bridge's locks
+/// does not stall I/O. shutdown() joins both threads, so no callback runs
+/// after shutdown() returns.
 ///
 /// Thread safety: all public methods may be called from any thread, except
-/// shutdown() and the destructor, which must not run on the io thread (from a
-/// callback).
+/// shutdown() and the destructor, which must not be called from a connect or
+/// disconnect callback (they wait for the callback thread).
 class WebSocketMiddleware : public MiddlewareInterface {
  public:
   /// Default per-client limit of queued normal frames: about 20 s at the
@@ -122,9 +124,11 @@ class WebSocketMiddleware : public MiddlewareInterface {
   };
 
   // Io-thread events from a Session.
-  void on_open(const std::shared_ptr<Session>& session);
+  void on_open(Io& io, const std::shared_ptr<Session>& session);
   void on_message(const std::string& client_id, std::string text);
-  void on_closed(const std::string& client_id);
+  void on_closed(Io& io, const std::string& client_id);
+  /// Run the callback in @p which for @p client_id on the callback thread.
+  void notify(Io& io, ConnectionCallback WebSocketMiddleware::*which, const std::string& client_id);
   void do_accept(Io& io);
   /// Push to a connected client's queue and wake its writer. Under
   /// clients_mutex_, so no Session handle escapes the map (shutdown() destroys
@@ -154,6 +158,9 @@ class WebSocketMiddleware : public MiddlewareInterface {
 
   static constexpr int kShutdownTimeoutSeconds = 3;
   static constexpr size_t kMaxIncomingQueueSize = 1024;
+  /// Largest request message accepted; a larger one closes the connection.
+  static constexpr size_t kMaxRequestBytes = 1U << 20;
+  static constexpr std::chrono::milliseconds kAcceptRetryDelay{100};
 };
 
 }  // namespace pj_bridge
