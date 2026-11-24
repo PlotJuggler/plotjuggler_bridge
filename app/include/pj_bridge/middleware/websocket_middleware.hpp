@@ -22,20 +22,18 @@
 #include <ixwebsocket/IXWebSocketServer.h>
 
 #include <atomic>
-#include <chrono>
 #include <cstdint>
+#include <deque>
 #include <memory>
 #include <mutex>
 #include <optional>
-#include <queue>
 #include <string>
 #include <thread>
 #include <unordered_map>
 #include <vector>
 
-#include "pj_bridge/middleware/backpressure.hpp"
-#include "pj_bridge/middleware/bounded_frame_queue.hpp"
 #include "pj_bridge/middleware/middleware_interface.hpp"
+#include "pj_bridge/middleware/outbound_queue.hpp"
 
 namespace pj_bridge {
 
@@ -47,15 +45,21 @@ struct TlsConfig {
   std::string keyfile;
 };
 
+/// IXWebSocket server with one sender thread per client.
+///
+/// IXWebSocket's server-side send blocks until the kernel has taken every byte,
+/// so calling it from the bridge's event loop let one slow client stall every
+/// other client. Here send_reply()/send_binary() only push to the client's
+/// OutboundQueue, and the client's own sender thread does the blocking send.
+/// Each accepted socket also gets TCP_NOTSENT_LOWAT (kMaxUnsentBytes), so the
+/// kernel holds little unsent data and the backlog stays in the OutboundQueue,
+/// where old frames can still be dropped (docs/API.md, "Slow clients / backpressure").
+///
+/// Thread safety: all public methods may be called from any thread.
 class WebSocketMiddleware : public MiddlewareInterface {
  public:
-  /// @param socket_buffer_watermark bytes of outgoing socket buffer at/above
-  ///        which a client is considered congested (frames queue or shed).
-  ///        Defaults to kSocketBufferHighWatermark; primarily overridden in
-  ///        tests to exercise the congested path deterministically.
-  explicit WebSocketMiddleware(
-      size_t client_backlog_size = 100, std::optional<TlsConfig> tls = std::nullopt,
-      size_t socket_buffer_watermark = kSocketBufferHighWatermark);
+  /// @param client_backlog_size max kNormal frames queued per client before the oldest is dropped.
+  explicit WebSocketMiddleware(size_t client_backlog_size = 100, std::optional<TlsConfig> tls = std::nullopt);
   ~WebSocketMiddleware() override;
 
   WebSocketMiddleware(const WebSocketMiddleware&) = delete;
@@ -67,31 +71,30 @@ class WebSocketMiddleware : public MiddlewareInterface {
   void shutdown() override;
   bool receive_request(std::vector<uint8_t>& data, std::string& client_identity) override;
   bool send_reply(const std::string& client_identity, const std::vector<uint8_t>& data) override;
-  bool publish_data(const std::vector<uint8_t>& data) override;
-  // NOTE: the FramePriority default lives only on the base MiddlewareInterface
-  // declaration (defaults are bound statically, so repeating it here could
+  // NOTE: default arguments live only on the base MiddlewareInterface
+  // declaration (defaults are bound statically, so repeating them here could
   // silently diverge).
-  SendResult send_binary(
-      const std::string& client_identity, const std::vector<uint8_t>& data, FramePriority priority) override;
+  bool send_binary(
+      const std::string& client_identity, const std::vector<uint8_t>& data, FramePriority priority,
+      const std::string& key) override;
   bool is_ready() const override;
   void set_on_connect(ConnectionCallback callback) override;
   void set_on_disconnect(ConnectionCallback callback) override;
   void drop_pending(const std::string& client_identity) override;
 
-  /// Total number of frames dropped due to slow-client backpressure, summed
-  /// across all clients (currently connected and already disconnected).
+  /// kNormal frames dropped for slow clients (backlog overflow or drop_pending),
+  /// summed over the middleware's lifetime.
   uint64_t dropped_frame_count() const;
 
-  /// Total number of kHeavy frames shed before transmit under congestion
-  /// (dropped instead of queued), summed over the middleware's lifetime.
+  /// kHeavy frames replaced by a newer frame of the same topic before they
+  /// were sent, summed over the middleware's lifetime.
   uint64_t heavy_shed_count() const;
 
-  /// Lossy-send policy watermark adapted from foxglove_bridge (MIT License,
-  /// Copyright (c) Foxglove Technologies Inc): once a client's outgoing socket
-  /// buffer reaches this many bytes, further frames are queued (kNormal) or shed
-  /// (kHeavy) instead of blocking or disconnecting the client. Public so entry
-  /// points can sanity-check a configured heavy-frame threshold against it.
-  static constexpr size_t kSocketBufferHighWatermark = 1u << 20;  // 1 MiB
+  /// TCP_NOTSENT_LOWAT set on every client socket: the most unsent data the
+  /// kernel buffers before a send waits. At 128 KiB/s (about 1 Mbit/s) this
+  /// adds at most one second of latency, while the bytes already in flight
+  /// (and so the throughput of fast links) are not limited.
+  static constexpr int kMaxUnsentBytes = 128 * 1024;
 
  private:
   struct IncomingRequest {
@@ -99,34 +102,38 @@ class WebSocketMiddleware : public MiddlewareInterface {
     std::vector<uint8_t> data;
   };
 
+  struct Client {
+    std::shared_ptr<ix::WebSocket> ws;
+    std::shared_ptr<OutboundQueue> queue;
+    std::thread sender;
+    std::shared_ptr<std::atomic<bool>> sender_done;
+  };
+
+  std::shared_ptr<OutboundQueue> find_queue(const std::string& client_identity) const;
+  /// Fold a departing client's counters into the lifetime totals, stop its
+  /// queue and park its sender thread for joining. Requires clients_mutex_.
+  void retire_client(Client& client);
+  /// Remove parked clients from retired_ (all, or only those whose sender
+  /// finished) for joining outside the lock. Requires clients_mutex_.
+  std::vector<Client> take_retired(bool all);
+  static void join_senders(std::vector<Client>& clients);
+
   std::shared_ptr<ix::WebSocketServer> server_;
 
-  std::queue<IncomingRequest> incoming_queue_;
+  std::deque<IncomingRequest> incoming_queue_;
   mutable std::mutex queue_mutex_;
 
-  std::unordered_map<std::string, std::shared_ptr<ix::WebSocket>> clients_;
-  // Per-client backlog of frames withheld while the client's socket buffer is
-  // over the high watermark, and the steady-clock time each client's drop
-  // warning was last logged. Both are guarded by `clients_mutex_` (the same
-  // lock as `clients_`), not a separate mutex, so client lifecycle and
-  // pending-queue lifecycle stay consistent with each other.
-  std::unordered_map<std::string, BoundedFrameQueue> pending_frames_;
-  std::unordered_map<std::string, std::chrono::steady_clock::time_point> last_drop_warn_;
+  // Connected clients, the sender threads of departed clients (joined later,
+  // never from the IXWebSocket thread that reports the disconnect), and the
+  // counters of departed clients. All guarded by clients_mutex_.
+  std::unordered_map<std::string, Client> clients_;
+  std::vector<Client> retired_;
+  bool accepting_clients_ = false;
+  uint64_t dropped_from_departed_ = 0;
+  uint64_t shed_from_departed_ = 0;
   mutable std::mutex clients_mutex_;
 
-  // Sum of dropped_total() from clients that have since disconnected (their
-  // BoundedFrameQueue entry is erased from pending_frames_ on disconnect, so
-  // its count is folded in here to keep dropped_frame_count() a lifetime
-  // total). Guarded by clients_mutex_.
-  uint64_t dropped_from_disconnected_{0};
-
-  // Lifetime count of kHeavy frames shed before transmit under congestion
-  // (dropped rather than queued). Distinct from dropped_frame_count(), which
-  // counts backlog-overflow drops of kNormal frames. Guarded by clients_mutex_.
-  uint64_t heavy_shed_total_{0};
-
   size_t client_backlog_size_;
-  size_t socket_buffer_watermark_;
   std::optional<TlsConfig> tls_;
 
   ConnectionCallback on_connect_;
@@ -139,7 +146,6 @@ class WebSocketMiddleware : public MiddlewareInterface {
 
   static constexpr int kShutdownTimeoutSeconds = 3;
   static constexpr size_t kMaxIncomingQueueSize = 1024;
-  static constexpr int kDropWarnIntervalSeconds = 30;
 };
 
 }  // namespace pj_bridge

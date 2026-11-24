@@ -114,14 +114,6 @@ int main(int argc, char** argv) {
     rclcpp::shutdown();
     return 1;
   }
-  if (heavy_frame_threshold_bytes > 0 &&
-      static_cast<size_t>(heavy_frame_threshold_bytes) >= pj_bridge::WebSocketMiddleware::kSocketBufferHighWatermark) {
-    RCLCPP_WARN(
-        node->get_logger(),
-        "heavy_frame_threshold_bytes (%ld) >= socket watermark (%zu): messages between the two sizes stay 'light' and "
-        "queue instead of shedding under congestion — keep the threshold below the watermark",
-        heavy_frame_threshold_bytes, pj_bridge::WebSocketMiddleware::kSocketBufferHighWatermark);
-  }
   RCLCPP_INFO(node->get_logger(), "heavy_frame_threshold_bytes=%ld", heavy_frame_threshold_bytes);
 
   auto whitelist_result = pj_bridge::WhitelistFilter::create(topic_whitelist);

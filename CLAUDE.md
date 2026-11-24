@@ -119,7 +119,7 @@ BridgeServer does NOT own timers. The entry point (`main.cpp`) drives the event 
 
 4. **SessionManager** (`app/`) — Tracks clients, heartbeats, per-client subscriptions.
 
-5. **WebSocketMiddleware** (`app/`) — IXWebSocket implementation. Improved shutdown: shared_ptr server, timeout thread, pre-close clients.
+5. **WebSocketMiddleware** (`app/`) — IXWebSocket implementation. One `OutboundQueue` + sender thread per client, so sends never block the event loop (IXWebSocket server sends are blocking); client sockets get `TCP_NOTSENT_LOWAT`. Improved shutdown: shared_ptr server, timeout thread, pre-close clients.
 
 6. **Ros2TopicSource** (`ros2/`) — Wraps `TopicDiscovery` + `SchemaExtractor`. Schema encoding: `"ros2msg"`.
 

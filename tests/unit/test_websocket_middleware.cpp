@@ -23,8 +23,11 @@
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdlib>
 #include <filesystem>
+#include <future>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
@@ -79,20 +82,6 @@ TEST_F(WebSocketMiddlewareTest, ReceiveRequestWithoutInit) {
   EXPECT_FALSE(middleware_->receive_request(data, id));
 }
 
-TEST_F(WebSocketMiddlewareTest, PublishDataWithoutInit) {
-  std::vector<uint8_t> data = {1, 2, 3};
-  EXPECT_FALSE(middleware_->publish_data(data));
-}
-
-TEST_F(WebSocketMiddlewareTest, PublishDataNoClients) {
-  auto result = middleware_->initialize(18083);
-  ASSERT_TRUE(result.has_value());
-
-  std::vector<uint8_t> data = {1, 2, 3};
-  // No clients connected, should return false
-  EXPECT_FALSE(middleware_->publish_data(data));
-}
-
 TEST_F(WebSocketMiddlewareTest, ReceiveRequestTimeout) {
   auto result = middleware_->initialize(18084);
   ASSERT_TRUE(result.has_value());
@@ -117,7 +106,7 @@ TEST_F(WebSocketMiddlewareTest, SendBinaryToUnknownClient) {
   ASSERT_TRUE(result.has_value());
 
   std::vector<uint8_t> data = {1, 2, 3};
-  EXPECT_EQ(middleware_->send_binary("nonexistent_client", data, FramePriority::kNormal), SendResult::kClientGone);
+  EXPECT_FALSE(middleware_->send_binary("nonexistent_client", data, FramePriority::kNormal, ""));
 }
 
 TEST_F(WebSocketMiddlewareTest, ReceiveRequestNotInitializedReturnsFast) {
@@ -366,7 +355,7 @@ TEST_F(WebSocketMiddlewareTest, SendBinaryToConnectedClient) {
 
   // Send binary data from the server to this client
   std::vector<uint8_t> binary_payload = {0xDE, 0xAD, 0xBE, 0xEF, 0x01, 0x02, 0x03, 0x04};
-  EXPECT_EQ(middleware_->send_binary(client_id, binary_payload, FramePriority::kNormal), SendResult::kDelivered);
+  EXPECT_TRUE(middleware_->send_binary(client_id, binary_payload, FramePriority::kNormal, ""));
 
   // Wait for the client to receive the binary data
   {
@@ -377,48 +366,6 @@ TEST_F(WebSocketMiddlewareTest, SendBinaryToConnectedClient) {
 
   ASSERT_EQ(received_binary.size(), binary_payload.size());
   EXPECT_EQ(received_binary, binary_payload);
-
-  client.stop();
-  std::this_thread::sleep_for(std::chrono::milliseconds(100));
-}
-
-// With the socket watermark forced to 0, every connected client is treated as
-// congested, which makes the otherwise-unreachable over-watermark path testable
-// with a real connection: a kHeavy frame is shed (and counted) before transmit,
-// while a kNormal frame is queued. This covers the shed-counter wiring that
-// lives outside the pure run_backpressure() policy.
-TEST(WebSocketMiddlewareShedTest, HeavyFrameShedUnderForcedCongestionIncrementsCounter) {
-  WebSocketMiddleware middleware(/*client_backlog_size=*/100, std::nullopt, /*socket_buffer_watermark=*/0);
-  ASSERT_TRUE(middleware.initialize(18110).has_value());
-
-  ix::WebSocket client;
-  client.setUrl("ws://127.0.0.1:18110");
-  client.setOnMessageCallback([](const ix::WebSocketMessagePtr& /*msg*/) {});
-  client.start();
-  ASSERT_TRUE(wait_for_client_open(client)) << "Client failed to connect";
-  std::this_thread::sleep_for(std::chrono::milliseconds(100));
-
-  client.send("register");
-  std::vector<uint8_t> data;
-  std::string client_id;
-  ASSERT_TRUE(poll_receive_request(middleware, data, client_id));
-  ASSERT_FALSE(client_id.empty());
-
-  // The middleware is content-agnostic; it acts on the priority argument, not
-  // the frame bytes. A >=16-byte buffer is a realistic frame size.
-  std::vector<uint8_t> frame(32, 0x7F);
-
-  EXPECT_EQ(middleware.heavy_shed_count(), 0u);
-
-  EXPECT_EQ(middleware.send_binary(client_id, frame, FramePriority::kHeavy), SendResult::kShed);
-  EXPECT_EQ(middleware.heavy_shed_count(), 1u);
-
-  EXPECT_EQ(middleware.send_binary(client_id, frame, FramePriority::kHeavy), SendResult::kShed);
-  EXPECT_EQ(middleware.heavy_shed_count(), 2u);
-
-  // A normal frame under the same congestion is queued, not shed.
-  EXPECT_EQ(middleware.send_binary(client_id, frame, FramePriority::kNormal), SendResult::kQueued);
-  EXPECT_EQ(middleware.heavy_shed_count(), 2u);
 
   client.stop();
   std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -517,14 +464,9 @@ TEST_F(WebSocketMiddlewareTest, IncomingQueueBounded) {
 }
 
 // ---------------------------------------------------------------------------
-// Task 4 — Slow-client backpressure (bounded queue, drop-oldest)
-//
-// The drop-oldest policy itself is exercised by BoundedFrameQueue's own unit
-// tests (test_bounded_frame_queue.cpp), since forcing a real socket's
-// bufferedAmount() over the 1 MiB watermark is not realistically achievable
-// in a fast unit test. These tests instead cover the parts that only make
-// sense with a live WebSocketMiddleware: normal traffic never counts as
-// dropped, and the constructor accepts an explicit backlog size.
+// Slow-client backpressure: normal traffic never counts as dropped, and the
+// constructor accepts an explicit backlog size. The queueing policy itself is
+// covered by test_outbound_queue.cpp, stalled clients at the end of this file.
 // ---------------------------------------------------------------------------
 TEST_F(WebSocketMiddlewareTest, DroppedFrameCountZeroAfterNormalTraffic) {
   auto result = middleware_->initialize(18096);
@@ -548,7 +490,7 @@ TEST_F(WebSocketMiddlewareTest, DroppedFrameCountZeroAfterNormalTraffic) {
 
   std::vector<uint8_t> payload = {1, 2, 3, 4};
   for (int i = 0; i < 10; ++i) {
-    EXPECT_EQ(middleware_->send_binary(client_id, payload, FramePriority::kNormal), SendResult::kDelivered);
+    EXPECT_TRUE(middleware_->send_binary(client_id, payload, FramePriority::kNormal, ""));
   }
 
   EXPECT_EQ(middleware_->dropped_frame_count(), 0u);
@@ -557,23 +499,15 @@ TEST_F(WebSocketMiddlewareTest, DroppedFrameCountZeroAfterNormalTraffic) {
   std::this_thread::sleep_for(std::chrono::milliseconds(100));
 }
 
-// Regression guard for the disconnect-race fix in send_binary's enqueue path:
-// a client that is not (or no longer) in clients_ must never get a
-// pending_frames_ entry created for it. The over-watermark branch itself
-// cannot be reached from a unit test (we cannot force a real socket's
-// bufferedAmount() past 1 MiB), so this verifies the shared contract via the
-// public API: send_binary for an id absent from clients_ returns false and
-// leaves no pending state behind — dropped_frame_count() stays 0 even after
-// repeated attempts. The in-branch re-check under clients_mutex_ enforces the
-// same "client gone -> return false, no queue created" rule; only the actual
-// interleaving with a concurrent disconnect is not exercised here.
+// send_binary for an id that is not connected fails and leaves no per-client
+// state behind: dropped_frame_count() stays 0, also after shutdown.
 TEST_F(WebSocketMiddlewareTest, SendBinaryToAbsentClientCreatesNoPendingState) {
   auto result = middleware_->initialize(18098);
   ASSERT_TRUE(result.has_value());
 
   std::vector<uint8_t> data = {1, 2, 3};
   for (int i = 0; i < 5; ++i) {
-    EXPECT_EQ(middleware_->send_binary("never-connected", data, FramePriority::kNormal), SendResult::kClientGone);
+    EXPECT_FALSE(middleware_->send_binary("never-connected", data, FramePriority::kNormal, ""));
   }
   EXPECT_EQ(middleware_->dropped_frame_count(), 0u);
 
@@ -583,13 +517,9 @@ TEST_F(WebSocketMiddlewareTest, SendBinaryToAbsentClientCreatesNoPendingState) {
   EXPECT_EQ(middleware_->dropped_frame_count(), 0u);
 }
 
-// drop_pending discards a client's backpressure backlog when its session is
-// destroyed server-side (heartbeat timeout) while the socket stays open. A
-// unit test cannot force the over-watermark path that populates the backlog,
-// so this verifies the reachable contract: drop_pending is a safe idempotent
-// no-op for clients with no pending state (never connected, or connected but
-// never backlogged), never skews dropped_frame_count(), and leaves a live
-// client's socket fully usable — send_binary still succeeds afterwards.
+// drop_pending discards a client's queued frames when its session is destroyed
+// server-side (heartbeat timeout) while the socket stays open. It must be a
+// safe no-op for unknown clients and leave a live client's socket usable.
 TEST_F(WebSocketMiddlewareTest, DropPendingIsSafeNoOpAndKeepsSocketUsable) {
   auto result = middleware_->initialize(18099);
   ASSERT_TRUE(result.has_value());
@@ -619,7 +549,7 @@ TEST_F(WebSocketMiddlewareTest, DropPendingIsSafeNoOpAndKeepsSocketUsable) {
   EXPECT_EQ(middleware_->dropped_frame_count(), 0u);
 
   std::vector<uint8_t> payload = {1, 2, 3, 4};
-  EXPECT_EQ(middleware_->send_binary(client_id, payload, FramePriority::kNormal), SendResult::kDelivered);
+  EXPECT_TRUE(middleware_->send_binary(client_id, payload, FramePriority::kNormal, ""));
   EXPECT_EQ(middleware_->dropped_frame_count(), 0u);
 
   client.stop();
@@ -736,6 +666,208 @@ TEST(WebSocketMiddlewareTlsTest, TlsRoundTrip) {
   std::filesystem::remove_all(dir);
 }
 #endif  // IXWEBSOCKET_USE_TLS
+
+// ---------------------------------------------------------------------------
+// Slow / stalled clients
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// A real client whose receive path stalls: its message callback parks on a
+// gate, so IXWebSocket stops reading the socket and TCP backpressure builds up
+// toward the server, as on a slow link. release() lets it drain.
+class StalledClient {
+ public:
+  explicit StalledClient(int port) {
+    ws_.setUrl("ws://127.0.0.1:" + std::to_string(port));
+    ws_.setOnMessageCallback([this](const ix::WebSocketMessagePtr& msg) {
+      if (msg->type != ix::WebSocketMessageType::Message || !msg->binary) {
+        return;
+      }
+      std::unique_lock<std::mutex> lock(mutex_);
+      cv_.wait(lock, [this] { return released_; });
+      binary_frames_.push_back(msg->str);
+      cv_.notify_all();
+    });
+    ws_.start();
+  }
+
+  ~StalledClient() {
+    release();
+    ws_.stop();
+  }
+
+  ix::WebSocket& ws() {
+    return ws_;
+  }
+
+  void release() {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      released_ = true;
+    }
+    cv_.notify_all();
+  }
+
+  /// Wait until at least @p count binary frames arrived (after release()).
+  std::vector<std::string> wait_for_frames(size_t count, std::chrono::milliseconds timeout) {
+    std::unique_lock<std::mutex> lock(mutex_);
+    cv_.wait_for(lock, timeout, [&] { return binary_frames_.size() >= count; });
+    return binary_frames_;
+  }
+
+ private:
+  ix::WebSocket ws_;
+  std::mutex mutex_;
+  std::condition_variable cv_;
+  bool released_ = false;
+  std::vector<std::string> binary_frames_;
+};
+
+// Connect @p ws, send one text message and return the server-side client id.
+std::string register_client(WebSocketMiddleware& mw, ix::WebSocket& ws) {
+  if (!wait_for_client_open(ws)) {
+    return {};
+  }
+  ws.send("register");
+  std::vector<uint8_t> data;
+  std::string client_id;
+  return poll_receive_request(mw, data, client_id) ? client_id : std::string{};
+}
+
+}  // namespace
+
+// Reproduces the "one slow client stalls the bridge" bug: IXWebSocket server
+// sends block until the kernel accepts every byte, so pushing frames to a
+// client that stopped reading parked the caller (the bridge's single
+// request/publish/timeout thread) and with it every other client.
+TEST(WebSocketMiddlewareSlowClientTest, StalledClientNeverBlocksSenderOrOtherClients) {
+  WebSocketMiddleware mw;
+  ASSERT_TRUE(mw.initialize(18120).has_value());
+
+  StalledClient slow(18120);
+  const std::string slow_id = register_client(mw, slow.ws());
+  ASSERT_FALSE(slow_id.empty());
+
+  std::atomic<int> healthy_replies{0};
+  ix::WebSocket healthy;
+  healthy.setUrl("ws://127.0.0.1:18120");
+  healthy.setOnMessageCallback([&](const ix::WebSocketMessagePtr& msg) {
+    if (msg->type == ix::WebSocketMessageType::Message && !msg->binary) {
+      healthy_replies++;
+    }
+  });
+  healthy.start();
+  const std::string healthy_id = register_client(mw, healthy);
+  ASSERT_FALSE(healthy_id.empty());
+
+  // Far more than the loopback socket buffers can absorb (a few MB each way).
+  const std::vector<uint8_t> frame(1 << 20, 0x5A);
+  const std::vector<uint8_t> reply = {'o', 'k'};
+  auto sender = std::async(std::launch::async, [&] {
+    for (int i = 0; i < 32; ++i) {
+      mw.send_binary(slow_id, frame, FramePriority::kNormal, "");
+    }
+    mw.send_reply(healthy_id, reply);
+  });
+  const bool sender_finished = sender.wait_for(std::chrono::seconds(2)) == std::future_status::ready;
+
+  auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+  while (healthy_replies == 0 && std::chrono::steady_clock::now() < deadline) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  const int replies_while_stalled = healthy_replies;
+
+  slow.release();  // let a blocked sender (pre-fix) finish before asserting
+  sender.wait();
+
+  EXPECT_TRUE(sender_finished) << "send_binary blocked on a client that stopped reading";
+  EXPECT_EQ(replies_while_stalled, 1) << "a healthy client was starved by a stalled one";
+
+  healthy.stop();
+}
+
+// Issue #19: a slow client got every large message in order, so its latency
+// grew without bound. Now a heavy frame still queued is replaced by the newer
+// one of the same topic, and the client ends with the newest.
+TEST(WebSocketMiddlewareSlowClientTest, StalledClientGetsTheNewestHeavyFrame) {
+  WebSocketMiddleware mw;
+  ASSERT_TRUE(mw.initialize(18122).has_value());
+
+  StalledClient slow(18122);
+  const std::string slow_id = register_client(mw, slow.ws());
+  ASSERT_FALSE(slow_id.empty());
+
+  constexpr int kFrames = 20;
+  for (int i = 1; i <= kFrames; ++i) {
+    const std::vector<uint8_t> frame(1 << 20, static_cast<uint8_t>(i));  // first byte numbers the frame
+    ASSERT_TRUE(mw.send_binary(slow_id, frame, FramePriority::kHeavy, "/cloud"));
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  }
+  const uint64_t shed = mw.heavy_shed_count();
+  // The socket buffers absorb a few frames before the stall reaches the
+  // sender; every later frame but the newest must have been replaced.
+  EXPECT_GE(shed, 5u);
+
+  slow.release();
+  const auto frames = slow.wait_for_frames(kFrames - shed, std::chrono::seconds(5));
+  ASSERT_EQ(frames.size(), kFrames - shed);
+  EXPECT_EQ(static_cast<uint8_t>(frames.back()[0]), kFrames) << "the client must end with the newest frame";
+}
+
+// A sender thread blocked in a send to a client that stopped reading must not
+// keep shutdown() (and so the bridge's exit) waiting.
+TEST(WebSocketMiddlewareSlowClientTest, ShutdownWithStalledClientDoesNotHang) {
+  WebSocketMiddleware mw;
+  ASSERT_TRUE(mw.initialize(18123).has_value());
+
+  StalledClient slow(18123);
+  const std::string slow_id = register_client(mw, slow.ws());
+  ASSERT_FALSE(slow_id.empty());
+
+  const std::vector<uint8_t> frame(1 << 20, 0x5A);
+  for (int i = 0; i < 16; ++i) {
+    mw.send_binary(slow_id, frame, FramePriority::kNormal, "");
+  }
+  std::this_thread::sleep_for(std::chrono::milliseconds(200));  // the sender is now blocked mid-send
+
+  auto stopped = std::async(std::launch::async, [&] { mw.shutdown(); });
+  const bool finished = stopped.wait_for(std::chrono::seconds(5)) == std::future_status::ready;
+  slow.release();  // unblock a hung shutdown before asserting
+  stopped.wait();
+  EXPECT_TRUE(finished) << "shutdown() waited on a sender blocked by a stalled client";
+}
+
+// Reproduces the session-resurrection bug: text requests a client sent just
+// before disconnecting stayed in the incoming queue, so processing them after
+// the disconnect re-created (and immediately tore down) a session per request.
+TEST(WebSocketMiddlewareSlowClientTest, RequestsOfDisconnectedClientAreDiscarded) {
+  WebSocketMiddleware mw;
+  std::atomic<bool> disconnected{false};
+  mw.set_on_disconnect([&](const std::string&) { disconnected = true; });
+  ASSERT_TRUE(mw.initialize(18121).has_value());
+
+  ix::WebSocket client;
+  client.setUrl("ws://127.0.0.1:18121");
+  client.setOnMessageCallback([](const ix::WebSocketMessagePtr&) {});
+  client.start();
+  ASSERT_TRUE(wait_for_client_open(client));
+  for (int i = 0; i < 5; ++i) {
+    client.send("{\"command\":\"heartbeat\"}");
+  }
+  std::this_thread::sleep_for(std::chrono::milliseconds(200));  // let the server queue them
+  client.stop();
+
+  auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+  while (!disconnected && std::chrono::steady_clock::now() < deadline) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  ASSERT_TRUE(disconnected);
+
+  std::vector<uint8_t> data;
+  std::string client_id;
+  EXPECT_FALSE(mw.receive_request(data, client_id)) << "stale request from a disconnected client was delivered";
+}
 
 int main(int argc, char** argv) {
   // rcl_logging_spdlog registers a periodic flush thread on spdlog's global

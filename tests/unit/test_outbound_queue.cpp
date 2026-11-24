@@ -1,0 +1,110 @@
+/*
+ * Copyright (C) 2026 Davide Faconti
+ *
+ * This file is part of pj_bridge.
+ *
+ * pj_bridge is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Affero General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * pj_bridge is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU Affero General Public License for more details.
+ *
+ * You should have received a copy of the GNU Affero General Public License
+ * along with pj_bridge. If not, see <https://www.gnu.org/licenses/>.
+ */
+
+#include <gtest/gtest.h>
+
+#include <chrono>
+#include <future>
+#include <string>
+#include <vector>
+
+#include "pj_bridge/middleware/outbound_queue.hpp"
+
+using pj_bridge::OutboundQueue;
+
+namespace {
+
+std::vector<std::string> drain(OutboundQueue& queue, size_t count) {
+  std::vector<std::string> out;
+  for (size_t i = 0; i < count; ++i) {
+    auto item = queue.pop();
+    if (!item) {
+      break;
+    }
+    out.push_back(item->data);
+  }
+  return out;
+}
+
+}  // namespace
+
+TEST(OutboundQueueTest, KeepsRepliesAndNormalFramesInOrder) {
+  OutboundQueue queue(10);
+  queue.push_text("reply");
+  queue.push_normal("frame");
+  auto reply = queue.pop();
+  ASSERT_TRUE(reply);
+  EXPECT_EQ(reply->data, "reply");
+  EXPECT_FALSE(reply->binary);
+  auto frame = queue.pop();
+  ASSERT_TRUE(frame);
+  EXPECT_EQ(frame->data, "frame");
+  EXPECT_TRUE(frame->binary);
+}
+
+TEST(OutboundQueueTest, OverflowDropsOldestFrameButNeverReplies) {
+  OutboundQueue queue(2);
+  queue.push_text("r1");
+  queue.push_normal("f1");
+  queue.push_normal("f2");
+  queue.push_normal("f3");  // drops f1
+  queue.push_text("r2");
+  EXPECT_EQ(queue.dropped_total(), 1u);
+  EXPECT_EQ(drain(queue, 4), (std::vector<std::string>{"r1", "f2", "f3", "r2"}));
+}
+
+TEST(OutboundQueueTest, HeavyFramesCoalescePerKeyAndKeepTheNewest) {
+  OutboundQueue queue(10);
+  queue.push_heavy("/cloud", "cloud1");
+  queue.push_heavy("/image", "image1");
+  queue.push_heavy("/cloud", "cloud2");  // replaces cloud1
+  EXPECT_EQ(queue.shed_total(), 1u);
+  EXPECT_EQ(drain(queue, 2), (std::vector<std::string>{"image1", "cloud2"}));
+}
+
+TEST(OutboundQueueTest, NormalFramesGoBeforeHeavyFrames) {
+  OutboundQueue queue(10);
+  queue.push_heavy("/cloud", "cloud");
+  queue.push_normal("odom");
+  queue.push_text("reply");
+  EXPECT_EQ(drain(queue, 3), (std::vector<std::string>{"odom", "reply", "cloud"}));
+}
+
+TEST(OutboundQueueTest, DropFramesKeepsReplies) {
+  OutboundQueue queue(10);
+  queue.push_normal("f1");
+  queue.push_text("reply");
+  queue.push_heavy("/cloud", "cloud");
+  queue.drop_frames();
+  EXPECT_EQ(queue.dropped_total(), 2u);
+  queue.push_normal("f2");
+  EXPECT_EQ(drain(queue, 2), (std::vector<std::string>{"reply", "f2"}));
+}
+
+TEST(OutboundQueueTest, CloseWakesABlockedPopAndRejectsPushes) {
+  OutboundQueue queue(10);
+  auto popped = std::async(std::launch::async, [&] { return queue.pop(); });
+  EXPECT_EQ(popped.wait_for(std::chrono::milliseconds(50)), std::future_status::timeout);
+  queue.close();
+  ASSERT_EQ(popped.wait_for(std::chrono::seconds(1)), std::future_status::ready);
+  EXPECT_FALSE(popped.get().has_value());
+  EXPECT_FALSE(queue.push_text("late"));
+  EXPECT_FALSE(queue.push_normal("late"));
+  EXPECT_FALSE(queue.push_heavy("/cloud", "late"));
+}

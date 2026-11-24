@@ -2,6 +2,21 @@
 Changelog for package pj_ros_bridge
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+Forthcoming
+-----------
+* Slow clients no longer stall the bridge. IXWebSocket's server-side send
+  blocks until the kernel takes every byte, and it ran on the thread that also
+  handles requests, publishing and session timeouts: one client on a slow link
+  delayed every other client and got healthy clients' sessions timed out.
+  Each client now has its own outbound queue and sender thread.
+* Bounded latency on slow links (`#19`): client sockets get
+  ``TCP_NOTSENT_LOWAT`` (128 KiB) so the backlog stays in the bridge's queue
+  instead of the kernel's send buffer, and a queued heavy frame is replaced by
+  the newer one of the same topic. Before, a slow client received every large
+  message in order and fell further behind without limit.
+* Requests a client sent just before disconnecting are discarded instead of
+  re-creating its session once per request.
+
 0.10.0 (2026-09-20)
 -------------------
 * WebSocket permessage-deflate declined server-side (redundant with our own

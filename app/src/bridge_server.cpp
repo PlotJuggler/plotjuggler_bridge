@@ -1058,7 +1058,8 @@ void BridgeServer::publish_aggregated_messages() {
       std::vector<uint8_t> compressed_data;
       size_t msg_count;
       std::vector<std::string> client_ids;
-      bool is_heavy = false;  // isolated large/size-class frame (kFrameFlagHeavy)
+      bool is_heavy = false;    // isolated large/size-class frame (kFrameFlagHeavy)
+      std::string heavy_topic;  // coalescing key of a heavy frame (its only message's topic)
       // Per-topic message counts carried by THIS frame, folded into
       // topic_forward_counts_ only when the frame is actually sent (so a
       // partial send after the split doesn't over-count unsent topics).
@@ -1103,6 +1104,7 @@ void BridgeServer::publish_aggregated_messages() {
             heavy_frame.msg_count = 1;
             heavy_frame.client_ids = client_ids;
             heavy_frame.is_heavy = true;
+            heavy_frame.heavy_topic = topic;
             heavy_frame.topic_counts[topic] = 1;
             heavy_frames_for_group.push_back(std::move(heavy_frame));
           } else {
@@ -1177,14 +1179,11 @@ void BridgeServer::publish_aggregated_messages() {
           continue;
         }
         const FramePriority priority = frame.is_heavy ? FramePriority::kHeavy : FramePriority::kNormal;
-        const SendResult result = middleware_->send_binary(client_id, frame.compressed_data, priority);
-        // Count a frame as forwarded only if it was delivered now or queued for
-        // later delivery. A kShed heavy frame is intentionally dropped under
-        // congestion (surfaced via the middleware's heavy_shed_count(), not in
-        // publish stats); kClientGone never reaches the client.
-        if (result == SendResult::kDelivered || result == SendResult::kQueued) {
+        // Queued frames count as forwarded. The middleware may still drop one
+        // for a slow client (reported by its dropped/shed counters).
+        if (middleware_->send_binary(client_id, frame.compressed_data, priority, frame.heavy_topic)) {
           any_sent = true;
-        } else if (result == SendResult::kClientGone) {
+        } else {
           spdlog::debug("Failed to send binary frame to client '{}'", client_id);
         }
       }

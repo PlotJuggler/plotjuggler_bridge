@@ -28,22 +28,12 @@
 
 namespace pj_bridge {
 
-/// Delivery priority for a per-client binary frame. Under socket congestion a
-/// `kHeavy` (large/size-class) frame is dropped before transmit rather than
-/// queued, so one big frame cannot starve the small frames behind it; a
-/// `kNormal` frame instead falls back to the queue-with-drop-oldest backlog.
-/// (When the socket has room, both are sent immediately.) See docs/API.md.
+/// Delivery class of a per-client binary frame. A `kHeavy` (large,
+/// single-message) frame waits behind the `kNormal` frames queued for the same
+/// client, and replaces a still-queued heavy frame with the same key, so a slow
+/// client gets the newest large message instead of a growing backlog. See
+/// docs/API.md, "Slow clients / backpressure".
 enum class FramePriority { kNormal, kHeavy };
-
-/// Outcome of send_binary(): how the transport handled the frame. Only
-/// `kDelivered` and `kQueued` are (or will be) put on the wire; `kShed` and
-/// `kClientGone` are never delivered, so callers must NOT count them as sent.
-enum class SendResult {
-  kDelivered,   ///< written to the socket now (or flushed from the backlog)
-  kQueued,      ///< enqueued for later delivery (kNormal frame, socket congested)
-  kShed,        ///< dropped before transmit (kHeavy frame, socket congested)
-  kClientGone,  ///< the client disconnected; nothing was sent
-};
 
 /// Abstract transport layer between BridgeServer and clients.
 ///
@@ -73,23 +63,21 @@ class MiddlewareInterface {
   /// @return true if a request was dequeued, false if the queue was empty.
   virtual bool receive_request(std::vector<uint8_t>& data, std::string& client_identity) = 0;
 
-  /// Send a text reply to a specific client.
-  /// @return true if the message was sent, false if the client is gone.
+  /// Queue a text reply for a specific client. Never blocks; replies are
+  /// never dropped and keep their order relative to kNormal binary frames.
+  /// @return true if the message was queued, false if the client is gone.
   virtual bool send_reply(const std::string& client_identity, const std::vector<uint8_t>& data) = 0;
 
-  /// Broadcast binary data to all connected clients.
-  /// @return true if at least one client received the data.
-  virtual bool publish_data(const std::vector<uint8_t>& data) = 0;
-
-  /// Send binary data to a specific client (used for per-client aggregated frames).
-  /// @param priority kHeavy frames are shed before transmit under congestion
-  ///        instead of queued (default kNormal preserves the legacy behavior).
-  /// @return how the frame was handled (see SendResult). Callers counting
-  ///         forwarded bytes/messages must treat only kDelivered/kQueued as
-  ///         forwarded — kShed and kClientGone never reach the client.
-  virtual SendResult send_binary(
+  /// Queue binary data for a specific client (per-client aggregated frames).
+  /// Never blocks: frames to a slow client queue up and are dropped by the
+  /// implementation's backpressure policy instead of stalling the caller.
+  /// @param priority see FramePriority.
+  /// @param key for kHeavy frames, the coalescing key (the topic name): a newer
+  ///        heavy frame replaces a queued one with the same key. Ignored for kNormal.
+  /// @return false if the client is gone (nothing was queued).
+  virtual bool send_binary(
       const std::string& client_identity, const std::vector<uint8_t>& data,
-      FramePriority priority = FramePriority::kNormal) = 0;
+      FramePriority priority = FramePriority::kNormal, const std::string& key = {}) = 0;
 
   /// Discard any queued outbound data for this client (e.g. when its session
   /// is destroyed server-side while the socket stays open). Default no-op for

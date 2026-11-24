@@ -112,14 +112,6 @@ int main(int argc, char* argv[]) {
     return 1;
   }
 
-  if (heavy_frame_threshold_bytes > 0 &&
-      static_cast<size_t>(heavy_frame_threshold_bytes) >= pj_bridge::WebSocketMiddleware::kSocketBufferHighWatermark) {
-    spdlog::warn(
-        "--heavy-frame-threshold-bytes ({}) >= socket watermark ({}): messages between the two sizes stay 'light' and "
-        "queue instead of shedding under congestion — keep the threshold below the watermark",
-        heavy_frame_threshold_bytes, pj_bridge::WebSocketMiddleware::kSocketBufferHighWatermark);
-  }
-
   try {
     auto topic_source = std::make_shared<pj_bridge::DdsTopicDiscovery>(domain_ids, qos_profile);
     auto sub_manager = std::make_shared<pj_bridge::DdsSubscriptionManager>(*topic_source);
