@@ -258,8 +258,7 @@ if(BUILD_TESTING AND ament_cmake_FOUND)
 
   ament_add_gtest(${PROJECT_NAME}_tests
     tests/unit/test_websocket_middleware.cpp
-    tests/unit/test_backpressure.cpp
-    tests/unit/test_bounded_frame_queue.cpp
+    tests/unit/test_outbound_queue.cpp
     tests/unit/test_message_buffer.cpp
     tests/unit/test_session_manager.cpp
     tests/unit/test_message_serializer.cpp
@@ -277,6 +276,14 @@ if(BUILD_TESTING AND ament_cmake_FOUND)
     pj_bridge_ros2_lib
     data_path
   )
+
+  # End-to-end slow-link behaviour, observed from the wire only (~20 s).
+  # Backend-agnostic: needs only the core library.
+  ament_add_gtest(${PROJECT_NAME}_slow_link_tests
+    tests/integration/test_slow_link.cpp
+    TIMEOUT 120
+  )
+  target_link_libraries(${PROJECT_NAME}_slow_link_tests pj_bridge_app)
 
   # Sanitizer environment settings for CTest
   if(ENABLE_TSAN)

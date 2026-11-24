@@ -41,7 +41,7 @@ int main(int argc, char* argv[]) {
   bool stats_enabled = false;
   std::vector<std::string> topic_whitelist{".*"};
   double topic_poll_interval = 1.0;
-  int client_backlog_size = 100;
+  int client_backlog_size = pj_bridge::WebSocketMiddleware::kDefaultClientBacklogSize;
   int heavy_frame_threshold_bytes = 262144;
   std::string certfile;
   std::string keyfile;
@@ -105,14 +105,6 @@ int main(int argc, char* argv[]) {
   if (topic_poll_interval < 0.0) {
     spdlog::error("Invalid --topic-poll-interval: {:.1f} (must be >= 0; 0 disables polling)", topic_poll_interval);
     return 1;
-  }
-
-  if (heavy_frame_threshold_bytes > 0 &&
-      static_cast<size_t>(heavy_frame_threshold_bytes) >= pj_bridge::WebSocketMiddleware::kSocketBufferHighWatermark) {
-    spdlog::warn(
-        "--heavy-frame-threshold-bytes ({}) >= socket watermark ({}): messages between the two sizes stay 'light' and "
-        "queue instead of shedding under congestion — keep the threshold below the watermark",
-        heavy_frame_threshold_bytes, pj_bridge::WebSocketMiddleware::kSocketBufferHighWatermark);
   }
 
   try {

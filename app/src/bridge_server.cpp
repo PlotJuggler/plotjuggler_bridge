@@ -235,7 +235,7 @@ void BridgeServer::process_single_request(const std::vector<uint8_t>& request_da
     }
   }
   for (const auto& frame : replay_frames) {
-    middleware_->send_binary(client_id, frame);
+    middleware_->send_binary(client_id, frame, FramePriority::kLatched);
   }
 }
 
@@ -586,6 +586,10 @@ std::string BridgeServer::handle_pause(const std::string& client_id, const nlohm
     released = held_refs.size();
   }
 
+  // Frames already queued for this client would otherwise reach it after the
+  // pause acknowledgement. Outside cleanup_mutex_: no middleware call under it.
+  middleware_->drop_pending(client_id);
+
   spdlog::info("Client '{}' paused ({} topic refs released)", client_id, released);
 
   json response;
@@ -786,6 +790,13 @@ void BridgeServer::check_session_timeouts() {
   auto timed_out_sessions = session_manager_->get_timed_out_sessions();
 
   for (const auto& client_id : timed_out_sessions) {
+    // On a slow link one frame can take longer to send than the session
+    // timeout, and the client's heartbeats wait unread behind it: a client
+    // whose data still reaches the socket is alive.
+    const auto timeout = std::chrono::milliseconds(static_cast<int64_t>(session_timeout_ * 1000.0));
+    if (middleware_->heard_from_client_within(client_id, timeout)) {
+      continue;
+    }
     spdlog::warn("Session timeout for client '{}'", client_id);
     cleanup_session(client_id);
   }
@@ -1058,7 +1069,7 @@ void BridgeServer::publish_aggregated_messages() {
       std::vector<uint8_t> compressed_data;
       size_t msg_count;
       std::vector<std::string> client_ids;
-      bool is_heavy = false;  // isolated large/size-class frame (kFrameFlagHeavy)
+      std::string heavy_topic;  // set only on a heavy frame: its only message's topic (coalescing key)
       // Per-topic message counts carried by THIS frame, folded into
       // topic_forward_counts_ only when the frame is actually sent (so a
       // partial send after the split doesn't over-count unsent topics).
@@ -1071,7 +1082,10 @@ void BridgeServer::publish_aggregated_messages() {
 
       for (const auto& [group_key, client_ids] : subscription_groups) {
         AggregatedMessageSerializer light_serializer;
-        std::vector<GroupFrame> heavy_frames_for_group;
+        // One heavy frame per topic per cycle, holding all of the cycle's
+        // messages of that topic: a newer frame may then replace a queued one
+        // only when the client is a whole cycle behind (map: stable order).
+        std::map<std::string, AggregatedMessageSerializer> heavy_serializers;
         size_t group_msg_count = 0;
 
         const auto& representative_subs = client_subs[client_ids.front()];
@@ -1089,22 +1103,13 @@ void BridgeServer::publish_aggregated_messages() {
         auto route_message = [&](const std::string& topic, const BufferedMessage& msg) {
           const bool heavy = heavy_frame_threshold_bytes_ != 0 && msg.data->size() >= heavy_frame_threshold_bytes_;
           if (heavy) {
-            // One single-message frame per heavy message (same one-message-per-frame
-            // shape as collect_latched_replay's retained-sample frame). The frame is
-            // NOT wire-flagged (flags stay 0): existing PlotJuggler plugins reject
-            // any frame with flags != 0, and the isolation/shedding benefit comes
-            // entirely from the separate frame + the in-memory is_heavy priority
-            // below — not from a wire marker. kFrameFlagHeavy is reserved for a
-            // future capability-negotiated rollout (see docs/API.md).
-            AggregatedMessageSerializer heavy_serializer;
-            heavy_serializer.serialize_message(topic, msg.timestamp_ns, msg.data->data(), msg.data->size());
-            GroupFrame heavy_frame;
-            heavy_frame.compressed_data = heavy_serializer.finalize();
-            heavy_frame.msg_count = 1;
-            heavy_frame.client_ids = client_ids;
-            heavy_frame.is_heavy = true;
-            heavy_frame.topic_counts[topic] = 1;
-            heavy_frames_for_group.push_back(std::move(heavy_frame));
+            // The heavy frame is NOT wire-flagged (flags stay 0): existing
+            // PlotJuggler plugins reject any frame with flags != 0, and the
+            // isolation/coalescing benefit comes entirely from the separate frame
+            // + the kHeavy priority it is queued with below — not from a wire
+            // marker. kFrameFlagHeavy is reserved for a future
+            // capability-negotiated rollout (see docs/API.md).
+            heavy_serializers[topic].serialize_message(topic, msg.timestamp_ns, msg.data->data(), msg.data->size());
           } else {
             light_serializer.serialize_message(topic, msg.timestamp_ns, msg.data->data(), msg.data->size());
             light_topic_counts[topic]++;
@@ -1162,7 +1167,13 @@ void BridgeServer::publish_aggregated_messages() {
           light_frame.topic_counts = std::move(light_topic_counts);
           frames.push_back(std::move(light_frame));
         }
-        for (auto& heavy_frame : heavy_frames_for_group) {
+        for (auto& [topic, serializer] : heavy_serializers) {
+          GroupFrame heavy_frame;
+          heavy_frame.msg_count = serializer.get_message_count();
+          heavy_frame.compressed_data = serializer.finalize();
+          heavy_frame.client_ids = client_ids;
+          heavy_frame.heavy_topic = topic;
+          heavy_frame.topic_counts[topic] = heavy_frame.msg_count;
           frames.push_back(std::move(heavy_frame));
         }
       }
@@ -1176,15 +1187,12 @@ void BridgeServer::publish_aggregated_messages() {
         if (it != paused_state.end() && it->second) {
           continue;
         }
-        const FramePriority priority = frame.is_heavy ? FramePriority::kHeavy : FramePriority::kNormal;
-        const SendResult result = middleware_->send_binary(client_id, frame.compressed_data, priority);
-        // Count a frame as forwarded only if it was delivered now or queued for
-        // later delivery. A kShed heavy frame is intentionally dropped under
-        // congestion (surfaced via the middleware's heavy_shed_count(), not in
-        // publish stats); kClientGone never reaches the client.
-        if (result == SendResult::kDelivered || result == SendResult::kQueued) {
+        const FramePriority priority = frame.heavy_topic.empty() ? FramePriority::kNormal : FramePriority::kHeavy;
+        // Queued frames count as forwarded. The middleware may still drop one
+        // for a slow client (reported by its dropped/shed counters).
+        if (middleware_->send_binary(client_id, frame.compressed_data, priority, frame.heavy_topic)) {
           any_sent = true;
-        } else if (result == SendResult::kClientGone) {
+        } else {
           spdlog::debug("Failed to send binary frame to client '{}'", client_id);
         }
       }

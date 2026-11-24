@@ -22,11 +22,11 @@ independently.
 - **High Performance**: 50 Hz message aggregation with ZSTD compression. The original message timestamp is preserved, and less bandwidth is used.
 - **Multi-Client Support**: Multiple clients can connect simultaneously with shared subscriptions
 - **Runtime Schema Discovery**: Automatic extraction of message schemas from installed ROS2 packages on the server side.
-- **Large Message Stripping** (opt-in): Optional stripping of large array fields (Image, PointCloud2, LaserScan, OccupancyGrid) to reduce bandwidth while preserving metadata. Disabled by default — full message data is forwarded; enable with `strip_large_messages:=true` for low-bandwidth links
+- **Large Message Stripping** (opt-in): Optional stripping of large array fields (Image, PointCloud2, LaserScan, OccupancyGrid), keeping only metadata: the stripped content (pixels, points) is lost. Disabled by default — full message data is forwarded; `strip_large_messages:=true` enables it
 - **Topic Whitelist**: Restrict which topics are visible/subscribable via full-match regex patterns (`topic_whitelist` / `--topic-whitelist`), mirroring foxglove_bridge's option of the same name
 - **QoS Depth Heuristics** (ROS2 only): KEEP_LAST subscription depth is derived from the discovered publishers' depths and clamped to a configurable `[min_qos_depth, max_qos_depth]` range
 - **Pushed Topic Advertisement** (opt-in): Clients can subscribe to a `topics_changed` notification instead of polling `get_topics`, at a configurable `topic_poll_interval`
-- **Slow-Client Backpressure**: A bounded, drop-oldest per-client send queue (`client_backlog_size`) keeps a lagging client from blocking the publish loop or growing an unbounded backlog, instead of disconnecting it
+- **Slow-Client Backpressure**: Each client has its own send queue and sender thread, so a lagging client never blocks the bridge or other clients; old small-topic frames are dropped beyond `client_backlog_size`, and large messages keep only the newest per topic, so latency stays bounded instead of growing
 - **Latched Topic Replay** (ROS2 only): New subscribers to a `TRANSIENT_LOCAL` topic (e.g. `/tf_static`) immediately receive the retained last message instead of waiting for the next publish; such topics are badged `latched: true` in `get_topics`
 - **Schemas Up Front** (opt-in): `get_topics`/`subscribe_topic_updates` accept `include_schemas` so demand-driven clients (PlotJuggler 4) can classify topics before subscribing
 - **Capability Discovery**: `get_topics` responses identify the server (`name`, `version`) and list its `capabilities`, so clients feature-detect additive protocol features by name — `protocol_version` remains the only hard compatibility gate
@@ -54,7 +54,7 @@ independently.
 | `max_qos_depth` | int | 100 | ROS2 only: maximum KEEP_LAST subscription depth after aggregating publisher depths |
 | `ingest_poll_interval_ms` | double | 5.0 | ROS2 only: interval between ingest executor polls; subscription callbacks drain their DDS reader each poll. `0` uses a blocking spin instead |
 | `topic_poll_interval` | double | 1.0 | Seconds between `topics_changed` notification polls; `0` disables polling |
-| `client_backlog_size` | int | 100 | Max binary frames queued per slow client before the oldest is dropped (must be `> 0`) |
+| `client_backlog_size` | int | 1000 | Max binary frames queued per slow client before the oldest is dropped (also capped at 32 MiB; must be `> 0`) |
 | `heavy_frame_threshold_bytes` | int | 262144 | Isolate messages ≥ this size (bytes) into their own size-class frame so they don't starve small topics; `0` disables (must be `>= 0`) |
 | `tls` | bool | false | Enable TLS (`wss://`); requires `certfile` and `keyfile` |
 | `certfile` | string | `""` | TLS server certificate file |
@@ -72,7 +72,7 @@ independently.
 | `--stats` | flag | off | Print statistics every 5 seconds |
 | `--topic-whitelist` | string list | `.*` | Full-match regex patterns (ECMAScript), repeatable |
 | `--topic-poll-interval` | double | 1.0 | Seconds between `topics_changed` notification polls; `0` disables polling |
-| `--client-backlog-size` | int | 100 | Max binary frames queued per slow client before the oldest is dropped (range `1`-`1000000`) |
+| `--client-backlog-size` | int | 1000 | Max binary frames queued per slow client before the oldest is dropped (also capped at 32 MiB; range `1`-`1000000`) |
 | `--heavy-frame-threshold-bytes` | int | 262144 | Isolate messages ≥ this size (bytes) into their own size-class frame; `0` disables (range `0`-`1000000000`) |
 | `--certfile` | string | (none) | TLS server certificate file; enables `wss://`, requires `--keyfile` |
 | `--keyfile` | string | (none) | TLS private key file; enables `wss://`, requires `--certfile` |

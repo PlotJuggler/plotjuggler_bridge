@@ -354,9 +354,9 @@ it to the new subscriber anyway, and a replay would duplicate it. Replay
 frames intentionally bypass per-topic rate limiting (`max_rate_hz`) and are
 not counted in the server's publish statistics. They are, however, subject
 to the same [slow-client backpressure](#slow-clients--backpressure) queueing
-as regular aggregated frames: a replay destined for an already-slow client
-may be delayed until the next send attempt for that client (and, like any
-queued frame, can be dropped if the backlog overflows).
+as regular aggregated frames: a replay waits in the client's queue behind the
+subscribe response and, like any normal frame, can be dropped if the backlog
+overflows.
 
 ## Unsubscribe
 
@@ -536,47 +536,72 @@ Error codes: `INVALID_REQUEST`, `INVALID_JSON`, `UNKNOWN_COMMAND`, `ALL_SUBSCRIP
 ## Slow clients / backpressure
 
 If a client can't keep up with the aggregated-message stream (e.g. a slow
-network link or a busy renderer), the server never blocks the publish loop
-waiting for it and never disconnects it for falling behind — matching
-foxglove_bridge's slow-client policy. Instead, once a client's outgoing
-socket buffer exceeds a 1 MiB high watermark, new binary frames destined for
-that client are held in a small per-client queue rather than sent
-immediately. If that queue is already full, the **oldest** queued frame is
-dropped to make room for the newest one, so a lagging client always
-eventually resumes with fresh data instead of a growing backlog of stale
-frames. Queued frames are delivered, in order, on the **next send attempt**
-for that client once its socket buffer has drained back below the watermark
-(there is no background flush timer — if the client's topics go quiet, the
-backlog waits for the next frame destined for that client). The JSON
-control-plane (requests and their replies, including `heartbeat`) is never
-affected — those messages are always sent immediately. If a client's session
-times out server-side while its socket stays open, any backlog still queued
-for it is discarded.
+network link or a busy renderer), it only falls behind: the server never
+waits for it, so the other clients, heartbeat handling and session timeouts
+are not affected, and it is not disconnected for being slow (see the reply limit below).
 
-Frames already queued (or already sitting in the socket's send buffer) when
-an `unsubscribe` is processed may still arrive **after** the unsubscribe
+Each client has its own outbound queue, drained by its own sender thread:
+
+- **Replies, latched replays and normal frames** (aggregated small topics)
+  share one FIFO lane, so a reply always precedes the frames sent after it.
+  Replies and latched replays are never dropped. When more than
+  `client_backlog_size` normal frames, or more than 32 MiB of them, wait in
+  this lane, the **oldest** are dropped. The default (1000 frames, about 20 s at 50 Hz) keeps small topics
+  complete while a large frame crosses a slow link.
+- **Heavy frames** ([size-class frames](#size-class-frames): a topic's large
+  messages of one publish cycle) wait in a second lane, at most one per topic:
+  a newer heavy frame replaces a queued one of the same topic. A client that
+  keeps up receives every message. A slow client therefore
+  receives the newest point cloud or image instead of a growing backlog of
+  old ones.
+- The sender empties the FIFO lane first, then sends the oldest heavy frame.
+  A waiting heavy frame still goes out after at most `client_backlog_size`
+  FIFO items, so steady small-topic traffic cannot starve it, but never
+  ahead of a response or latched replay queued before it (a subscribe
+  response always precedes the topic's data). A replaced heavy frame keeps its place in line.
+- A client that keeps sending requests without reading the replies (more than
+  64 MiB of replies and latched replays queued) is disconnected; this is the only case in which a
+  slow client is dropped.
+
+The kernel is kept from buffering a backlog of its own: every client socket
+gets `TCP_NOTSENT_LOWAT` = 128 KiB (Linux, macOS), so at most that much
+unsent data sits in the socket and the backlog stays in the queue above,
+where stale frames can still be dropped. Data already in flight is not
+limited, so fast links keep their full throughput.
+
+A WebSocket message cannot be interrupted once started, so on a slow link a
+heavy frame delays the frames behind it by its own transfer time (a 1 MB
+point cloud takes about 8 s at 1 Mbit/s); small topics then arrive in a burst.
+Use `heavy_frame_threshold_bytes` or a lower subscription `max_rate_hz` for
+large topics when clients are on slow links.
+
+A client's session does not time out while its data keeps reaching the
+server's socket (Linux: the kernel's last-receive time): on a slow link one
+frame can outlast `session_timeout`, and the client's heartbeats wait unread
+behind it. A client that sends nothing (dead peer, frozen tab) times out as
+usual. If a client's session does time out
+server-side while its socket stays open, its queued frames are discarded (its
+queued replies are kept). `pause` discards the frames already queued for the
+client, so none arrives after the pause response. Requests a client sent just
+before disconnecting are discarded with it.
+
+Frames already queued (or already in the socket's send buffer) when an
+`unsubscribe` is processed may still arrive **after** the unsubscribe
 response — clients must tolerate binary messages for recently-unsubscribed
-topics. This is inherent to socket buffering, not specific to the backlog
-queue.
+topics.
 
-The queue depth (max frames held per client before the oldest is dropped) is
-configurable:
+The FIFO lane's depth (max binary frames held per client before the oldest is
+dropped; the 32 MiB byte limit is fixed) is configurable:
 
-- **ROS2**: int parameter `client_backlog_size`, default `100`. Must be `> 0`;
+- **ROS2**: int parameter `client_backlog_size`, default `1000`. Must be `> 0`;
   the server refuses to start otherwise.
-- **FastDDS / RTI**: CLI flag `--client-backlog-size`, default `100`, valid
+- **FastDDS / RTI**: CLI flag `--client-backlog-size`, default `1000`, valid
   range `1`-`1000000`.
 
-Under congestion, heavy (size-class) frames from the aggregated publish stream
-are shed before transmit rather than queued (see
-[Size-class frames](#size-class-frames)), so a continuous stream of
-large frames cannot fill the backlog and evict small-topic frames. (One-shot
-latched-replay frames are an exception: they are sent at normal priority —
-never shed like heavy frames — so they may briefly occupy the backlog and, like
-any normal frame, can be dropped only if the backlog itself overflows under
-sustained congestion; they are not a continuous stream.)
+The server's periodic statistics report the dropped normal frames and the
+replaced ("shed") heavy frames.
 
-The per-message size at or above which a message is isolated into its own heavy
+The per-message size at or above which a message goes into its topic's heavy
 frame is configurable:
 
 - **ROS2**: int parameter `heavy_frame_threshold_bytes`, default `262144`
@@ -585,8 +610,19 @@ frame is configurable:
 - **FastDDS / RTI**: CLI flag `--heavy-frame-threshold-bytes`, default `262144`,
   valid range `0`-`1000000000`.
 
-Keep the threshold below the 1 MiB socket watermark so a single heavy message
-does not fill the socket buffer on its own.
+### Testing with a slow link
+
+`tests/integration/slow_link.py` is a TCP relay that limits the rate toward the
+client and adds latency in both directions, to reproduce a slow client on one
+machine. Start it in front of the bridge and connect the client to the relay's
+port (`ws://localhost:9091` here):
+
+```bash
+# about 1 Mbit/s toward the client, 80 ms round trip, bridge on port 9090
+python3 tests/integration/slow_link.py --listen 9091 --target 127.0.0.1:9090 --rate-kib 128 --delay-ms 40
+```
+
+See `--help` for the options.
 
 ## TLS / wss://
 
@@ -663,16 +699,18 @@ The magic bytes allow clients to validate frame integrity before decompression.
 
 Advertised by the `size_class_frames` capability. To keep a large topic (e.g. a
 `PointCloud2`) from starving small topics under slow-link backpressure, the server
-does **not** weld small and large messages into one frame. Instead, each message
+does **not** weld small and large messages into one frame. Instead, messages
 whose serialized size is at or above a server-configured threshold
-(`heavy_frame_threshold_bytes`, default 256 KiB; `0` disables splitting) is sent as
-its own frame, while smaller messages stay aggregated in a single frame. Server-side
-these large frames are treated as "heavy" and shed before transmit under congestion
+(`heavy_frame_threshold_bytes`, default 256 KiB; `0` disables splitting) are sent
+in a frame of their own topic (one per topic per publish cycle), while smaller
+messages stay aggregated in a single frame. Server-side
+these large frames are treated as "heavy": queued after the small-topic frames, and
+replaced by a newer frame of the same topic while a slow client still waits for them
 (see [Slow clients / backpressure](#slow-clients--backpressure)).
 
 This is purely a framing change — the payload format is identical, and a publish
 cycle may now emit several binary frames (at most one aggregated light frame, plus
-one per heavy message — and no light frame at all when every admitted message in a
+one per topic with heavy messages — and no light frame at all when every admitted message in a
 group is heavy) instead of one. Each frame is self-describing via its
 `message_count`, so a client decodes them all the same way and needs no changes.
 

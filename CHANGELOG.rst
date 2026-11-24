@@ -2,6 +2,44 @@
 Changelog for package pj_ros_bridge
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+Forthcoming
+-----------
+* Slow clients no longer stall the bridge. IXWebSocket's server-side send
+  blocks until the kernel takes every byte, and it ran on the thread that also
+  handles requests, publishing and session timeouts: one client on a slow link
+  delayed every other client and got healthy clients' sessions timed out.
+  Each client now has its own outbound queue and sender thread.
+* Bounded latency on slow links (`#19`): client sockets get
+  ``TCP_NOTSENT_LOWAT`` (128 KiB) so the backlog stays in the bridge's queue
+  instead of the kernel's send buffer, and a queued heavy frame is replaced by
+  the newer one of the same topic. Before, a slow client received every large
+  message in order and fell further behind without limit.
+* A topic's large messages of one publish cycle now share one heavy frame
+  (before: one frame per message), so a newer frame replaces only a whole
+  older cycle: a client that keeps up gets every message even when
+  ``publish_rate`` is below the topic's rate.
+* Latched replays (``/tf_static``, ``/map``) are never dropped from a slow
+  client's backlog; they are queued like replies.
+* Requests a client sent just before disconnecting are discarded instead of
+  re-creating its session once per request.
+* A client is not timed out while its data keeps reaching the socket (its
+  heartbeats can wait unread behind a long send on a slow link).
+* ``pause`` discards the frames already queued for the client, so none arrives
+  after the pause response.
+* A queued heavy frame is sent after at most ``client_backlog_size`` normal
+  frames, so busy small topics cannot starve it (never ahead of an earlier
+  response); a replaced heavy frame keeps its place in line.
+* ``client_backlog_size`` default raised from 100 to 1000 frames, and the
+  small-frame queue is also capped at 32 MiB. 100 frames held only ~2 s at
+  50 Hz, so on a slow link most small-topic data (e.g. ``/odom`` next to
+  ``/tf``) was dropped while a point cloud was in flight, although it needed
+  only a few KiB/s.
+* Shutdown waits for IXWebSocket callbacks already running instead of
+  swapping IXWebSocket's callback object, which raced with its dispatch.
+* A client that sends requests without reading the replies is disconnected once
+  64 MiB of replies and latched replays are queued for it (a single larger
+  reply on an idle queue still goes out).
+
 0.10.0 (2026-09-20)
 -------------------
 * WebSocket permessage-deflate declined server-side (redundant with our own

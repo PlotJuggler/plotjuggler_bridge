@@ -50,7 +50,7 @@ int main(int argc, char** argv) {
   node->declare_parameter<double>("ingest_poll_interval_ms", 5.0);
   node->declare_parameter<int>("max_qos_depth", 100);
   node->declare_parameter<double>("topic_poll_interval", 1.0);
-  node->declare_parameter<int>("client_backlog_size", 100);
+  node->declare_parameter<int>("client_backlog_size", pj_bridge::WebSocketMiddleware::kDefaultClientBacklogSize);
   node->declare_parameter<int>("heavy_frame_threshold_bytes", 262144);
   node->declare_parameter<bool>("tls", false);
   node->declare_parameter<std::string>("certfile", "");
@@ -113,14 +113,6 @@ int main(int argc, char** argv) {
         heavy_frame_threshold_bytes);
     rclcpp::shutdown();
     return 1;
-  }
-  if (heavy_frame_threshold_bytes > 0 &&
-      static_cast<size_t>(heavy_frame_threshold_bytes) >= pj_bridge::WebSocketMiddleware::kSocketBufferHighWatermark) {
-    RCLCPP_WARN(
-        node->get_logger(),
-        "heavy_frame_threshold_bytes (%ld) >= socket watermark (%zu): messages between the two sizes stay 'light' and "
-        "queue instead of shedding under congestion — keep the threshold below the watermark",
-        heavy_frame_threshold_bytes, pj_bridge::WebSocketMiddleware::kSocketBufferHighWatermark);
   }
   RCLCPP_INFO(node->get_logger(), "heavy_frame_threshold_bytes=%ld", heavy_frame_threshold_bytes);
 
@@ -266,7 +258,7 @@ int main(int argc, char** argv) {
     RCLCPP_INFO(
         node->get_logger(),
         "Final statistics: %lu messages published, %lu bytes transmitted, %lu frames dropped (slow clients), "
-        "%lu heavy frames shed (congestion)",
+        "%lu heavy frames replaced by newer",
         total_messages, total_bytes, middleware->dropped_frame_count(), middleware->heavy_shed_count());
 
     RCLCPP_INFO(node->get_logger(), "Bridge server shutdown complete");
