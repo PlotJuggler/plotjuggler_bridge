@@ -69,7 +69,7 @@ option(PJ_BRIDGE_WS_IX "Use the IXWebSocket transport instead of Boost.Beast" OF
 
 find_package(Threads REQUIRED)
 if(NOT PJ_BRIDGE_WS_IX)
-  find_package(Boost 1.75 REQUIRED)
+  find_package(Boost 1.74 REQUIRED)  # 1.74: Ubuntu Jammy (ROS Humble)
   if(PJ_BRIDGE_TLS)
     find_package(OpenSSL REQUIRED)
   endif()
