@@ -792,9 +792,9 @@ void BridgeServer::check_session_timeouts() {
   for (const auto& client_id : timed_out_sessions) {
     // On a slow link one frame can take longer to send than the session
     // timeout, and the client's heartbeats wait unread behind it: a client
-    // the bridge is still sending to is alive.
-    if (middleware_->is_sending(client_id)) {
-      session_manager_->update_heartbeat(client_id);
+    // whose data still reaches the socket is alive.
+    const auto timeout = std::chrono::milliseconds(static_cast<int64_t>(session_timeout_ * 1000.0));
+    if (middleware_->heard_from_client_within(client_id, timeout)) {
       continue;
     }
     spdlog::warn("Session timeout for client '{}'", client_id);

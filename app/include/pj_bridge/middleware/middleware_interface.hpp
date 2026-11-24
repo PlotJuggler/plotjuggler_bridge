@@ -19,6 +19,7 @@
 
 #pragma once
 
+#include <chrono>
 #include <cstdint>
 #include <functional>
 #include <string>
@@ -84,11 +85,13 @@ class MiddlewareInterface {
   /// implementations without per-client outbound queues.
   virtual void drop_pending(const std::string& /*client_identity*/) {}
 
-  /// @return true while the transport is in the middle of writing a frame to
-  ///         this client. On a slow link that write can outlast the session
-  ///         timeout, and the client's heartbeats may sit unread behind it, so
-  ///         BridgeServer does not time out a client it is still sending to.
-  virtual bool is_sending(const std::string& /*client_identity*/) const {
+  /// @return true if this client's connection received data within @p window,
+  ///         counted when the data reaches the socket, not when it is read.
+  ///         On a slow link the transport may not read a client's heartbeats
+  ///         while a long send to it is in progress; BridgeServer does not time
+  ///         out a client that is still sending data.
+  virtual bool heard_from_client_within(
+      const std::string& /*client_identity*/, std::chrono::milliseconds /*window*/) const {
     return false;
   }
 

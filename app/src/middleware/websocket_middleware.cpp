@@ -51,6 +51,9 @@ class LowLatencyWebSocketServer : public ix::WebSocketServer {
  public:
   using ix::WebSocketServer::WebSocketServer;
 
+  /// Called on the connection's thread with the accepted socket, before the
+  /// WebSocket upgrade. Set before listen().
+  std::function<void(const std::string&, int)> on_connection_start;
   /// Called on the connection's thread once IXWebSocket no longer uses its
   /// WebSocket. Set before listen().
   std::function<void(const std::string&)> on_connection_end;
@@ -58,6 +61,9 @@ class LowLatencyWebSocketServer : public ix::WebSocketServer {
  private:
   void handleConnection(
       std::unique_ptr<ix::Socket> socket, std::shared_ptr<ix::ConnectionState> connection_state) override {
+    if (on_connection_start) {
+      on_connection_start(connection_state->getId(), SocketFdAccess::fd(*socket));
+    }
 #ifdef TCP_NOTSENT_LOWAT
     const int max_unsent = WebSocketMiddleware::kMaxUnsentBytes;
     if (setsockopt(SocketFdAccess::fd(*socket), IPPROTO_TCP, TCP_NOTSENT_LOWAT, &max_unsent, sizeof(max_unsent)) != 0) {
@@ -116,7 +122,21 @@ tl::expected<void, std::string> WebSocketMiddleware::initialize(uint16_t port) {
   }
 
   auto server = std::make_shared<LowLatencyWebSocketServer>(port, "0.0.0.0");
-  server->on_connection_end = [this](const std::string& client_id) { mark_connection_ended(client_id); };
+  auto gate = std::make_shared<CallbackGate>();
+  gate_ = gate;
+  server->on_connection_start = [this, gate](const std::string& client_id, int fd) {
+    std::shared_lock<std::shared_mutex> gate_lock(gate->mutex);
+    if (gate->open) {
+      std::lock_guard<std::mutex> lock(clients_mutex_);
+      connection_fds_[client_id] = fd;
+    }
+  };
+  server->on_connection_end = [this, gate](const std::string& client_id) {
+    std::shared_lock<std::shared_mutex> gate_lock(gate->mutex);
+    if (gate->open) {
+      mark_connection_ended(client_id);
+    }
+  };
   server_ = server;
   // Binary frames are already zstd-compressed; deflating them again is wasted work.
   server_->disablePerMessageDeflate();
@@ -137,9 +157,13 @@ tl::expected<void, std::string> WebSocketMiddleware::initialize(uint16_t port) {
     accepting_clients_ = true;
   }
 
-  server_->setOnClientMessageCallback([this](
+  server_->setOnClientMessageCallback([this, gate](
                                           std::shared_ptr<ix::ConnectionState> connection_state,
                                           ix::WebSocket& web_socket, const ix::WebSocketMessagePtr& msg) {
+    std::shared_lock<std::shared_mutex> gate_lock(gate->mutex);
+    if (!gate->open) {
+      return;
+    }
     // Copy the server pointer under the same lock as the initialized_ check:
     // shutdown() concurrently moves server_ away, so touching the member
     // after releasing the lock would dereference a null shared_ptr.
@@ -181,10 +205,7 @@ tl::expected<void, std::string> WebSocketMiddleware::initialize(uint16_t port) {
         // this thread is joined.
         client.sender = std::thread([ws = client.ws.get(), queue = client.queue, state = client.state] {
           while (auto item = queue->pop()) {
-            state->sending = true;
-            const bool sent = ws->send(item->data, item->binary).success;
-            state->sending = false;
-            if (!sent) {
+            if (!ws->send(item->data, item->binary).success) {
               break;  // the connection is closing; its Close event retires this client
             }
           }
@@ -275,6 +296,20 @@ tl::expected<void, std::string> WebSocketMiddleware::initialize(uint16_t port) {
 void WebSocketMiddleware::shutdown() {
   std::shared_ptr<ix::WebSocketServer> server_to_stop;
 
+  // Close the callback gate first: no IXWebSocket callback runs into this
+  // object (or, through on_connect_/on_disconnect_, its owner) after this,
+  // including one that was already running. Callbacks take no lock that is
+  // held here, and shutdown() is never called from a callback.
+  std::shared_ptr<CallbackGate> gate;
+  {
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    gate = gate_;
+  }
+  if (gate) {
+    std::unique_lock<std::shared_mutex> gate_lock(gate->mutex);
+    gate->open = false;
+  }
+
   {
     std::lock_guard<std::mutex> lock(state_mutex_);
 
@@ -296,15 +331,10 @@ void WebSocketMiddleware::shutdown() {
       retire_client(client);
     }
     clients_.clear();
+    connection_fds_.clear();
   }
 
   if (server_to_stop) {
-    // Replace the message callback with a no-op before stopping. The original
-    // callback captures `this`, so it must not fire while the stop thread
-    // outlives this shutdown call (it is joined in the destructor on timeout).
-    server_to_stop->setOnClientMessageCallback(
-        [](std::shared_ptr<ix::ConnectionState>, ix::WebSocket&, const ix::WebSocketMessagePtr&) {});
-
     // Initiate graceful close on all connected clients before calling stop().
     // This also cancels a sender thread blocked in a send to a stalled client.
     spdlog::debug("[shutdown] Pre-closing {} WebSocket client(s)...", server_to_stop->getClients().size());
@@ -372,6 +402,7 @@ void WebSocketMiddleware::retire_client(Client& client) {
 
 void WebSocketMiddleware::mark_connection_ended(const std::string& client_id) {
   std::lock_guard<std::mutex> lock(clients_mutex_);
+  connection_fds_.erase(client_id);
   auto mark = [&](Client& client) {
     if (client.id == client_id) {
       client.state->connection_ended = true;
@@ -483,9 +514,27 @@ bool WebSocketMiddleware::send_binary(
                                            : queue->push_normal(std::move(frame));
 }
 
-bool WebSocketMiddleware::is_sending(const std::string& client_identity) const {
-  auto state = find_client(client_identity).state;
-  return state && state->sending;
+bool WebSocketMiddleware::heard_from_client_within(
+    const std::string& client_identity, std::chrono::milliseconds window) const {
+#ifdef __linux__
+  std::lock_guard<std::mutex> lock(clients_mutex_);
+  auto fd = connection_fds_.find(client_identity);
+  if (fd == connection_fds_.end() || clients_.find(client_identity) == clients_.end()) {
+    return false;
+  }
+  // The kernel's time since it last received data from the peer: it counts a
+  // heartbeat that arrived even if IXWebSocket has not read it yet.
+  tcp_info info{};
+  socklen_t len = sizeof(info);
+  if (getsockopt(fd->second, IPPROTO_TCP, TCP_INFO, &info, &len) != 0) {
+    return false;
+  }
+  return std::chrono::milliseconds(info.tcpi_last_data_recv) <= window;
+#else
+  (void)client_identity;
+  (void)window;
+  return false;
+#endif
 }
 
 void WebSocketMiddleware::drop_pending(const std::string& client_identity) {

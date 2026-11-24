@@ -117,18 +117,18 @@ class MockMiddleware : public MiddlewareInterface {
     drop_pending_calls_.push_back(client_identity);
   }
 
-  bool is_sending(const std::string& client_identity) const override {
+  bool heard_from_client_within(const std::string& client_identity, std::chrono::milliseconds) const override {
     std::lock_guard<std::mutex> lock(drop_pending_mutex_);
-    return sending_clients_.count(client_identity) > 0;
+    return heard_clients_.count(client_identity) > 0;
   }
 
-  /// Test seam: report @p client_identity as mid-send (is_sending()).
-  void set_sending(const std::string& client_identity, bool sending) {
+  /// Test seam: report data as just received from @p client_identity.
+  void set_heard(const std::string& client_identity, bool heard) {
     std::lock_guard<std::mutex> lock(drop_pending_mutex_);
-    if (sending) {
-      sending_clients_.insert(client_identity);
+    if (heard) {
+      heard_clients_.insert(client_identity);
     } else {
-      sending_clients_.erase(client_identity);
+      heard_clients_.erase(client_identity);
     }
   }
 
@@ -280,7 +280,7 @@ class MockMiddleware : public MiddlewareInterface {
 
   mutable std::mutex drop_pending_mutex_;
   std::vector<std::string> drop_pending_calls_;
-  std::set<std::string> sending_clients_;
+  std::set<std::string> heard_clients_;
 };
 
 // ---------------------------------------------------------------------------
@@ -1485,9 +1485,9 @@ TEST_F(BridgeServerTest, UnsubscribeIncludesProtocolVersion) {
 // ---------------------------------------------------------------------------
 // IXWebSocket reads a client's socket on the same thread that flushes a
 // large frame to it, so on a slow link the client's own heartbeats wait
-// unread behind the bridge's send. A client the bridge is sending to must not
-// be timed out for that.
-TEST_F(BridgeServerTest, SessionNotTimedOutWhileMiddlewareIsSendingToIt) {
+// unread behind the bridge's send. A client whose data is still reaching the
+// socket must not be timed out for that.
+TEST_F(BridgeServerTest, SessionNotTimedOutWhileClientDataIsArriving) {
   server_ = std::make_unique<BridgeServer>(
       mock_topic_source_, mock_sub_manager_, mock_, BridgeServerConfig{19999, /*session_timeout=*/0.05, 50.0});
   ASSERT_TRUE(server_->initialize());
@@ -1499,13 +1499,13 @@ TEST_F(BridgeServerTest, SessionNotTimedOutWhileMiddlewareIsSendingToIt) {
   server_->process_requests();
   ASSERT_EQ(server_->get_active_session_count(), 2u);
 
-  mock_->set_sending("slow", true);
+  mock_->set_heard("slow", true);
   std::this_thread::sleep_for(std::chrono::milliseconds(100));
   server_->check_session_timeouts();
   EXPECT_EQ(server_->get_active_session_count(), 1u) << "only the idle client times out";
 
-  // Once the send is over, the usual timeout applies again.
-  mock_->set_sending("slow", false);
+  // A client that went silent (dead peer, frozen tab) times out as usual.
+  mock_->set_heard("slow", false);
   std::this_thread::sleep_for(std::chrono::milliseconds(100));
   server_->check_session_timeouts();
   EXPECT_EQ(server_->get_active_session_count(), 0u);

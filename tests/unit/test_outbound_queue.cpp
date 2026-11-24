@@ -73,9 +73,10 @@ TEST(OutboundQueueTest, HeavyFramesCoalescePerKeyAndKeepTheNewest) {
   OutboundQueue queue(10);
   queue.push_heavy("/cloud", "cloud1");
   queue.push_heavy("/image", "image1");
-  queue.push_heavy("/cloud", "cloud2");  // replaces cloud1
+  queue.push_heavy("/cloud", "cloud2");  // replaces cloud1 in place: keeps its turn
   EXPECT_EQ(queue.shed_total(), 1u);
-  EXPECT_EQ(drain(queue, 2), (std::vector<std::string>{"image1", "cloud2"}));
+  // Re-queued at the back instead, a fast topic could be overtaken forever.
+  EXPECT_EQ(drain(queue, 2), (std::vector<std::string>{"cloud2", "image1"}));
 }
 
 TEST(OutboundQueueTest, NormalFramesGoBeforeHeavyFrames) {
@@ -137,4 +138,14 @@ TEST(OutboundQueueTest, PoppedRepliesFreeTheirBudget) {
   EXPECT_TRUE(queue.push_text("12345"));
   ASSERT_TRUE(queue.pop().has_value());
   EXPECT_TRUE(queue.push_text("67890"));
+}
+
+TEST(OutboundQueueTest, HeavyFrameNeverOvertakesAnEarlierReply) {
+  // A heavy frame of a just-subscribed topic must not reach the client before
+  // the subscribe response that carries its schema.
+  OutboundQueue queue(1);
+  queue.push_text("heartbeat-reply");
+  queue.push_text("subscribe-reply");
+  queue.push_heavy("/cloud", "cloud");
+  EXPECT_EQ(drain(queue, 3), (std::vector<std::string>{"heartbeat-reply", "subscribe-reply", "cloud"}));
 }

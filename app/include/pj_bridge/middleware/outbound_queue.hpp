@@ -43,9 +43,11 @@ namespace pj_bridge {
 ///   - Heavy frames are coalesced by key (the topic): a new heavy frame
 ///     replaces a queued one with the same key, so a slow client receives the
 ///     newest point cloud instead of a growing backlog of old ones.
-///   - pop() serves the FIFO lane first, then the oldest heavy frame, so small
-///     topics are not stuck behind large ones. A waiting heavy frame still goes
-///     out after at most `max_normal_frames` FIFO items, so it is never starved.
+///   - pop() serves the FIFO lane first, then the heavy lane, so small topics
+///     are not stuck behind large ones. A waiting heavy frame still goes out
+///     after at most `max_normal_frames` FIFO items, so it is never starved,
+///     but never ahead of a reply queued before it (a subscribe response must
+///     precede the topic's data). A replaced heavy frame keeps its place.
 ///   - Queued reply bytes are capped (`max_reply_bytes`): a client that keeps
 ///     sending requests without reading the replies makes the queue close
 ///     itself, and the owner then drops the connection.
@@ -56,6 +58,7 @@ class OutboundQueue {
   struct Item {
     std::string data;
     bool binary = true;
+    uint64_t seq = 0;  // push order
   };
 
   static constexpr size_t kDefaultMaxReplyBytes = 64U << 20;  // 64 MiB
@@ -66,18 +69,6 @@ class OutboundQueue {
   /// @return false if the queue is closed, or if this reply exceeds the reply
   ///         budget (the queue then closes: see reply_budget_exceeded()).
   bool push_text(std::string data) {
-    bool over_budget = false;
-    {
-      std::lock_guard<std::mutex> lock(mutex_);
-      if (!closed_ && reply_bytes_ + data.size() > max_reply_bytes_) {
-        over_budget = reply_budget_exceeded_ = true;
-        close_locked();
-      }
-    }
-    if (over_budget) {
-      cv_.notify_all();
-      return false;
-    }
     return push_fifo(Item{std::move(data), false});
   }
 
@@ -95,10 +86,11 @@ class OutboundQueue {
       }
       auto same_key = std::find_if(heavy_.begin(), heavy_.end(), [&](const auto& entry) { return entry.first == key; });
       if (same_key != heavy_.end()) {
-        heavy_.erase(same_key);
+        same_key->second = Item{std::move(frame), true, next_seq_++};  // in place: keeps its turn
         ++shed_total_;
+      } else {
+        heavy_.emplace_back(key, Item{std::move(frame), true, next_seq_++});
       }
-      heavy_.emplace_back(key, std::move(frame));
     }
     cv_.notify_one();
     return true;
@@ -112,9 +104,11 @@ class OutboundQueue {
       return std::nullopt;
     }
     Item item;
-    const bool heavy_turn = !heavy_.empty() && (fifo_.empty() || fifo_streak_ >= max_normal_frames_);
+    const bool heavy_turn =
+        !heavy_.empty() &&
+        (fifo_.empty() || (fifo_streak_ >= max_normal_frames_ && !reply_before(heavy_.front().second.seq)));
     if (heavy_turn) {
-      item.data = std::move(heavy_.front().second);
+      item = std::move(heavy_.front().second);
       heavy_.pop_front();
       fifo_streak_ = 0;
     } else {
@@ -170,6 +164,19 @@ class OutboundQueue {
   }
 
  private:
+  // Whether a reply queued before push number @p seq is still waiting.
+  bool reply_before(uint64_t seq) const {
+    for (const auto& queued : fifo_) {
+      if (queued.seq > seq) {
+        return false;  // fifo_ is in push order
+      }
+      if (!queued.binary) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   void close_locked() {
     closed_ = true;
     fifo_.clear();
@@ -184,6 +191,13 @@ class OutboundQueue {
       if (closed_) {
         return false;
       }
+      if (!item.binary && reply_bytes_ + item.data.size() > max_reply_bytes_) {
+        reply_budget_exceeded_ = true;
+        close_locked();
+        cv_.notify_all();
+        return false;
+      }
+      item.seq = next_seq_++;
       if (item.binary) {
         if (normal_frames_ >= max_normal_frames_) {
           auto oldest = std::find_if(fifo_.begin(), fifo_.end(), [](const Item& queued) { return queued.binary; });
@@ -209,9 +223,10 @@ class OutboundQueue {
   mutable std::mutex mutex_;
   std::condition_variable cv_;
   std::deque<Item> fifo_;
-  std::deque<std::pair<std::string, std::string>> heavy_;  // (key, frame), oldest first
+  std::deque<std::pair<std::string, Item>> heavy_;  // (key, frame), in turn order
   size_t normal_frames_ = 0;
   size_t max_normal_frames_;
+  uint64_t next_seq_ = 0;
   size_t fifo_streak_ = 0;  // FIFO items served while a heavy frame waited
   size_t reply_bytes_ = 0;
   size_t max_reply_bytes_;

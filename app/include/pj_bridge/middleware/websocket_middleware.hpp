@@ -27,6 +27,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <shared_mutex>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -81,7 +82,7 @@ class WebSocketMiddleware : public MiddlewareInterface {
   void set_on_connect(ConnectionCallback callback) override;
   void set_on_disconnect(ConnectionCallback callback) override;
   void drop_pending(const std::string& client_identity) override;
-  bool is_sending(const std::string& client_identity) const override;
+  bool heard_from_client_within(const std::string& client_identity, std::chrono::milliseconds window) const override;
 
   /// kNormal frames dropped for slow clients (backlog overflow or drop_pending),
   /// summed over the middleware's lifetime.
@@ -105,8 +106,7 @@ class WebSocketMiddleware : public MiddlewareInterface {
 
   /// Shared between a client's sender thread and the middleware.
   struct SenderState {
-    std::atomic<bool> sending{false};  ///< inside a (blocking) IXWebSocket send
-    std::atomic<bool> done{false};     ///< the sender thread has returned
+    std::atomic<bool> done{false};  ///< the sender thread has returned
     /// IXWebSocket's connection thread no longer uses the WebSocket.
     std::atomic<bool> connection_ended{false};
   };
@@ -130,6 +130,16 @@ class WebSocketMiddleware : public MiddlewareInterface {
   void retire_client(Client& client);
   /// IXWebSocket's connection thread for @p client_id has finished.
   void mark_connection_ended(const std::string& client_id);
+
+  /// Every IXWebSocket callback runs under a shared lock of this gate; shutdown()
+  /// closes it under the exclusive lock, which also waits for callbacks already
+  /// running. IXWebSocket's callback object itself is never replaced, since
+  /// IXWebSocket does not synchronize that.
+  struct CallbackGate {
+    std::shared_mutex mutex;
+    bool open = true;
+  };
+  std::shared_ptr<CallbackGate> gate_;
   /// Reap departed clients whose sender and connection threads have both
   /// finished. Called from the
   /// bridge's polling thread, never from an IXWebSocket callback.
@@ -148,6 +158,8 @@ class WebSocketMiddleware : public MiddlewareInterface {
   // never from the IXWebSocket thread that reports the disconnect), and the
   // counters of departed clients. All guarded by clients_mutex_.
   std::unordered_map<std::string, Client> clients_;
+  /// Socket of each live connection, by client id (from accept to connection end).
+  std::unordered_map<std::string, int> connection_fds_;
   std::vector<Client> retired_;
   bool accepting_clients_ = false;
   uint64_t dropped_from_departed_ = 0;

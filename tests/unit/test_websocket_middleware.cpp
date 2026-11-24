@@ -809,14 +809,10 @@ TEST(WebSocketMiddlewareSlowClientTest, StalledClientGetsTheNewestHeavyFrame) {
   // sender; every later frame but the newest must have been replaced.
   EXPECT_GE(shed, 5u);
 
-  EXPECT_TRUE(mw.is_sending(slow_id)) << "the sender is blocked on the stalled client";
-
   slow.release();
   const auto frames = slow.wait_for_frames(kFrames - shed, std::chrono::seconds(5));
   ASSERT_EQ(frames.size(), kFrames - shed);
   EXPECT_EQ(static_cast<uint8_t>(frames.back()[0]), kFrames) << "the client must end with the newest frame";
-  EXPECT_FALSE(mw.is_sending(slow_id));
-  EXPECT_FALSE(mw.is_sending("never-connected"));
 }
 
 // A sender thread blocked in a send to a client that stopped reading must not
@@ -871,6 +867,62 @@ TEST(WebSocketMiddlewareSlowClientTest, RequestsOfDisconnectedClientAreDiscarded
   std::vector<uint8_t> data;
   std::string client_id;
   EXPECT_FALSE(mw.receive_request(data, client_id)) << "stale request from a disconnected client was delivered";
+}
+
+// On a slow link the server's IXWebSocket thread can sit in a long send while
+// the client's heartbeats wait unread in the kernel. heard_from_client_within()
+// reports what the kernel received, so the bridge can tell such a client from
+// a dead one.
+TEST(WebSocketMiddlewareSlowClientTest, HeardFromClientWithinReflectsWhatTheSocketReceived) {
+  WebSocketMiddleware mw;
+  ASSERT_TRUE(mw.initialize(18124).has_value());
+
+  ix::WebSocket client;
+  client.setUrl("ws://127.0.0.1:18124");
+  client.setOnMessageCallback([](const ix::WebSocketMessagePtr&) {});
+  client.start();
+  const std::string id = register_client(mw, client);
+  ASSERT_FALSE(id.empty());
+
+  EXPECT_TRUE(mw.heard_from_client_within(id, std::chrono::milliseconds(1000)));
+  std::this_thread::sleep_for(std::chrono::milliseconds(400));
+  EXPECT_FALSE(mw.heard_from_client_within(id, std::chrono::milliseconds(200))) << "the client sent nothing since";
+  client.send("{\"command\":\"heartbeat\"}");
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  EXPECT_TRUE(mw.heard_from_client_within(id, std::chrono::milliseconds(200)));
+  EXPECT_FALSE(mw.heard_from_client_within("never-connected", std::chrono::milliseconds(1000)));
+
+  client.stop();
+  mw.shutdown();
+}
+
+// A disconnect callback captures the BridgeServer: shutdown() must not return
+// while one is still running, or the callback can outlive its target.
+TEST(WebSocketMiddlewareSlowClientTest, ShutdownWaitsForARunningDisconnectCallback) {
+  WebSocketMiddleware mw;
+  std::atomic<bool> entered{false};
+  std::atomic<bool> finished{false};
+  mw.set_on_disconnect([&](const std::string&) {
+    entered = true;
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    finished = true;
+  });
+  ASSERT_TRUE(mw.initialize(18125).has_value());
+
+  ix::WebSocket client;
+  client.setUrl("ws://127.0.0.1:18125");
+  client.setOnMessageCallback([](const ix::WebSocketMessagePtr&) {});
+  client.start();
+  ASSERT_FALSE(register_client(mw, client).empty());
+  client.stop();
+
+  auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+  while (!entered && std::chrono::steady_clock::now() < deadline) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  ASSERT_TRUE(entered);
+  mw.shutdown();
+  EXPECT_TRUE(finished) << "shutdown() returned while the disconnect callback was still running";
 }
 
 int main(int argc, char** argv) {
