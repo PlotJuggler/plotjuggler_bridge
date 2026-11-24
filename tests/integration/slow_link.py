@@ -9,9 +9,11 @@ reproduced on one machine, without root and without touching other traffic.
 
     client  --->  slow_link.py (--listen)  --->  pj_bridge (--target)
 
-The relay reads from the bridge only as fast as it forwards, so the backlog
-builds up in the kernel socket buffers on the bridge side, as on a real slow
-link. It forwards bytes without parsing them, so ws:// and wss:// both work.
+With a rate limit, the relay reads from the bridge only as fast as it forwards
+and keeps little data in its own buffers (about 100 KiB, or half a second of
+data when that is more), so the backlog builds up in the bridge's socket send
+buffer, as on a real slow link. It forwards bytes without parsing them, so
+ws:// and wss:// both work.
 
 Example: 1 Mbit/s toward the client and 80 ms of round-trip time, in front of
 a bridge on the default port. Connect the client to ws://localhost:9091.
@@ -23,8 +25,8 @@ No dependencies outside the standard library.
 
 import argparse
 import asyncio
-import contextlib
 import math
+import socket
 import time
 from urllib.parse import urlsplit
 
@@ -34,9 +36,16 @@ SLICE_SECONDS = 0.02
 MAX_READ_BYTES = 64 * 1024
 # Sleeps shorter than this are accumulated instead of taken one by one.
 MIN_SLEEP_SECONDS = 0.001
-# Upper bound on the data delayed inside the relay, per direction. It caps
-# rate * delay, so it only matters for a fast link with a long delay.
+# Upper bound on the data delayed inside the relay, per direction. A direction
+# holds rate * delay bytes; one without a rate limit (client to bridge, or
+# --rate-kib 0) can fill this bound when a delay is set and its receiver stalls.
 MAX_IN_FLIGHT_BYTES = 64 * 1024 * 1024
+# Receive buffer of the relay's socket to the bridge, as seconds of data at the
+# configured rate. With the kernel default (megabytes on Linux) the relay would
+# absorb a backlog that a real slow link leaves in the bridge's send buffer.
+# The floor is the smallest size that did not reduce the rate on loopback.
+RECEIVE_BUFFER_SECONDS = 0.25
+MIN_RECEIVE_BUFFER_BYTES = 32 * 1024
 
 
 def chunk_bytes(rate):
@@ -109,26 +118,29 @@ async def write_delayed(line, writer):
 
 
 async def relay(reader, writer, rate, delay):
-    line = DelayLine(delay, min(MAX_IN_FLIGHT_BYTES, rate * (delay + SLICE_SECONDS)))
+    delayed_bytes = rate * delay if delay else 0.0
+    line = DelayLine(delay, min(MAX_IN_FLIGHT_BYTES, delayed_bytes) + chunk_bytes(rate))
     reading = asyncio.create_task(read_paced(reader, line, rate))
-    await write_delayed(line, writer)
-    # The writer can stop first (peer gone) while the reader waits for room in the line.
-    reading.cancel()
-    with contextlib.suppress(asyncio.CancelledError):
-        await reading
+    try:
+        await write_delayed(line, writer)
+    finally:
+        # The writer can stop first (peer gone) while the reader waits for room in the line.
+        reading.cancel()
 
 
 async def handle_client(client_reader, client_writer, args):
     peer = client_writer.get_extra_info("peername")
     host, port = args.target
     try:
-        # The stream buffer is kept as small as one chunk: what the relay holds
-        # in user space is backlog that the bridge side cannot see.
         bridge_reader, bridge_writer = await asyncio.open_connection(host, port, limit=chunk_bytes(args.rate))
-    except OSError as error:
+    except (OSError, ValueError) as error:  # ValueError: a host name that cannot be encoded
         print(f"[{peer}] cannot connect to {host}:{port}: {error}")
         client_writer.close()
         return
+
+    if math.isfinite(args.rate):
+        receive_buffer_bytes = max(MIN_RECEIVE_BUFFER_BYTES, int(args.rate * RECEIVE_BUFFER_SECONDS))
+        bridge_writer.get_extra_info("socket").setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, receive_buffer_bytes)
 
     print(f"[{peer}] connected")
     await asyncio.gather(
@@ -175,8 +187,8 @@ def parse_args():
         help="one-way latency added in each direction, in ms (default: 40)",
     )
     args = parser.parse_args()
-    if args.rate_kib < 0 or args.delay_ms < 0:
-        parser.error("--rate-kib and --delay-ms must not be negative")
+    if not (0 <= args.rate_kib < math.inf and 0 <= args.delay_ms < math.inf):
+        parser.error("--rate-kib and --delay-ms must be finite and not negative")
     args.rate = args.rate_kib * 1024.0 if args.rate_kib else math.inf
     args.delay = args.delay_ms / 1000.0
     return args
@@ -184,17 +196,30 @@ def parse_args():
 
 async def main():
     args = parse_args()
-    server = await asyncio.start_server(
-        lambda reader, writer: handle_client(reader, writer, args), args.listen_host, args.listen
-    )
+    connections = set()
+
+    async def on_client(reader, writer):
+        connections.add(asyncio.current_task())
+        try:
+            await handle_client(reader, writer, args)
+        finally:
+            connections.discard(asyncio.current_task())
+
+    server = await asyncio.start_server(on_client, args.listen_host, args.listen)
     host, port = args.target
     rate = f"{args.rate_kib:g} KiB/s" if args.rate_kib else "unlimited"
     print(
         f"Listening on {args.listen_host}:{args.listen} -> {host}:{port} "
         f"({rate} toward the client, {args.delay_ms:g} ms each way)"
     )
-    async with server:
-        await server.serve_forever()
+    try:
+        await asyncio.Event().wait()
+    finally:
+        # Server.wait_closed() (used by serve_forever and "async with") waits for the
+        # open connections since Python 3.12, so Ctrl-C would not stop a relay in use.
+        server.close()
+        for connection in connections:
+            connection.cancel()
 
 
 if __name__ == "__main__":
