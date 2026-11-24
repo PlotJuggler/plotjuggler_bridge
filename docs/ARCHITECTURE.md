@@ -59,7 +59,7 @@ Manages ref-counted middleware subscriptions. A single global `MessageCallback` 
 
 ### MiddlewareInterface
 
-Abstract transport layer for client connections. Separates text (request/reply) and binary (per-client push) channels. Single implementation: `WebSocketMiddleware` (IXWebSocket).
+Abstract transport layer for client connections. Separates text (request/reply) and binary (per-client push) channels. Single implementation: `WebSocketMiddleware` (Boost.Beast). The previous IXWebSocket implementation (`websocket_middleware_ix.*`) can still be built with `-DPJ_BRIDGE_WS_IX=ON` for one release.
 
 ## Core Components
 
@@ -103,11 +103,14 @@ Streaming binary serializer, no middleware dependencies. Per-message wire format
 
 ### WebSocketMiddleware
 
-IXWebSocket-based implementation of `MiddlewareInterface`:
-- Connection-oriented client identity via `connectionState->getId()`
-- Incoming text requests queued and dequeued via `receive_request()`
-- Per-client binary send for aggregated message frames
-- Connect/disconnect callbacks for automatic session lifecycle
+Boost.Beast implementation of `MiddlewareInterface` (plain `ws://` or TLS `wss://` via OpenSSL):
+- **One io thread** runs every connection with asynchronous reads and writes; a slow or stalled client delays only its own frames. Client identity is a per-connection counter.
+- **One `OutboundQueue` per client**: `send_reply()`/`send_binary()` push and return at once. Replies, latched replays and normal frames share a FIFO lane (replies and latched replays never dropped, oldest normal frames dropped beyond `client_backlog_size` or 32 MiB); heavy frames wait in a second lane, one per topic, a newer one replacing the queued one. See [API docs](API.md#slow-clients--backpressure).
+- **Socket options**: `TCP_NOTSENT_LOWAT` (128 KiB) keeps the backlog in the queue rather than the kernel; `TCP_NODELAY`; TCP keepalive drops peers that vanished silently.
+- **Liveness**: `heard_from_client_within()` reads the kernel's last-receive time (`TCP_INFO`), so a client whose heartbeats wait unread behind a long send is not timed out.
+- **Limits**: requests up to 1 MiB, at most 128 connections; messages over 64 KiB are sent in fragments so control frames (Pong, Close) are not held behind them.
+- **Callbacks**: connect/disconnect callbacks run in order on their own thread, never on the io thread; `shutdown()` joins both threads, so no callback outlives it.
+- Incoming text requests are queued (bounded) and dequeued via `receive_request()`.
 
 ### StandaloneEventLoop
 
@@ -122,12 +125,13 @@ Shared event loop utility (`run_standalone_event_loop()`) used by both non-ROS2 
 
 BridgeServer exposes methods; the entry point drives timing:
 
-**ROS2** (`ros2/src/main.cpp`): Three `rclcpp` wall timers:
+**ROS2** (`ros2/src/main.cpp`): `rclcpp` wall timers in their own callback group, spun by a dedicated executor thread so a long publish/compression cycle never delays ingest:
 - 10 ms → `process_requests()`
 - 1/publish_rate → `publish_aggregated_messages()`
 - 1 s → `check_session_timeouts()`
+- `topic_poll_interval` → `check_topic_changes()` (if enabled)
 
-Spun via `SingleThreadedExecutor::spin_some(100ms)`.
+The ingest executor (subscriptions) is polled every `ingest_poll_interval_ms` (default 5 ms) with `spin_some()`; it blocks in `spin_once()` while nothing is subscribed, and `ingest_poll_interval_ms: 0` uses a blocking `spin()`.
 
 **RTI** (`rti/src/main.cpp`): Delegates to `run_standalone_event_loop()` (see StandaloneEventLoop above).
 
@@ -152,7 +156,7 @@ Unlike the RTI backend's 4-class two-level design (discovery + subscription mana
 - **FastDdsTopicSource**: Manages `DomainParticipant`s, discovers topics via `DomainParticipantListener::on_data_writer_discovery()`, resolves `DynamicType` from `TypeObjectRegistry`, generates IDL schema via `idl_serialize()`. Also provides `get_dynamic_type()` / `get_participant()` / `get_domain_id()` for use by the subscription manager.
 - **FastDdsSubscriptionManager**: Creates `DataReader`s with `DynamicPubSubType`, ref-counted subscriptions. Extracts CDR bytes by deserializing into `DynamicData` and re-serializing via `DynamicPubSubType::serialize()`.
 
-FastDDS dependencies are managed via Conan (`fast-dds/3.4.3`). The backend is built standalone (not through colcon/ament).
+FastDDS dependencies are managed via Conan (`fast-dds/3.4.3`, `cli11`, Boost headers, OpenSSL). The backend is built standalone (not through colcon/ament).
 
 ## Design Decisions
 
@@ -190,7 +194,7 @@ cleanup_mutex_ > last_sent_mutex_ > stats_mutex_
 - **SessionManager**: Internal mutex protects session map
 - **GenericSubscriptionManager**: Internal mutex protects subscription map
 - **BridgeServer**: `cleanup_mutex_` prevents concurrent cleanup; `last_sent_mutex_` protects rate-limiting state; `stats_mutex_` protects counters. Frames are built under `last_sent_mutex_`, sent outside it (minimizes lock contention)
-- **WebSocketMiddleware**: Separate mutexes for state, client map, and message queue
+- **WebSocketMiddleware**: Separate mutexes for state, client map and incoming-request queue, plus a lifecycle mutex spanning `initialize()`/`shutdown()`; each `OutboundQueue` has its own. Socket operations run only on the io thread; other threads reach it through `asio::post`.
 
 ## Shutdown Sequence
 
@@ -205,4 +209,4 @@ All entry points follow the same ordered shutdown to avoid use-after-free:
 
 - **Compression**: ZSTD level 1 (typically 50-70% size reduction)
 - **Memory**: Automatic 1-second TTL prevents unbounded growth
-- **Concurrent Clients**: 10+ clients supported
+- **Concurrent Clients**: up to 128 connections; one io thread serves them all

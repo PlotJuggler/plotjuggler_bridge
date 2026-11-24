@@ -26,7 +26,7 @@ independently.
 - **Topic Whitelist**: Restrict which topics are visible/subscribable via full-match regex patterns (`topic_whitelist` / `--topic-whitelist`), mirroring foxglove_bridge's option of the same name
 - **QoS Depth Heuristics** (ROS2 only): KEEP_LAST subscription depth is derived from the discovered publishers' depths and clamped to a configurable `[min_qos_depth, max_qos_depth]` range
 - **Pushed Topic Advertisement** (opt-in): Clients can subscribe to a `topics_changed` notification instead of polling `get_topics`, at a configurable `topic_poll_interval`
-- **Slow-Client Backpressure**: Each client has its own send queue and sender thread, so a lagging client never blocks the bridge or other clients; old small-topic frames are dropped beyond `client_backlog_size`, and large messages keep only the newest per topic, so latency stays bounded instead of growing
+- **Slow-Client Backpressure**: Each client has its own send queue, drained by an asynchronous (Boost.Beast) server, so a lagging client never blocks the bridge or other clients; old small-topic frames are dropped beyond `client_backlog_size`, and large messages keep only the newest per topic, so latency stays bounded instead of growing
 - **Latched Topic Replay** (ROS2 only): New subscribers to a `TRANSIENT_LOCAL` topic (e.g. `/tf_static`) immediately receive the retained last message instead of waiting for the next publish; such topics are badged `latched: true` in `get_topics`
 - **Schemas Up Front** (opt-in): `get_topics`/`subscribe_topic_updates` accept `include_schemas` so demand-driven clients (PlotJuggler 4) can classify topics before subscribing
 - **Capability Discovery**: `get_topics` responses identify the server (`name`, `version`) and list its `capabilities`, so clients feature-detect additive protocol features by name — `protocol_version` remains the only hard compatibility gate
@@ -142,7 +142,7 @@ git clone https://github.com/PlotJuggler/plotjuggler_bridge && cd plotjuggler_br
 
 # Install dependencies
 source /opt/ros/${ROS_DISTRO}/setup.bash
-rosdep install --from-paths pj_bridge --ignore-src -y
+rosdep install --from-paths . --ignore-src -y
 
 # Build and test
 cd ~/ws_plotjuggler
@@ -185,14 +185,14 @@ For the full API protocol documentation (commands, responses, binary wire format
 Another process is using the port. Either kill the conflicting process or use a custom port:
 
 ```bash
-ros2 run pj_bridge pj_bridge_ros2 --ros-args -p port:=9090
+ros2 run pj_bridge pj_bridge_ros2 --ros-args -p port:=9091
 ```
 
 ### Client receives no data
 
 1. Verify server is running: `ps aux | grep pj_bridge`
 2. Check topics are being published: `ros2 topic list`
-3. Verify heartbeat is being sent (required every 1 second)
+3. Verify the client sends heartbeats (at least once per `session_timeout`, 10 s by default; PlotJuggler sends one per second)
 4. Check server logs: `ros2 run pj_bridge pj_bridge_ros2 --ros-args --log-level debug`
 
 ### "Failed to get schema for topic" error
@@ -205,7 +205,7 @@ ros2 interface show <package_name>/msg/<MessageType>
 
 ### Session timeout / Automatic unsubscription
 
-The client stopped sending heartbeats. Ensure the client sends a heartbeat every 1 second. The default timeout is 10 seconds. Increase if needed:
+The client stopped sending heartbeats. Ensure the client sends a heartbeat well within the session timeout (10 seconds by default; once per second is typical). Increase it if needed:
 
 ```bash
 ros2 run pj_bridge pj_bridge_ros2 --ros-args -p session_timeout:=20.0

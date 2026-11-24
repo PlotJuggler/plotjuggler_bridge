@@ -7,13 +7,14 @@
 **Purpose**: Forward middleware topic content over WebSocket to PlotJuggler clients
 
 **Main Goal**: Enable clients to subscribe to topics and receive aggregated messages at configurable rates without needing a full middleware installation. Three backends share a common core library:
-- **ROS2 backend** (`pj_bridge_ros2`) — ROS2 Humble, uses `rclcpp`
+- **ROS2 backend** (`pj_bridge_ros2`) — ROS 2 Humble / Jazzy / Kilted / Lyrical, uses `rclcpp`
 - **RTI backend** (`pj_bridge_rti`) — RTI Connext DDS, uses `rti::connext` (build disabled, code preserved)
 - **FastDDS backend** (`pj_bridge_fastdds`) — eProsima Fast DDS 3.4, via Conan
 
 ## Key Documentation Files
 
 - `docs/API.md` - API protocol documentation
+- `docs/ARCHITECTURE.md` - components, threading, event loops
 - `.clang-tidy` - Coding standards and style guide
 
 ## Build Instructions
@@ -35,7 +36,7 @@ make -j$(nproc)
 
 ### FastDDS Backend (Conan + standalone CMake)
 ```bash
-cd ~/ws_plotjuggler/src/pj_ros_bridge
+cd <plotjuggler_bridge checkout>
 conan install . --output-folder=build_fastdds --build=missing -s build_type=Release
 cd build_fastdds
 cmake .. -DCMAKE_BUILD_TYPE=Release -DENABLE_FASTDDS=ON \
@@ -49,12 +50,12 @@ make -j$(nproc)
 - **IXWebSocket** — tests' WebSocket client only (and the legacy `-DPJ_BRIDGE_WS_IX=ON` transport); `find_package` first, FetchContent fallback
 - **spdlog** — system package preferred (for ROS2 ABI compatibility with `librcl_logging_spdlog`); FetchContent fallback for standalone builds
 - **ZSTD** — system package (`libzstd-dev`)
-- **CLI11** — FetchContent (RTI backend only)
+- **CLI11** — `find_package` (Conan for FastDDS; RTI and FastDDS only)
 
 ### FastDDS Backend (Conan-managed)
 - **eProsima Fast DDS 3.4.3** — via Conan (`fast-dds/3.4.3`)
 - **eProsima Fast CDR 2.x** — transitive dependency via Conan
-- **CLI11** — FetchContent (for CLI parsing, shared with RTI)
+- **CLI11, Boost (header-only), OpenSSL** — via Conan
 
 **Important**: Do NOT use FetchContent for spdlog when building with ROS2. The system spdlog must match the version used by `librcl_logging_spdlog.so` to avoid ABI conflicts (symbol collision causes "free(): invalid pointer" crash during `rclcpp::init()`).
 
@@ -107,8 +108,7 @@ make -j$(nproc)
 
 BridgeServer does NOT own timers. The entry point (`main.cpp`) drives the event loop:
 - **ROS2**: `rclcpp` wall timers (`process_requests()`, `publish_aggregated_messages()`, `check_session_timeouts()`) run on their own dedicated executor thread, so a long publish/zstd cycle never delays ingest. The ingest executor itself is polled (`ingest_poll_interval_ms`, default 5 ms) via `spin_some()` instead of blocking in `spin()`; subscription callbacks drain their DDS reader on each poll.
-- **RTI**: `std::chrono` loop with `std::this_thread::sleep_for()`
-- **FastDDS**: `std::chrono` loop with `std::this_thread::sleep_for()` (same pattern as RTI)
+- **RTI / FastDDS**: `run_standalone_event_loop()` (`app/src/standalone_event_loop.cpp`), a `std::chrono` loop with `std::this_thread::sleep_for()`
 
 ### Key Components
 
@@ -172,6 +172,7 @@ Then, for each message in the (compressed) payload:
 | `pj_bridge_fastdds_lib` | STATIC | FastDDS adapter library (if `ENABLE_FASTDDS=ON`) |
 | `pj_bridge_fastdds` | EXECUTABLE | FastDDS entry point |
 | `pj_bridge_tests` | EXECUTABLE | All unit tests |
+| `pj_bridge_slow_link_tests` | EXECUTABLE | Wire-level slow-link integration tests (rate-limited relay) |
 
 ## Dependencies
 
@@ -191,16 +192,16 @@ Then, for each message in the (compressed) payload:
 
 ### RTI Backend (disabled)
 - RTI Connext DDS (`RTIConnextDDS::cpp2_api`)
-- CLI11 (FetchContent, for CLI parsing)
+- CLI11 (`find_package`, for CLI parsing)
 
 ### FastDDS Backend
 - eProsima Fast DDS 3.4.3 (Conan: `fast-dds/3.4.3`)
 - eProsima Fast CDR 2.x (transitive Conan dependency)
-- CLI11 (FetchContent, for CLI parsing)
+- CLI11, Boost headers, OpenSSL (Conan)
 
 ## Testing
 
-### Test Count: 231 unit tests across 11 test suites
+### Test Count: 287 unit tests across 17 suites, plus 2 slow-link integration tests
 
 ### Commands
 ```bash
@@ -212,12 +213,12 @@ colcon test --packages-select pj_bridge && colcon test-result --verbose
 # TSAN
 colcon build --packages-select pj_bridge --build-base build_tsan --install-base install_tsan --cmake-args -DCMAKE_BUILD_TYPE=Release -DENABLE_TSAN=ON
 source install_tsan/setup.bash
-TSAN_OPTIONS="suppressions=src/pj_ros_bridge/tsan_suppressions.txt" setarch $(uname -m) -R build_tsan/pj_bridge/pj_bridge_tests
+TSAN_OPTIONS="suppressions=src/plotjuggler_bridge/tsan_suppressions.txt" setarch $(uname -m) -R build_tsan/pj_bridge/pj_bridge_tests
 
 # ASAN
 colcon build --packages-select pj_bridge --build-base build_asan --install-base install_asan --cmake-args -DCMAKE_BUILD_TYPE=Release -DENABLE_ASAN=ON
 source install_asan/setup.bash
-ASAN_OPTIONS="new_delete_type_mismatch=0" LSAN_OPTIONS="suppressions=src/pj_ros_bridge/asan_suppressions.txt" build_asan/pj_bridge/pj_bridge_tests
+ASAN_OPTIONS="new_delete_type_mismatch=0" LSAN_OPTIONS="suppressions=src/plotjuggler_bridge/asan_suppressions.txt" build_asan/pj_bridge/pj_bridge_tests
 
 # Format code (before committing)
 pre-commit run -a
@@ -225,7 +226,7 @@ pre-commit run -a
 
 ### Notes
 - Sanitizer binaries MUST be run with ROS2 sourced (tests need `AMENT_PREFIX_PATH`)
-- TSAN is clean with the Beast transport; the legacy IX transport (`PJ_BRIDGE_WS_IX=ON`) has a known IXWebSocket-internal race
+- TSAN is clean with the Beast transport (the IXWebSocket test client's DNS-lookup race is suppressed); the legacy IX transport (`PJ_BRIDGE_WS_IX=ON`) has a known IXWebSocket-internal race
 - Convenience script available: `./run_and_test.sh`
 
 ## Configuration
@@ -283,7 +284,7 @@ identity/capabilities object, and TLS setup).
 
 ---
 
-**Last Updated**: 2026-07-06
-**Project Phase**: Unified multi-backend architecture
-**Test Status**: 231 unit tests passing (all sanitizers clean)
+**Last Updated**: 2026-11-25
+**Project Phase**: 1.0 — Boost.Beast transport, slow-client backpressure
+**Test Status**: 287 unit + 2 integration tests passing (TSAN, ASAN clean)
 **Executables**: `pj_bridge_ros2` (ROS2), `pj_bridge_rti` (RTI DDS, disabled), `pj_bridge_fastdds` (FastDDS)

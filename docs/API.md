@@ -1,6 +1,6 @@
 # API Protocol
 
-`pj_ros_bridge` uses a single WebSocket port (default 9090). Text frames carry JSON API requests/responses; binary frames carry ZSTD-compressed aggregated message data.
+`pj_bridge` uses a single WebSocket port (default 9090). Text frames carry JSON API requests/responses; binary frames carry ZSTD-compressed aggregated message data.
 
 ## Request IDs and Protocol Version
 
@@ -674,7 +674,7 @@ ros2 run pj_bridge pj_bridge_ros2 --ros-args \
 Clients then connect via `wss://` instead of `ws://` (e.g.
 `wss://127.0.0.1:9090`). With a self-signed certificate, the client must
 either trust the certificate explicitly or disable peer verification (e.g.
-IXWebSocket's `caFile = "NONE"`) — production deployments should use a
+`caFile = "NONE"` in an IXWebSocket client) — production deployments should use a
 certificate signed by a trusted CA instead.
 
 ## Binary Message Format

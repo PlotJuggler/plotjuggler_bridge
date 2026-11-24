@@ -3,7 +3,7 @@
 <package format="3">
   <name>pj_bridge</name>
   <version>0.10.0</version>
-  <description>Multi-backend bridge server (ROS2 / RTI DDS) that forwards topic content over WebSocket</description>
+  <description>Multi-backend bridge server (ROS 2 / Fast DDS / RTI Connext DDS) that forwards topic content over WebSocket to PlotJuggler</description>
   <maintainer email="davide.faconti@gmail.com">davide</maintainer>
   <author email="davide.faconti@gmail.com">davide</author>
   <license>AGPL-3.0</license>
