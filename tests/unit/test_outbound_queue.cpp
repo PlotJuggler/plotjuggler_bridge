@@ -44,6 +44,21 @@ std::vector<std::string> drain(OutboundQueue& queue, size_t count) {
 
 }  // namespace
 
+// The asynchronous (Beast) writer polls with try_pop(): it must never block,
+// and must return nothing once the queue is closed.
+TEST(OutboundQueueTest, TryPopNeverBlocks) {
+  OutboundQueue queue(10);
+  EXPECT_FALSE(queue.try_pop().has_value());
+  queue.push_normal("a");
+  auto item = queue.try_pop();
+  ASSERT_TRUE(item.has_value());
+  EXPECT_EQ(item->data, "a");
+  EXPECT_FALSE(queue.try_pop().has_value());
+  queue.push_normal("b");
+  queue.close();
+  EXPECT_FALSE(queue.try_pop().has_value());
+}
+
 TEST(OutboundQueueTest, KeepsRepliesAndNormalFramesInOrder) {
   OutboundQueue queue(10);
   queue.push_text("reply");

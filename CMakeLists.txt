@@ -61,8 +61,19 @@ find_package(ZSTD REQUIRED)
 
 include(FetchContent)
 
-# IXWebSocket — try system/conda first, fall back to FetchContent
-option(PJ_BRIDGE_TLS "Build IXWebSocket with TLS (OpenSSL) support" ON)
+# WebSocket transport: Boost.Beast (header-only; Boost.Asio, OpenSSL for wss://).
+# PJ_BRIDGE_WS_IX=ON builds the previous IXWebSocket transport instead (kept for
+# comparison). IXWebSocket is still needed for the tests' WebSocket client.
+option(PJ_BRIDGE_TLS "Build with TLS (wss://, OpenSSL) support" ON)
+option(PJ_BRIDGE_WS_IX "Use the IXWebSocket transport instead of Boost.Beast" OFF)
+
+find_package(Threads REQUIRED)
+if(NOT PJ_BRIDGE_WS_IX)
+  find_package(Boost 1.75 REQUIRED)
+  if(PJ_BRIDGE_TLS)
+    find_package(OpenSSL REQUIRED)
+  endif()
+endif()
 
 find_package(ixwebsocket QUIET)
 if(NOT ixwebsocket_FOUND)
@@ -105,8 +116,14 @@ target_include_directories(data_path INTERFACE ${CMAKE_BINARY_DIR}/include)
 # ============================================================================
 # pj_bridge_app — backend-agnostic core library
 # ============================================================================
+if(PJ_BRIDGE_WS_IX)
+  set(PJ_BRIDGE_WS_SOURCE app/src/middleware/websocket_middleware_ix.cpp)
+else()
+  set(PJ_BRIDGE_WS_SOURCE app/src/middleware/websocket_middleware.cpp)
+endif()
+
 add_library(pj_bridge_app STATIC
-  app/src/middleware/websocket_middleware.cpp
+  ${PJ_BRIDGE_WS_SOURCE}
   app/src/message_buffer.cpp
   app/src/session_manager.cpp
   app/src/message_serializer.cpp
@@ -122,10 +139,21 @@ target_include_directories(pj_bridge_app PUBLIC
 
 target_link_libraries(pj_bridge_app PUBLIC
   zstd::libzstd_shared
-  ixwebsocket::ixwebsocket
   spdlog::spdlog
   nlohmann_json::nlohmann_json
+  Threads::Threads
 )
+
+if(PJ_BRIDGE_WS_IX)
+  target_compile_definitions(pj_bridge_app PUBLIC PJ_BRIDGE_WS_IX)
+  target_link_libraries(pj_bridge_app PUBLIC ixwebsocket::ixwebsocket)
+else()
+  target_link_libraries(pj_bridge_app PRIVATE Boost::headers)
+  if(PJ_BRIDGE_TLS)
+    target_compile_definitions(pj_bridge_app PUBLIC PJ_BRIDGE_TLS)
+    target_link_libraries(pj_bridge_app PUBLIC OpenSSL::SSL OpenSSL::Crypto)
+  endif()
+endif()
 
 # ============================================================================
 # pj_bridge_ros2 — ROS2 backend (only if ament_cmake found)
@@ -275,6 +303,7 @@ if(BUILD_TESTING AND ament_cmake_FOUND)
   target_link_libraries(${PROJECT_NAME}_tests
     pj_bridge_ros2_lib
     data_path
+    ixwebsocket::ixwebsocket  # WebSocket client for the middleware tests
   )
 
   # End-to-end slow-link behaviour, observed from the wire only (~20 s).
@@ -283,7 +312,10 @@ if(BUILD_TESTING AND ament_cmake_FOUND)
     tests/integration/test_slow_link.cpp
     TIMEOUT 120
   )
-  target_link_libraries(${PROJECT_NAME}_slow_link_tests pj_bridge_app)
+  target_link_libraries(${PROJECT_NAME}_slow_link_tests
+    pj_bridge_app
+    ixwebsocket::ixwebsocket  # WebSocket client
+  )
 
   # Sanitizer environment settings for CTest
   if(ENABLE_TSAN)

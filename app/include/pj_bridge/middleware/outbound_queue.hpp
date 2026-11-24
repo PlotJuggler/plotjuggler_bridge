@@ -112,31 +112,14 @@ class OutboundQueue {
   std::optional<Item> pop() {
     std::unique_lock<std::mutex> lock(mutex_);
     cv_.wait(lock, [this] { return closed_ || !fifo_.empty() || !heavy_.empty(); });
-    if (closed_) {
-      return std::nullopt;
-    }
-    Item item;
-    const bool heavy_turn =
-        !heavy_.empty() &&
-        (fifo_.empty() || (fifo_streak_ >= max_normal_frames_ && !reply_before(heavy_.front().second.seq)));
-    if (heavy_turn) {
-      item = std::move(heavy_.front().second);
-      heavy_.pop_front();
-      fifo_streak_ = 0;
-    } else {
-      item = std::move(fifo_.front());
-      fifo_.pop_front();
-      if (budgeted(item)) {
-        reply_bytes_ -= item.data.size();
-      } else {
-        --normal_frames_;
-        normal_bytes_ -= item.data.size();
-      }
-      if (!heavy_.empty()) {
-        ++fifo_streak_;
-      }
-    }
-    return item;
+    return pop_locked();
+  }
+
+  /// Non-blocking pop, for an asynchronous writer: nullopt if the queue is
+  /// empty or closed.
+  std::optional<Item> try_pop() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return pop_locked();
   }
 
   /// Drop every queued binary frame, keeping text replies (the client's
@@ -185,6 +168,34 @@ class OutboundQueue {
   }
 
  private:
+  std::optional<Item> pop_locked() {
+    if (closed_ || (fifo_.empty() && heavy_.empty())) {
+      return std::nullopt;
+    }
+    Item item;
+    const bool heavy_turn =
+        !heavy_.empty() &&
+        (fifo_.empty() || (fifo_streak_ >= max_normal_frames_ && !reply_before(heavy_.front().second.seq)));
+    if (heavy_turn) {
+      item = std::move(heavy_.front().second);
+      heavy_.pop_front();
+      fifo_streak_ = 0;
+    } else {
+      item = std::move(fifo_.front());
+      fifo_.pop_front();
+      if (budgeted(item)) {
+        reply_bytes_ -= item.data.size();
+      } else {
+        --normal_frames_;
+        normal_bytes_ -= item.data.size();
+      }
+      if (!heavy_.empty()) {
+        ++fifo_streak_;
+      }
+    }
+    return item;
+  }
+
   // Replies and kept frames: never dropped, bounded by the reply budget, and
   // never overtaken by a heavy frame queued after them.
   static bool budgeted(const Item& item) {

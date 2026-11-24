@@ -595,7 +595,7 @@ TEST(WebSocketMiddlewareTlsTest, MissingCertFileFailsInitializeWithPathInMessage
       << "Error message should mention the missing cert file path: " << result.error();
 }
 
-#ifdef IXWEBSOCKET_USE_TLS
+#if defined(IXWEBSOCKET_USE_TLS) && (defined(PJ_BRIDGE_TLS) || defined(PJ_BRIDGE_WS_IX))
 namespace {
 
 // Generates a throwaway self-signed cert/key pair under `dir` using the
@@ -679,7 +679,7 @@ TEST(WebSocketMiddlewareTlsTest, TlsRoundTrip) {
 
   std::filesystem::remove_all(dir);
 }
-#endif  // IXWEBSOCKET_USE_TLS
+#endif  // TLS
 
 // ---------------------------------------------------------------------------
 // Slow / stalled clients
