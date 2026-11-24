@@ -588,6 +588,22 @@ frame is configurable:
 Keep the threshold below the 1 MiB socket watermark so a single heavy message
 does not fill the socket buffer on its own.
 
+### Testing with a slow link
+
+`tests/integration/slow_link.py` is a TCP relay that limits the rate toward the
+client and adds latency in both directions. It reproduces a slow client on one
+machine, without root and without slowing other traffic. Start it in front of
+the bridge and connect the client to the relay's port:
+
+```bash
+# about 1 Mbit/s toward the client, 80 ms round trip, bridge on port 9090
+python3 tests/integration/slow_link.py --listen 9091 --target 127.0.0.1:9090 --rate-kib 128 --delay-ms 40
+```
+
+The client then connects to `ws://localhost:9091`. The relay forwards bytes
+without parsing them, so it works for `wss://` too. Data the client has not
+received yet stays in the bridge's socket send buffer, as on a real slow link.
+
 ## TLS / wss://
 
 The bridge can optionally serve the WebSocket endpoint over TLS (`wss://`)
