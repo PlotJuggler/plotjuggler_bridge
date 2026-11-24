@@ -75,8 +75,12 @@ if(NOT PJ_BRIDGE_WS_IX)
   endif()
 endif()
 
-find_package(ixwebsocket QUIET)
-if(NOT ixwebsocket_FOUND)
+# IXWebSocket: the transport with PJ_BRIDGE_WS_IX, otherwise only the tests' client.
+if(PJ_BRIDGE_WS_IX OR (BUILD_TESTING AND ament_cmake_FOUND))
+  set(PJ_BRIDGE_NEEDS_IX ON)
+  find_package(ixwebsocket QUIET)
+endif()
+if(PJ_BRIDGE_NEEDS_IX AND NOT ixwebsocket_FOUND)
   message(STATUS "IXWebSocket not found — fetching via FetchContent")
   FetchContent_Declare(
     ixwebsocket
@@ -95,7 +99,7 @@ if(NOT ixwebsocket_FOUND)
     find_package(OpenSSL REQUIRED)
     target_link_libraries(ixwebsocket INTERFACE OpenSSL::SSL OpenSSL::Crypto)
   endif()
-else()
+elseif(ixwebsocket_FOUND)
   message(STATUS "Using system IXWebSocket")
 endif()
 
