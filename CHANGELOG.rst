@@ -23,6 +23,11 @@ Forthcoming
 * A queued heavy frame is sent after at most ``client_backlog_size`` normal
   frames, so busy small topics cannot starve it (never ahead of an earlier
   response); a replaced heavy frame keeps its place in line.
+* ``client_backlog_size`` default raised from 100 to 1000 frames, and the
+  small-frame queue is also capped at 32 MiB. 100 frames held only ~2 s at
+  50 Hz, so on a slow link most small-topic data (e.g. ``/odom`` next to
+  ``/tf``) was dropped while a point cloud was in flight, although it needed
+  only a few KiB/s.
 * Shutdown waits for IXWebSocket callbacks already running instead of
   swapping IXWebSocket's callback object, which raced with its dispatch.
 * A client that sends requests without reading the replies is disconnected once

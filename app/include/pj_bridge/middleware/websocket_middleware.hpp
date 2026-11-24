@@ -60,7 +60,14 @@ struct TlsConfig {
 class WebSocketMiddleware : public MiddlewareInterface {
  public:
   /// @param client_backlog_size max kNormal frames queued per client before the oldest is dropped.
-  explicit WebSocketMiddleware(size_t client_backlog_size = 100, std::optional<TlsConfig> tls = std::nullopt);
+  /// Default per-client limit of queued normal frames: about 20 s at the
+  /// default 50 Hz publish rate, enough to keep small topics whole while a
+  /// large frame crosses a slow link. Memory is bounded separately, by bytes
+  /// (OutboundQueue::kDefaultMaxNormalBytes).
+  static constexpr int kDefaultClientBacklogSize = 1000;
+
+  explicit WebSocketMiddleware(
+      size_t client_backlog_size = kDefaultClientBacklogSize, std::optional<TlsConfig> tls = std::nullopt);
   ~WebSocketMiddleware() override;
 
   WebSocketMiddleware(const WebSocketMiddleware&) = delete;

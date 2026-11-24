@@ -42,7 +42,7 @@ int main(int argc, char* argv[]) {
   bool stats_enabled = false;
   std::vector<std::string> topic_whitelist{".*"};
   double topic_poll_interval = 1.0;
-  int client_backlog_size = 100;
+  int client_backlog_size = pj_bridge::WebSocketMiddleware::kDefaultClientBacklogSize;
   int heavy_frame_threshold_bytes = 262144;
   std::string certfile;
   std::string keyfile;

@@ -238,7 +238,7 @@ min_qos_depth: 10              # Minimum KEEP_LAST subscription depth after aggr
 max_qos_depth: 100             # Maximum KEEP_LAST subscription depth after aggregating publisher depths
 ingest_poll_interval_ms: 5.0   # Ingest executor poll interval (drains subscriptions each poll); 0 = blocking spin
 topic_poll_interval: 1.0       # Seconds between topics_changed notification polls; 0 disables polling
-client_backlog_size: 100       # Max frames queued per slow client before dropping the oldest (must be > 0)
+client_backlog_size: 1000      # Max frames queued per slow client before dropping the oldest (also capped at 32 MiB; must be > 0)
 heavy_frame_threshold_bytes: 262144  # Isolate messages >= this size into their own size-class frame; 0 disables
 tls: false                     # Enable TLS (wss://); requires certfile and keyfile
 certfile: ""                   # TLS server certificate file
@@ -248,14 +248,14 @@ keyfile: ""                    # TLS private key file
 ### RTI (via CLI flags):
 ```bash
 pj_bridge_rti --domains 0 1 --port 9090 --publish-rate 50 --session-timeout 10 \
-  --topic-whitelist ".*" --topic-poll-interval 1.0 --client-backlog-size 100 \
+  --topic-whitelist ".*" --topic-poll-interval 1.0 --client-backlog-size 1000 \
   --heavy-frame-threshold-bytes 262144 --certfile cert.pem --keyfile key.pem
 ```
 
 ### FastDDS (via CLI flags):
 ```bash
 pj_bridge_fastdds --domains 0 1 --port 9090 --publish-rate 50 --session-timeout 10 \
-  --topic-whitelist ".*" --topic-poll-interval 1.0 --client-backlog-size 100 \
+  --topic-whitelist ".*" --topic-poll-interval 1.0 --client-backlog-size 1000 \
   --heavy-frame-threshold-bytes 262144 --certfile cert.pem --keyfile key.pem
 ```
 

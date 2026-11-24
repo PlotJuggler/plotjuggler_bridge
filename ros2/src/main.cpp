@@ -50,7 +50,7 @@ int main(int argc, char** argv) {
   node->declare_parameter<double>("ingest_poll_interval_ms", 5.0);
   node->declare_parameter<int>("max_qos_depth", 100);
   node->declare_parameter<double>("topic_poll_interval", 1.0);
-  node->declare_parameter<int>("client_backlog_size", 100);
+  node->declare_parameter<int>("client_backlog_size", pj_bridge::WebSocketMiddleware::kDefaultClientBacklogSize);
   node->declare_parameter<int>("heavy_frame_threshold_bytes", 262144);
   node->declare_parameter<bool>("tls", false);
   node->declare_parameter<std::string>("certfile", "");

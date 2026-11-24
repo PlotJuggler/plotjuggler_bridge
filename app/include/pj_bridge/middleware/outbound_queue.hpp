@@ -38,8 +38,9 @@ namespace pj_bridge {
 /// Policy, chosen for live plotting over a slow link (fresh data beats complete data):
 ///   - Text replies and normal binary frames share one FIFO lane, so a reply
 ///     still precedes the frames sent after it (e.g. latched replay). Replies
-///     are never dropped; when more than `max_normal_frames` binary frames are
-///     queued, the oldest binary frame is dropped.
+///     are never dropped; when more than `max_normal_frames` binary frames, or
+///     more than `max_normal_bytes` of them, are queued, the oldest binary
+///     frames are dropped (the newest frame is always kept).
 ///   - Heavy frames are coalesced by key (the topic): a new heavy frame
 ///     replaces a queued one with the same key, so a slow client receives the
 ///     newest point cloud instead of a growing backlog of old ones.
@@ -61,10 +62,13 @@ class OutboundQueue {
     uint64_t seq = 0;  // push order
   };
 
-  static constexpr size_t kDefaultMaxReplyBytes = 64U << 20;  // 64 MiB
+  static constexpr size_t kDefaultMaxReplyBytes = 64U << 20;   // 64 MiB
+  static constexpr size_t kDefaultMaxNormalBytes = 32U << 20;  // 32 MiB
 
-  explicit OutboundQueue(size_t max_normal_frames, size_t max_reply_bytes = kDefaultMaxReplyBytes)
-      : max_normal_frames_(max_normal_frames), max_reply_bytes_(max_reply_bytes) {}
+  explicit OutboundQueue(
+      size_t max_normal_frames, size_t max_reply_bytes = kDefaultMaxReplyBytes,
+      size_t max_normal_bytes = kDefaultMaxNormalBytes)
+      : max_normal_frames_(max_normal_frames), max_reply_bytes_(max_reply_bytes), max_normal_bytes_(max_normal_bytes) {}
 
   /// @return false if the queue is closed, or if this reply exceeds the reply
   ///         budget (the queue then closes: see reply_budget_exceeded()).
@@ -116,6 +120,7 @@ class OutboundQueue {
       fifo_.pop_front();
       if (item.binary) {
         --normal_frames_;
+        normal_bytes_ -= item.data.size();
       } else {
         reply_bytes_ -= item.data.size();
       }
@@ -133,6 +138,7 @@ class OutboundQueue {
     dropped_total_ += normal_frames_ + heavy_.size();
     fifo_.erase(std::remove_if(fifo_.begin(), fifo_.end(), [](const Item& item) { return item.binary; }), fifo_.end());
     normal_frames_ = 0;
+    normal_bytes_ = 0;
     heavy_.clear();
   }
 
@@ -182,6 +188,7 @@ class OutboundQueue {
     fifo_.clear();
     heavy_.clear();
     normal_frames_ = 0;
+    normal_bytes_ = 0;
     reply_bytes_ = 0;
   }
 
@@ -198,23 +205,27 @@ class OutboundQueue {
         return false;
       }
       item.seq = next_seq_++;
-      if (item.binary) {
-        if (normal_frames_ >= max_normal_frames_) {
+      if (item.binary && max_normal_frames_ == 0) {
+        ++dropped_total_;
+        return true;  // nothing may be queued: the new frame is the one dropped
+      }
+      const bool binary = item.binary;
+      const size_t size = item.data.size();
+      fifo_.push_back(std::move(item));
+      if (!binary) {
+        reply_bytes_ += size;
+      } else {
+        ++normal_frames_;
+        normal_bytes_ += size;
+        // Drop the oldest frames past either limit; the new frame always stays.
+        while (normal_frames_ > max_normal_frames_ || (normal_bytes_ > max_normal_bytes_ && normal_frames_ > 1)) {
           auto oldest = std::find_if(fifo_.begin(), fifo_.end(), [](const Item& queued) { return queued.binary; });
-          if (oldest != fifo_.end()) {
-            fifo_.erase(oldest);
-            --normal_frames_;
-          }
+          normal_bytes_ -= oldest->data.size();
+          --normal_frames_;
+          fifo_.erase(oldest);
           ++dropped_total_;
         }
-        if (max_normal_frames_ == 0) {
-          return true;  // nothing may be queued: the new frame is the one dropped
-        }
-        ++normal_frames_;
-      } else {
-        reply_bytes_ += item.data.size();
       }
-      fifo_.push_back(std::move(item));
     }
     cv_.notify_one();
     return true;
@@ -226,6 +237,8 @@ class OutboundQueue {
   std::deque<std::pair<std::string, Item>> heavy_;  // (key, frame), in turn order
   size_t normal_frames_ = 0;
   size_t max_normal_frames_;
+  size_t normal_bytes_ = 0;
+  size_t max_normal_bytes_;
   uint64_t next_seq_ = 0;
   size_t fifo_streak_ = 0;  // FIFO items served while a heavy frame waited
   size_t reply_bytes_ = 0;

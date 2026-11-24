@@ -149,3 +149,24 @@ TEST(OutboundQueueTest, HeavyFrameNeverOvertakesAnEarlierReply) {
   queue.push_heavy("/cloud", "cloud");
   EXPECT_EQ(drain(queue, 3), (std::vector<std::string>{"heartbeat-reply", "subscribe-reply", "cloud"}));
 }
+
+TEST(OutboundQueueTest, NormalLaneIsAlsoBoundedByBytes) {
+  // The frame limit is sized for many small frames (a slow link must keep
+  // seconds of small-topic data while a point cloud is in flight); the byte
+  // limit bounds memory when the frames are large.
+  OutboundQueue queue(100, OutboundQueue::kDefaultMaxReplyBytes, /*max_normal_bytes=*/10);
+  queue.push_normal("aaaa");
+  queue.push_normal("bbbb");
+  queue.push_normal("cccc");  // 12 bytes: drops "aaaa"
+  EXPECT_EQ(queue.dropped_total(), 1u);
+  EXPECT_EQ(drain(queue, 2), (std::vector<std::string>{"bbbb", "cccc"}));
+}
+
+TEST(OutboundQueueTest, OversizedNormalFrameIsKeptAlone) {
+  // A single frame larger than the byte limit still goes out, alone.
+  OutboundQueue queue(100, OutboundQueue::kDefaultMaxReplyBytes, /*max_normal_bytes=*/4);
+  queue.push_normal("aa");
+  queue.push_normal("bbbbbbbb");
+  EXPECT_EQ(queue.dropped_total(), 1u);
+  EXPECT_EQ(drain(queue, 1), (std::vector<std::string>{"bbbbbbbb"}));
+}
