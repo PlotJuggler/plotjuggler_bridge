@@ -117,6 +117,21 @@ class MockMiddleware : public MiddlewareInterface {
     drop_pending_calls_.push_back(client_identity);
   }
 
+  bool is_sending(const std::string& client_identity) const override {
+    std::lock_guard<std::mutex> lock(drop_pending_mutex_);
+    return sending_clients_.count(client_identity) > 0;
+  }
+
+  /// Test seam: report @p client_identity as mid-send (is_sending()).
+  void set_sending(const std::string& client_identity, bool sending) {
+    std::lock_guard<std::mutex> lock(drop_pending_mutex_);
+    if (sending) {
+      sending_clients_.insert(client_identity);
+    } else {
+      sending_clients_.erase(client_identity);
+    }
+  }
+
   // --- Test helpers ---
 
   /// Return the client ids drop_pending() was invoked for, in call order.
@@ -263,8 +278,9 @@ class MockMiddleware : public MiddlewareInterface {
   ConnectionCallback on_connect_;
   ConnectionCallback on_disconnect_;
 
-  std::mutex drop_pending_mutex_;
+  mutable std::mutex drop_pending_mutex_;
   std::vector<std::string> drop_pending_calls_;
+  std::set<std::string> sending_clients_;
 };
 
 // ---------------------------------------------------------------------------
@@ -1467,6 +1483,57 @@ TEST_F(BridgeServerTest, UnsubscribeIncludesProtocolVersion) {
 //
 // Tests that the pause command sets the session's paused state to true.
 // ---------------------------------------------------------------------------
+// IXWebSocket reads a client's socket on the same thread that flushes a
+// large frame to it, so on a slow link the client's own heartbeats wait
+// unread behind the bridge's send. A client the bridge is sending to must not
+// be timed out for that.
+TEST_F(BridgeServerTest, SessionNotTimedOutWhileMiddlewareIsSendingToIt) {
+  server_ = std::make_unique<BridgeServer>(
+      mock_topic_source_, mock_sub_manager_, mock_, BridgeServerConfig{19999, /*session_timeout=*/0.05, 50.0});
+  ASSERT_TRUE(server_->initialize());
+
+  json hb;
+  hb["command"] = "heartbeat";
+  mock_->push_request("slow", hb.dump());
+  mock_->push_request("idle", hb.dump());
+  server_->process_requests();
+  ASSERT_EQ(server_->get_active_session_count(), 2u);
+
+  mock_->set_sending("slow", true);
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  server_->check_session_timeouts();
+  EXPECT_EQ(server_->get_active_session_count(), 1u) << "only the idle client times out";
+
+  // Once the send is over, the usual timeout applies again.
+  mock_->set_sending("slow", false);
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  server_->check_session_timeouts();
+  EXPECT_EQ(server_->get_active_session_count(), 0u);
+}
+
+// Frames already queued for a client must not reach it after its pause
+// acknowledgement.
+TEST_F(BridgeServerTest, PauseDropsFramesAlreadyQueuedForTheClient) {
+  ASSERT_TRUE(server_->initialize());
+
+  json hb;
+  hb["command"] = "heartbeat";
+  mock_->push_request("client_p", hb.dump());
+  server_->process_requests();
+  ASSERT_TRUE(mock_->get_drop_pending_calls().empty());
+
+  json pause;
+  pause["command"] = "pause";
+  mock_->push_request("client_p", pause.dump());
+  server_->process_requests();
+  EXPECT_EQ(mock_->get_drop_pending_calls(), std::vector<std::string>{"client_p"});
+
+  // An already-paused client has nothing new queued: no second drop.
+  mock_->push_request("client_p", pause.dump());
+  server_->process_requests();
+  EXPECT_EQ(mock_->get_drop_pending_calls().size(), 1u);
+}
+
 TEST_F(BridgeServerTest, PauseSetsPausedState) {
   ASSERT_TRUE(server_->initialize());
 

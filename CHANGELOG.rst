@@ -16,6 +16,14 @@ Forthcoming
   message in order and fell further behind without limit.
 * Requests a client sent just before disconnecting are discarded instead of
   re-creating its session once per request.
+* A client is not timed out while the bridge is still sending it a frame (its
+  heartbeats wait unread behind the send on a slow link).
+* ``pause`` discards the frames already queued for the client, so none arrives
+  after the pause response.
+* A queued heavy frame is sent after at most ``client_backlog_size`` normal
+  frames, so busy small topics cannot starve it.
+* A client that sends requests without reading the replies is disconnected once
+  64 MiB of replies are queued for it.
 
 0.10.0 (2026-09-20)
 -------------------

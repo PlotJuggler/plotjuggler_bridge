@@ -586,6 +586,10 @@ std::string BridgeServer::handle_pause(const std::string& client_id, const nlohm
     released = held_refs.size();
   }
 
+  // Frames already queued for this client would otherwise reach it after the
+  // pause acknowledgement. Outside cleanup_mutex_: no middleware call under it.
+  middleware_->drop_pending(client_id);
+
   spdlog::info("Client '{}' paused ({} topic refs released)", client_id, released);
 
   json response;
@@ -786,6 +790,13 @@ void BridgeServer::check_session_timeouts() {
   auto timed_out_sessions = session_manager_->get_timed_out_sessions();
 
   for (const auto& client_id : timed_out_sessions) {
+    // On a slow link one frame can take longer to send than the session
+    // timeout, and the client's heartbeats wait unread behind it: a client
+    // the bridge is still sending to is alive.
+    if (middleware_->is_sending(client_id)) {
+      session_manager_->update_heartbeat(client_id);
+      continue;
+    }
     spdlog::warn("Session timeout for client '{}'", client_id);
     cleanup_session(client_id);
   }

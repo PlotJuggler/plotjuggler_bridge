@@ -44,7 +44,11 @@ namespace pj_bridge {
 ///     replaces a queued one with the same key, so a slow client receives the
 ///     newest point cloud instead of a growing backlog of old ones.
 ///   - pop() serves the FIFO lane first, then the oldest heavy frame, so small
-///     topics are not stuck behind large ones.
+///     topics are not stuck behind large ones. A waiting heavy frame still goes
+///     out after at most `max_normal_frames` FIFO items, so it is never starved.
+///   - Queued reply bytes are capped (`max_reply_bytes`): a client that keeps
+///     sending requests without reading the replies makes the queue close
+///     itself, and the owner then drops the connection.
 ///
 /// Thread-safe: every method may be called from any thread.
 class OutboundQueue {
@@ -54,10 +58,26 @@ class OutboundQueue {
     bool binary = true;
   };
 
-  explicit OutboundQueue(size_t max_normal_frames) : max_normal_frames_(max_normal_frames) {}
+  static constexpr size_t kDefaultMaxReplyBytes = 64U << 20;  // 64 MiB
 
-  /// @return false if the queue is closed.
+  explicit OutboundQueue(size_t max_normal_frames, size_t max_reply_bytes = kDefaultMaxReplyBytes)
+      : max_normal_frames_(max_normal_frames), max_reply_bytes_(max_reply_bytes) {}
+
+  /// @return false if the queue is closed, or if this reply exceeds the reply
+  ///         budget (the queue then closes: see reply_budget_exceeded()).
   bool push_text(std::string data) {
+    bool over_budget = false;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (!closed_ && reply_bytes_ + data.size() > max_reply_bytes_) {
+        over_budget = reply_budget_exceeded_ = true;
+        close_locked();
+      }
+    }
+    if (over_budget) {
+      cv_.notify_all();
+      return false;
+    }
     return push_fifo(Item{std::move(data), false});
   }
 
@@ -92,15 +112,22 @@ class OutboundQueue {
       return std::nullopt;
     }
     Item item;
-    if (!fifo_.empty()) {
+    const bool heavy_turn = !heavy_.empty() && (fifo_.empty() || fifo_streak_ >= max_normal_frames_);
+    if (heavy_turn) {
+      item.data = std::move(heavy_.front().second);
+      heavy_.pop_front();
+      fifo_streak_ = 0;
+    } else {
       item = std::move(fifo_.front());
       fifo_.pop_front();
       if (item.binary) {
         --normal_frames_;
+      } else {
+        reply_bytes_ -= item.data.size();
       }
-    } else {
-      item.data = std::move(heavy_.front().second);
-      heavy_.pop_front();
+      if (!heavy_.empty()) {
+        ++fifo_streak_;
+      }
     }
     return item;
   }
@@ -119,12 +146,15 @@ class OutboundQueue {
   void close() {
     {
       std::lock_guard<std::mutex> lock(mutex_);
-      closed_ = true;
-      fifo_.clear();
-      heavy_.clear();
-      normal_frames_ = 0;
+      close_locked();
     }
     cv_.notify_all();
+  }
+
+  /// True once a reply overflowed the reply budget (the queue is then closed).
+  bool reply_budget_exceeded() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return reply_budget_exceeded_;
   }
 
   /// Normal frames dropped on overflow, plus frames discarded by drop_frames().
@@ -140,6 +170,14 @@ class OutboundQueue {
   }
 
  private:
+  void close_locked() {
+    closed_ = true;
+    fifo_.clear();
+    heavy_.clear();
+    normal_frames_ = 0;
+    reply_bytes_ = 0;
+  }
+
   bool push_fifo(Item item) {
     {
       std::lock_guard<std::mutex> lock(mutex_);
@@ -159,6 +197,8 @@ class OutboundQueue {
           return true;  // nothing may be queued: the new frame is the one dropped
         }
         ++normal_frames_;
+      } else {
+        reply_bytes_ += item.data.size();
       }
       fifo_.push_back(std::move(item));
     }
@@ -172,7 +212,11 @@ class OutboundQueue {
   std::deque<std::pair<std::string, std::string>> heavy_;  // (key, frame), oldest first
   size_t normal_frames_ = 0;
   size_t max_normal_frames_;
+  size_t fifo_streak_ = 0;  // FIFO items served while a heavy frame waited
+  size_t reply_bytes_ = 0;
+  size_t max_reply_bytes_;
   bool closed_ = false;
+  bool reply_budget_exceeded_ = false;
   uint64_t dropped_total_ = 0;
   uint64_t shed_total_ = 0;
 };

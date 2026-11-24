@@ -84,6 +84,14 @@ class MiddlewareInterface {
   /// implementations without per-client outbound queues.
   virtual void drop_pending(const std::string& /*client_identity*/) {}
 
+  /// @return true while the transport is in the middle of writing a frame to
+  ///         this client. On a slow link that write can outlast the session
+  ///         timeout, and the client's heartbeats may sit unread behind it, so
+  ///         BridgeServer does not time out a client it is still sending to.
+  virtual bool is_sending(const std::string& /*client_identity*/) const {
+    return false;
+  }
+
   /// @return true if initialize() succeeded and shutdown() has not been called.
   virtual bool is_ready() const = 0;
 

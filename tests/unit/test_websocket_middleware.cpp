@@ -809,10 +809,14 @@ TEST(WebSocketMiddlewareSlowClientTest, StalledClientGetsTheNewestHeavyFrame) {
   // sender; every later frame but the newest must have been replaced.
   EXPECT_GE(shed, 5u);
 
+  EXPECT_TRUE(mw.is_sending(slow_id)) << "the sender is blocked on the stalled client";
+
   slow.release();
   const auto frames = slow.wait_for_frames(kFrames - shed, std::chrono::seconds(5));
   ASSERT_EQ(frames.size(), kFrames - shed);
   EXPECT_EQ(static_cast<uint8_t>(frames.back()[0]), kFrames) << "the client must end with the newest frame";
+  EXPECT_FALSE(mw.is_sending(slow_id));
+  EXPECT_FALSE(mw.is_sending("never-connected"));
 }
 
 // A sender thread blocked in a send to a client that stopped reading must not

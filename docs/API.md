@@ -538,7 +538,7 @@ Error codes: `INVALID_REQUEST`, `INVALID_JSON`, `UNKNOWN_COMMAND`, `ALL_SUBSCRIP
 If a client can't keep up with the aggregated-message stream (e.g. a slow
 network link or a busy renderer), it only falls behind: the server never
 waits for it, so the other clients, heartbeat handling and session timeouts
-are not affected, and it is never disconnected for being slow.
+are not affected, and it is not disconnected for being slow (see the reply limit below).
 
 Each client has its own outbound queue, drained by its own sender thread:
 
@@ -552,6 +552,11 @@ Each client has its own outbound queue, drained by its own sender thread:
   receives the newest point cloud or image instead of a growing backlog of
   old ones.
 - The sender empties the FIFO lane first, then sends the oldest heavy frame.
+  A waiting heavy frame still goes out after at most `client_backlog_size`
+  FIFO items, so steady small-topic traffic cannot starve it.
+- A client that keeps sending requests without reading the replies (more than
+  64 MiB of replies queued) is disconnected; this is the only case in which a
+  slow client is dropped.
 
 The kernel is kept from buffering a backlog of its own: every client socket
 gets `TCP_NOTSENT_LOWAT` = 128 KiB (Linux, macOS), so at most that much
@@ -565,9 +570,13 @@ point cloud takes about 8 s at 1 Mbit/s); small topics then arrive in a burst.
 Use `heavy_frame_threshold_bytes`, `strip_large_messages` or a lower
 subscription `max_rate_hz` for large topics when clients are on slow links.
 
-If a client's session times out server-side while its socket stays open, its
-queued frames are discarded (its queued replies are kept). Requests a client
-sent just before disconnecting are discarded with it.
+A client's session does not time out while the server is still sending it a
+frame: on a slow link one frame can outlast `session_timeout`, and the
+client's heartbeats wait unread behind it. If a client's session does time out
+server-side while its socket stays open, its queued frames are discarded (its
+queued replies are kept). `pause` discards the frames already queued for the
+client, so none arrives after the pause response. Requests a client sent just
+before disconnecting are discarded with it.
 
 Frames already queued (or already in the socket's send buffer) when an
 `unsubscribe` is processed may still arrive **after** the unsubscribe

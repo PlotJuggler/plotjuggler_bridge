@@ -108,3 +108,33 @@ TEST(OutboundQueueTest, CloseWakesABlockedPopAndRejectsPushes) {
   EXPECT_FALSE(queue.push_normal("late"));
   EXPECT_FALSE(queue.push_heavy("/cloud", "late"));
 }
+
+TEST(OutboundQueueTest, HeavyFrameIsServedAfterABacklogOfNormalFrames) {
+  // Normal traffic that never lets the FIFO lane run empty must not starve
+  // the heavy lane: a waiting heavy frame goes out after at most
+  // max_normal_frames normal frames.
+  OutboundQueue queue(2);
+  queue.push_heavy("/cloud", "cloud");
+  queue.push_normal("n1");
+  queue.push_normal("n2");
+  EXPECT_EQ(drain(queue, 2), (std::vector<std::string>{"n1", "n2"}));
+  queue.push_normal("n3");
+  EXPECT_EQ(drain(queue, 2), (std::vector<std::string>{"cloud", "n3"}));
+}
+
+TEST(OutboundQueueTest, ReplyBudgetOverflowClosesTheQueue) {
+  // A client that sends requests but never reads their replies must not grow
+  // the bridge's memory without bound.
+  OutboundQueue queue(10, /*max_reply_bytes=*/8);
+  EXPECT_TRUE(queue.push_text("12345"));
+  EXPECT_FALSE(queue.push_text("67890")) << "over the reply budget";
+  EXPECT_FALSE(queue.push_normal("frame")) << "the queue is closed";
+  EXPECT_FALSE(queue.pop().has_value());
+}
+
+TEST(OutboundQueueTest, PoppedRepliesFreeTheirBudget) {
+  OutboundQueue queue(10, /*max_reply_bytes=*/8);
+  EXPECT_TRUE(queue.push_text("12345"));
+  ASSERT_TRUE(queue.pop().has_value());
+  EXPECT_TRUE(queue.push_text("67890"));
+}

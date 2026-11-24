@@ -81,6 +81,7 @@ class WebSocketMiddleware : public MiddlewareInterface {
   void set_on_connect(ConnectionCallback callback) override;
   void set_on_disconnect(ConnectionCallback callback) override;
   void drop_pending(const std::string& client_identity) override;
+  bool is_sending(const std::string& client_identity) const override;
 
   /// kNormal frames dropped for slow clients (backlog overflow or drop_pending),
   /// summed over the middleware's lifetime.
@@ -102,17 +103,37 @@ class WebSocketMiddleware : public MiddlewareInterface {
     std::vector<uint8_t> data;
   };
 
+  /// Shared between a client's sender thread and the middleware.
+  struct SenderState {
+    std::atomic<bool> sending{false};  ///< inside a (blocking) IXWebSocket send
+    std::atomic<bool> done{false};     ///< the sender thread has returned
+    /// IXWebSocket's connection thread no longer uses the WebSocket.
+    std::atomic<bool> connection_ended{false};
+  };
+
+  /// A connected (or departed, not yet reaped) client. The entry owns a
+  /// reference to the WebSocket until both its sender thread and IXWebSocket's
+  /// connection thread are done with it, so the WebSocket is always destroyed
+  /// by the bridge's thread, after both.
   struct Client {
+    std::string id;
     std::shared_ptr<ix::WebSocket> ws;
     std::shared_ptr<OutboundQueue> queue;
     std::thread sender;
-    std::shared_ptr<std::atomic<bool>> sender_done;
+    std::shared_ptr<SenderState> state;
   };
 
-  std::shared_ptr<OutboundQueue> find_queue(const std::string& client_identity) const;
+  /// Copy of a connected client's handles, or an empty Client if unknown.
+  Client find_client(const std::string& client_identity) const;
   /// Fold a departing client's counters into the lifetime totals, stop its
-  /// queue and park its sender thread for joining. Requires clients_mutex_.
+  /// queue and park the client until it can be reaped. Requires clients_mutex_.
   void retire_client(Client& client);
+  /// IXWebSocket's connection thread for @p client_id has finished.
+  void mark_connection_ended(const std::string& client_id);
+  /// Reap departed clients whose sender and connection threads have both
+  /// finished. Called from the
+  /// bridge's polling thread, never from an IXWebSocket callback.
+  void reap_finished_senders();
   /// Remove parked clients from retired_ (all, or only those whose sender
   /// finished) for joining outside the lock. Requires clients_mutex_.
   std::vector<Client> take_retired(bool all);
