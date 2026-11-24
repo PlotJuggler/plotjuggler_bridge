@@ -2,8 +2,8 @@
 Changelog for package pj_ros_bridge
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-Forthcoming
------------
+1.0.0 (2026-11-25)
+------------------
 * The WebSocket server is now Boost.Beast (header-only, Boost >= 1.74), with
   OpenSSL for ``wss://``. One io thread serves every connection with
   asynchronous reads and writes, so a slow or stalled client costs nothing to
