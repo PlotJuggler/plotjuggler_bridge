@@ -59,7 +59,7 @@ int main(int argc, char* argv[]) {
   app.add_option(
          "--client-backlog-size", client_backlog_size,
          "Max frames queued per slow client before dropping the oldest (backpressure)")
-      ->default_val(100)
+      ->default_val(pj_bridge::WebSocketMiddleware::kDefaultClientBacklogSize)
       ->check(CLI::Range(1, 1000000));
   app.add_option(
          "--heavy-frame-threshold-bytes", heavy_frame_threshold_bytes,

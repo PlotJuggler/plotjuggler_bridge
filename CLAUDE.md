@@ -45,7 +45,8 @@ make -j$(nproc)
 
 ### External Dependencies
 
-- **IXWebSocket** — `find_package` first, FetchContent fallback
+- **Boost.Beast/Asio** — header-only (Boost ≥ 1.74), WebSocket server; **OpenSSL** for wss://
+- **IXWebSocket** — tests' WebSocket client only (and the legacy `-DPJ_BRIDGE_WS_IX=ON` transport); `find_package` first, FetchContent fallback
 - **spdlog** — system package preferred (for ROS2 ABI compatibility with `librcl_logging_spdlog`); FetchContent fallback for standalone builds
 - **ZSTD** — system package (`libzstd-dev`)
 - **CLI11** — FetchContent (RTI backend only)
@@ -119,7 +120,7 @@ BridgeServer does NOT own timers. The entry point (`main.cpp`) drives the event 
 
 4. **SessionManager** (`app/`) — Tracks clients, heartbeats, per-client subscriptions.
 
-5. **WebSocketMiddleware** (`app/`) — IXWebSocket implementation. One `OutboundQueue` + sender thread per client, so sends never block the event loop (IXWebSocket server sends are blocking); client sockets get `TCP_NOTSENT_LOWAT`. Improved shutdown: shared_ptr server, timeout thread, pre-close clients.
+5. **WebSocketMiddleware** (`app/`) — Boost.Beast implementation: one io thread for all connections (async reads/writes), one callback thread, one `OutboundQueue` per client; client sockets get `TCP_NOTSENT_LOWAT`. The previous IXWebSocket transport is kept in `websocket_middleware_ix.*` behind `-DPJ_BRIDGE_WS_IX=ON` (to be removed).
 
 6. **Ros2TopicSource** (`ros2/`) — Wraps `TopicDiscovery` + `SchemaExtractor`. Schema encoding: `"ros2msg"`.
 
@@ -177,7 +178,9 @@ Then, for each message in the (compressed) payload:
 ### Core (always required)
 - **ZSTD** — compression (`libzstd-dev`)
 - **spdlog** — logging (system package or FetchContent)
-- **IXWebSocket** — WebSocket (`find_package` first, FetchContent fallback)
+- **Boost** (headers, ≥ 1.74) — Beast/Asio WebSocket server
+- **OpenSSL** — wss:// (`PJ_BRIDGE_TLS`, default ON)
+- **IXWebSocket** — tests' WebSocket client only (`find_package` first, FetchContent fallback)
 - **nlohmann/json** — JSON (`find_package(REQUIRED)`)
 - **tl::expected** — error handling (header-only, vendored in 3rdparty/)
 
@@ -222,7 +225,7 @@ pre-commit run -a
 
 ### Notes
 - Sanitizer binaries MUST be run with ROS2 sourced (tests need `AMENT_PREFIX_PATH`)
-- TSAN exits with code 66 due to pre-existing IXWebSocket warnings (suppressed) — this is normal
+- TSAN is clean with the Beast transport; the legacy IX transport (`PJ_BRIDGE_WS_IX=ON`) has a known IXWebSocket-internal race
 - Convenience script available: `./run_and_test.sh`
 
 ## Configuration

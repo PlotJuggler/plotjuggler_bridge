@@ -174,10 +174,13 @@ class WebSocketMiddleware::SessionImpl final : public WebSocketMiddleware::Sessi
     // Default options leave permessage-deflate disabled, so the server declines
     // it: binary frames are already zstd-compressed.
     ws_.set_option(websocket::permessage_deflate{});
-    ws_.auto_fragment(false);                // one WebSocket frame per message
+    // Large messages go out in fragments: Beast sends a Pong (or Close) between
+    // two of them, so it never waits behind a whole frame on a slow link.
+    ws_.auto_fragment(true);
+    ws_.write_buffer_bytes(kFragmentBytes);
     ws_.read_message_max(kMaxRequestBytes);  // requests are small JSON; a larger one closes the connection
     ws_.async_accept([self = shared()](beast::error_code ec) {
-      if (ec) {
+      if (ec || self->closed_) {  // closed_: aborted while this completion was queued
         return self->fail(ec);
       }
       self->open_ = true;
@@ -189,7 +192,7 @@ class WebSocketMiddleware::SessionImpl final : public WebSocketMiddleware::Sessi
 
   void read() {
     ws_.async_read(buffer_, [self = shared()](beast::error_code ec, std::size_t) {
-      if (ec) {
+      if (ec || self->closed_) {  // closed_: a request read before an abort() belongs to a departed client
         return self->fail(ec);
       }
       if (self->ws_.got_text()) {
@@ -233,6 +236,7 @@ WebSocketMiddleware::~WebSocketMiddleware() {
 }
 
 tl::expected<void, std::string> WebSocketMiddleware::initialize(uint16_t port) {
+  std::lock_guard<std::mutex> lifecycle(lifecycle_mutex_);
   std::lock_guard<std::mutex> lock(state_mutex_);
   if (initialized_) {
     return tl::unexpected<std::string>("WebSocket middleware already initialized");
@@ -311,14 +315,35 @@ void WebSocketMiddleware::do_accept(Io& io) {
       });
       return;
     }
+    do_accept(io);  // first: a throw below must not leave the server without a pending accept
     beast::error_code ignored;
     socket.set_option(tcp::no_delay(true), ignored);
+    // A peer that vanishes without FIN or RST (power loss, cable pulled) would
+    // otherwise keep its socket, and a connection slot, forever: there is no
+    // idle timeout, since a client may legitimately send nothing for a while.
+    socket.set_option(asio::socket_base::keep_alive(true), ignored);
+#ifdef TCP_KEEPIDLE
+    const int idle_s = kKeepAliveIdleSeconds;
+    const int interval_s = kKeepAliveIntervalSeconds;
+    const int probes = kKeepAliveProbes;
+    setsockopt(socket.native_handle(), IPPROTO_TCP, TCP_KEEPIDLE, &idle_s, sizeof(idle_s));
+    setsockopt(socket.native_handle(), IPPROTO_TCP, TCP_KEEPINTVL, &interval_s, sizeof(interval_s));
+    setsockopt(socket.native_handle(), IPPROTO_TCP, TCP_KEEPCNT, &probes, sizeof(probes));
+#endif
 #ifdef TCP_NOTSENT_LOWAT
     const int max_unsent = kMaxUnsentBytes;
     if (setsockopt(socket.native_handle(), IPPROTO_TCP, TCP_NOTSENT_LOWAT, &max_unsent, sizeof(max_unsent)) != 0) {
       spdlog::warn("Could not set TCP_NOTSENT_LOWAT; a slow client may see extra latency");
     }
 #endif
+    io.sessions.erase(
+        std::remove_if(
+            io.sessions.begin(), io.sessions.end(), [](const std::weak_ptr<Session>& s) { return s.expired(); }),
+        io.sessions.end());
+    if (io.sessions.size() >= kMaxConnections) {
+      spdlog::warn("WebSocket connection refused: {} connections already open", kMaxConnections);
+      return;  // closes the socket
+    }
     std::string id = std::to_string(next_client_id_++);
     std::shared_ptr<Session> session;
 #ifdef PJ_BRIDGE_TLS
@@ -331,13 +356,8 @@ void WebSocketMiddleware::do_accept(Io& io) {
       session =
           std::make_shared<SessionImpl<beast::tcp_stream>>(*this, io, id, client_backlog_size_, std::move(socket));
     }
-    io.sessions.erase(
-        std::remove_if(
-            io.sessions.begin(), io.sessions.end(), [](const std::weak_ptr<Session>& s) { return s.expired(); }),
-        io.sessions.end());
     io.sessions.push_back(session);
     session->start();
-    do_accept(io);
   });
 }
 
@@ -403,6 +423,7 @@ void WebSocketMiddleware::on_closed(Io& io, const std::string& client_id) {
 }
 
 void WebSocketMiddleware::shutdown() {
+  std::lock_guard<std::mutex> lifecycle(lifecycle_mutex_);
   std::unique_ptr<Io> io;
   {
     std::lock_guard<std::mutex> lock(state_mutex_);

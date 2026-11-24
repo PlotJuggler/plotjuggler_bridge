@@ -65,8 +65,9 @@ namespace pj_bridge {
 /// after shutdown() returns.
 ///
 /// Thread safety: all public methods may be called from any thread, except
-/// shutdown() and the destructor, which must not be called from a connect or
-/// disconnect callback (they wait for the callback thread).
+/// initialize(), shutdown() and the destructor, which must not be called from
+/// a connect or disconnect callback (shutdown() waits for the callback thread,
+/// and initialize() for a shutdown() in progress).
 class WebSocketMiddleware : public MiddlewareInterface {
  public:
   /// Default per-client limit of queued normal frames: about 20 s at the
@@ -112,6 +113,10 @@ class WebSocketMiddleware : public MiddlewareInterface {
   /// already in flight (and so the throughput of fast links) are not limited.
   static constexpr int kMaxUnsentBytes = 128 * 1024;
 
+  /// Most connections served at once, counting those still in the handshake;
+  /// a further one is closed at once. The IXWebSocket server's default.
+  static constexpr size_t kMaxConnections = 128;
+
  private:
   struct Io;      // io_context, acceptor, TLS context and io thread (Asio types stay in the .cpp)
   class Session;  // one connection; lives on the io thread
@@ -155,12 +160,23 @@ class WebSocketMiddleware : public MiddlewareInterface {
   ConnectionCallback on_disconnect_;
   mutable std::mutex state_mutex_;
   bool initialized_ = false;
+  /// Held for all of initialize() and shutdown(), so a second shutdown() waits
+  /// for the first. Never taken by a callback.
+  std::mutex lifecycle_mutex_;
 
   static constexpr int kShutdownTimeoutSeconds = 3;
   static constexpr size_t kMaxIncomingQueueSize = 1024;
   /// Largest request message accepted; a larger one closes the connection.
   static constexpr size_t kMaxRequestBytes = 1U << 20;
+  /// Largest WebSocket frame sent; a longer message is split into fragments.
+  static constexpr size_t kFragmentBytes = 64 * 1024;
   static constexpr std::chrono::milliseconds kAcceptRetryDelay{100};
+  /// TCP keepalive: an idle peer that stopped answering is dropped after about
+  /// 60 + 6 * 10 = 120 s. A connection with data in flight is covered by TCP
+  /// retransmission instead.
+  static constexpr int kKeepAliveIdleSeconds = 60;
+  static constexpr int kKeepAliveIntervalSeconds = 10;
+  static constexpr int kKeepAliveProbes = 6;
 };
 
 }  // namespace pj_bridge

@@ -67,6 +67,17 @@ sequenceDiagram
     deactivate S
 ```
 
+### Connection limits
+
+- Requests are small JSON text messages: one larger than 1 MiB closes the
+  connection with close code 1009 (message too big), without a reply.
+- At most 128 connections are served at once, counting connections still in
+  the TLS or WebSocket handshake; a further one is closed at once.
+- Messages larger than 64 KiB are sent as several WebSocket fragments (one
+  message to the client), so the server answers a Ping between two fragments
+  instead of after a whole point cloud. permessage-deflate is declined:
+  binary frames are already ZSTD-compressed.
+
 ## Get Topics
 
 Discover available ROS2 topics.
@@ -540,7 +551,8 @@ network link or a busy renderer), it only falls behind: the server never
 waits for it, so the other clients, heartbeat handling and session timeouts
 are not affected, and it is not disconnected for being slow (see the reply limit below).
 
-Each client has its own outbound queue, drained by its own sender thread:
+Each client has its own outbound queue, drained without blocking (one io
+thread serves every connection):
 
 - **Replies, latched replays and normal frames** (aggregated small topics)
   share one FIFO lane, so a reply always precedes the frames sent after it.
@@ -630,12 +642,11 @@ The bridge can optionally serve the WebSocket endpoint over TLS (`wss://`)
 using a server certificate + private key (OpenSSL). Client certificate
 verification is not supported — this is server-authentication only.
 
-TLS support depends on IXWebSocket having been built with OpenSSL
-(`PJ_BRIDGE_TLS=ON`, the CMake default for FetchContent builds; a
-system/conda-provided IXWebSocket must likewise have been built with TLS —
-check for `IXWEBSOCKET_USE_TLS` in its exported CMake target). If TLS is
-requested but the linked IXWebSocket lacks TLS support, the server fails to
-start with an explicit error instead of silently falling back to plaintext.
+TLS support is built in when the CMake option `PJ_BRIDGE_TLS` is `ON` (the
+default; it needs OpenSSL). If TLS is requested from a build without it, the
+server fails to start with an explicit error instead of silently falling back
+to plaintext. TLS 1.0 and 1.1 are refused, and a TLS or WebSocket handshake
+that takes longer than 30 s is dropped.
 
 Configuration:
 
@@ -646,10 +657,9 @@ Configuration:
   Passing one without the other is a CLI11 parse error (`->needs()`); passing
   both enables TLS.
 
-Note that only certificate/key file *readability* is validated at startup; a
-mismatched certificate/key pair is not detected until clients connect, and
-then only surfaces as per-connection TLS handshake failures in the server
-log (IXWebSocket defers TLS setup to accept time).
+The certificate and key are loaded at startup: a missing or unreadable file,
+or a key that does not match the certificate, is a startup error
+(`TLS setup failed: ... key values mismatch`).
 
 Example: generate a self-signed certificate and start the ROS2 backend with
 TLS enabled:
