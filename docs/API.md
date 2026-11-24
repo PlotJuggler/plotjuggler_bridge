@@ -571,8 +571,8 @@ limited, so fast links keep their full throughput.
 A WebSocket message cannot be interrupted once started, so on a slow link a
 heavy frame delays the frames behind it by its own transfer time (a 1 MB
 point cloud takes about 8 s at 1 Mbit/s); small topics then arrive in a burst.
-Use `heavy_frame_threshold_bytes`, `strip_large_messages` or a lower
-subscription `max_rate_hz` for large topics when clients are on slow links.
+Use `heavy_frame_threshold_bytes` or a lower subscription `max_rate_hz` for
+large topics when clients are on slow links.
 
 A client's session does not time out while its data keeps reaching the
 server's socket (Linux: the kernel's last-receive time): on a slow link one

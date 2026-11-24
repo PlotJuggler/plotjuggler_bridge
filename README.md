@@ -22,7 +22,7 @@ independently.
 - **High Performance**: 50 Hz message aggregation with ZSTD compression. The original message timestamp is preserved, and less bandwidth is used.
 - **Multi-Client Support**: Multiple clients can connect simultaneously with shared subscriptions
 - **Runtime Schema Discovery**: Automatic extraction of message schemas from installed ROS2 packages on the server side.
-- **Large Message Stripping** (opt-in): Optional stripping of large array fields (Image, PointCloud2, LaserScan, OccupancyGrid) to reduce bandwidth while preserving metadata. Disabled by default — full message data is forwarded; enable with `strip_large_messages:=true` for low-bandwidth links
+- **Large Message Stripping** (opt-in): Optional stripping of large array fields (Image, PointCloud2, LaserScan, OccupancyGrid), keeping only metadata: the stripped content (pixels, points) is lost. Disabled by default — full message data is forwarded; `strip_large_messages:=true` enables it
 - **Topic Whitelist**: Restrict which topics are visible/subscribable via full-match regex patterns (`topic_whitelist` / `--topic-whitelist`), mirroring foxglove_bridge's option of the same name
 - **QoS Depth Heuristics** (ROS2 only): KEEP_LAST subscription depth is derived from the discovered publishers' depths and clamped to a configurable `[min_qos_depth, max_qos_depth]` range
 - **Pushed Topic Advertisement** (opt-in): Clients can subscribe to a `topics_changed` notification instead of polling `get_topics`, at a configurable `topic_poll_interval`
