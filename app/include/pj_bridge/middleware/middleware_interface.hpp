@@ -29,12 +29,13 @@
 
 namespace pj_bridge {
 
-/// Delivery class of a per-client binary frame. A `kHeavy` (large,
-/// single-message) frame waits behind the `kNormal` frames queued for the same
+/// Delivery class of a per-client binary frame. A `kHeavy` frame (one
+/// topic's large messages of one publish cycle) waits behind the `kNormal` frames queued for the same
 /// client, and replaces a still-queued heavy frame with the same key, so a slow
-/// client gets the newest large message instead of a growing backlog. See
-/// docs/API.md, "Slow clients / backpressure".
-enum class FramePriority { kNormal, kHeavy };
+/// client gets the newest large message instead of a growing backlog. A
+/// `kLatched` frame (a latched-topic replay) is never dropped: it is queued
+/// like a reply. See docs/API.md, "Slow clients / backpressure".
+enum class FramePriority { kNormal, kHeavy, kLatched };
 
 /// Abstract transport layer between BridgeServer and clients.
 ///

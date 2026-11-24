@@ -59,7 +59,8 @@ class OutboundQueue {
   struct Item {
     std::string data;
     bool binary = true;
-    uint64_t seq = 0;  // push order
+    uint64_t seq = 0;   // push order
+    bool keep = false;  // a binary frame that is never dropped on overflow
   };
 
   static constexpr size_t kDefaultMaxReplyBytes = 64U << 20;   // 64 MiB
@@ -79,6 +80,13 @@ class OutboundQueue {
   /// @return false if the queue is closed.
   bool push_normal(std::string frame) {
     return push_fifo(Item{std::move(frame), true});
+  }
+
+  /// A binary frame the client cannot do without (a latched-topic replay): it
+  /// is queued like a reply, never dropped on overflow, and counts against
+  /// the reply budget. @return false as push_text().
+  bool push_kept(std::string frame) {
+    return push_fifo(Item{std::move(frame), true, 0, true});
   }
 
   /// @return false if the queue is closed.
@@ -118,11 +126,11 @@ class OutboundQueue {
     } else {
       item = std::move(fifo_.front());
       fifo_.pop_front();
-      if (item.binary) {
+      if (budgeted(item)) {
+        reply_bytes_ -= item.data.size();
+      } else {
         --normal_frames_;
         normal_bytes_ -= item.data.size();
-      } else {
-        reply_bytes_ -= item.data.size();
       }
       if (!heavy_.empty()) {
         ++fifo_streak_;
@@ -135,11 +143,18 @@ class OutboundQueue {
   /// session ended but its socket stays open).
   void drop_frames() {
     std::lock_guard<std::mutex> lock(mutex_);
+    for (const auto& item : fifo_) {
+      if (item.keep) {
+        reply_bytes_ -= item.data.size();
+        ++dropped_total_;
+      }
+    }
     dropped_total_ += normal_frames_ + heavy_.size();
     fifo_.erase(std::remove_if(fifo_.begin(), fifo_.end(), [](const Item& item) { return item.binary; }), fifo_.end());
     normal_frames_ = 0;
     normal_bytes_ = 0;
     heavy_.clear();
+    fifo_streak_ = 0;
   }
 
   /// Discard everything and wake the sender; later pushes fail.
@@ -170,13 +185,19 @@ class OutboundQueue {
   }
 
  private:
-  // Whether a reply queued before push number @p seq is still waiting.
+  // Replies and kept frames: never dropped, bounded by the reply budget, and
+  // never overtaken by a heavy frame queued after them.
+  static bool budgeted(const Item& item) {
+    return !item.binary || item.keep;
+  }
+
+  // Whether a reply or kept frame queued before push number @p seq is still waiting.
   bool reply_before(uint64_t seq) const {
     for (const auto& queued : fifo_) {
       if (queued.seq > seq) {
         return false;  // fifo_ is in push order
       }
-      if (!queued.binary) {
+      if (budgeted(queued)) {
         return true;
       }
     }
@@ -198,28 +219,26 @@ class OutboundQueue {
       if (closed_) {
         return false;
       }
-      if (!item.binary && reply_bytes_ + item.data.size() > max_reply_bytes_) {
+      // Checked against what is already waiting, so one large reply on an
+      // idle queue still goes out.
+      if (budgeted(item) && reply_bytes_ >= max_reply_bytes_) {
         reply_budget_exceeded_ = true;
         close_locked();
         cv_.notify_all();
         return false;
       }
       item.seq = next_seq_++;
-      if (item.binary && max_normal_frames_ == 0) {
-        ++dropped_total_;
-        return true;  // nothing may be queued: the new frame is the one dropped
-      }
-      const bool binary = item.binary;
+      const bool budget = budgeted(item);
       const size_t size = item.data.size();
       fifo_.push_back(std::move(item));
-      if (!binary) {
+      if (budget) {
         reply_bytes_ += size;
       } else {
         ++normal_frames_;
         normal_bytes_ += size;
         // Drop the oldest frames past either limit; the new frame always stays.
         while (normal_frames_ > max_normal_frames_ || (normal_bytes_ > max_normal_bytes_ && normal_frames_ > 1)) {
-          auto oldest = std::find_if(fifo_.begin(), fifo_.end(), [](const Item& queued) { return queued.binary; });
+          auto oldest = std::find_if(fifo_.begin(), fifo_.end(), [](const Item& queued) { return !budgeted(queued); });
           normal_bytes_ -= oldest->data.size();
           --normal_frames_;
           fifo_.erase(oldest);

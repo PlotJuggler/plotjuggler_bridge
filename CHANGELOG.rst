@@ -14,6 +14,12 @@ Forthcoming
   instead of the kernel's send buffer, and a queued heavy frame is replaced by
   the newer one of the same topic. Before, a slow client received every large
   message in order and fell further behind without limit.
+* A topic's large messages of one publish cycle now share one heavy frame
+  (before: one frame per message), so a newer frame replaces only a whole
+  older cycle: a client that keeps up gets every message even when
+  ``publish_rate`` is below the topic's rate.
+* Latched replays (``/tf_static``, ``/map``) are never dropped from a slow
+  client's backlog; they are queued like replies.
 * Requests a client sent just before disconnecting are discarded instead of
   re-creating its session once per request.
 * A client is not timed out while its data keeps reaching the socket (its
@@ -31,7 +37,8 @@ Forthcoming
 * Shutdown waits for IXWebSocket callbacks already running instead of
   swapping IXWebSocket's callback object, which raced with its dispatch.
 * A client that sends requests without reading the replies is disconnected once
-  64 MiB of replies are queued for it.
+  64 MiB of replies and latched replays are queued for it (a single larger
+  reply on an idle queue still goes out).
 
 0.10.0 (2026-09-20)
 -------------------

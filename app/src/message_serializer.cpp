@@ -22,6 +22,7 @@
 #include <zstd.h>
 
 #include <cstring>
+#include <memory>
 #include <stdexcept>
 
 #include "pj_bridge/protocol_constants.hpp"
@@ -36,8 +37,8 @@ AggregatedMessageSerializer::~AggregatedMessageSerializer() {
 
 ZSTD_DCtx *AggregatedMessageSerializer::get_dctx() {
   // Thread-local decompression context (used by static decompress_zstd)
-  thread_local ZSTD_DCtx *dctx = ZSTD_createDCtx();
-  return dctx;
+  thread_local std::unique_ptr<ZSTD_DCtx, size_t (*)(ZSTD_DCtx *)> dctx(ZSTD_createDCtx(), ZSTD_freeDCtx);
+  return dctx.get();
 }
 
 void AggregatedMessageSerializer::serialize_message(

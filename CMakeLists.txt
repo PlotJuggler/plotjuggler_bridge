@@ -277,6 +277,14 @@ if(BUILD_TESTING AND ament_cmake_FOUND)
     data_path
   )
 
+  # End-to-end slow-link behaviour, observed from the wire only (~20 s).
+  # Backend-agnostic: needs only the core library.
+  ament_add_gtest(${PROJECT_NAME}_slow_link_tests
+    tests/integration/test_slow_link.cpp
+    TIMEOUT 120
+  )
+  target_link_libraries(${PROJECT_NAME}_slow_link_tests pj_bridge_app)
+
   # Sanitizer environment settings for CTest
   if(ENABLE_TSAN)
     set_tests_properties(${PROJECT_NAME}_tests PROPERTIES

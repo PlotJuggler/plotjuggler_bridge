@@ -3493,8 +3493,8 @@ TEST_F(BridgeServerTest, HeavyFramesSentWithHeavyPriority) {
 }
 
 TEST_F(BridgeServerTest, RateLimitedHeavyTopicRespectsRateGate) {
-  // The per-topic rate gate is applied BEFORE size classification, so a
-  // rate-limited heavy topic emits one heavy frame only per admitted message.
+  // The per-topic rate gate is applied BEFORE size classification: only the
+  // admitted messages go into the topic's heavy frame for this cycle.
   server_ = std::make_unique<BridgeServer>(
       mock_topic_source_, mock_sub_manager_, mock_, BridgeServerConfig{19999, 10.0, 50.0, WhitelistFilter{}, 64});
   ASSERT_TRUE(server_->initialize());
@@ -3517,13 +3517,12 @@ TEST_F(BridgeServerTest, RateLimitedHeavyTopicRespectsRateGate) {
 
   auto sends = mock_->get_binary_sends();
   auto priorities = mock_->get_binary_priorities();
-  ASSERT_EQ(sends.size(), 2u) << "rate gate must admit exactly 2 of the 3 heavy messages";
-  for (size_t i = 0; i < sends.size(); ++i) {
-    EXPECT_EQ(priorities[i], FramePriority::kHeavy) << "each admitted heavy message is its own frame";
-    auto msgs = decode_frame(sends[i].second);
-    ASSERT_EQ(msgs.size(), 1u);
-    EXPECT_EQ(msgs[0].topic, "/big");
-  }
+  ASSERT_EQ(sends.size(), 1u) << "one heavy frame per topic per publish cycle";
+  EXPECT_EQ(priorities[0], FramePriority::kHeavy);
+  auto msgs = decode_frame(sends[0].second);
+  ASSERT_EQ(msgs.size(), 2u) << "rate gate must admit exactly 2 of the 3 heavy messages";
+  EXPECT_EQ(msgs[0].topic, "/big");
+  EXPECT_EQ(msgs[1].topic, "/big");
   auto stats = server_->snapshot_and_reset_stats();
   EXPECT_EQ(stats.topic_forward_counts["/big"], 2u);
 }

@@ -258,7 +258,7 @@ int main(int argc, char** argv) {
     RCLCPP_INFO(
         node->get_logger(),
         "Final statistics: %lu messages published, %lu bytes transmitted, %lu frames dropped (slow clients), "
-        "%lu heavy frames shed (congestion)",
+        "%lu heavy frames replaced by newer",
         total_messages, total_bytes, middleware->dropped_frame_count(), middleware->heavy_shed_count());
 
     RCLCPP_INFO(node->get_logger(), "Bridge server shutdown complete");

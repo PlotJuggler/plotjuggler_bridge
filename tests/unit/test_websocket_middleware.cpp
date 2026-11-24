@@ -26,6 +26,7 @@
 #include <condition_variable>
 #include <cstdlib>
 #include <filesystem>
+#include <functional>
 #include <future>
 #include <mutex>
 #include <string>
@@ -127,16 +128,29 @@ TEST_F(WebSocketMiddlewareTest, ReceiveRequestNotInitializedReturnsFast) {
 // Real WebSocket client connection tests
 // ---------------------------------------------------------------------------
 
+// Helper: poll @p condition every 5 ms until it holds or @p timeout passes.
+static bool wait_until(const std::function<bool()>& condition, std::chrono::milliseconds timeout) {
+  auto deadline = std::chrono::steady_clock::now() + timeout;
+  while (!condition()) {
+    if (std::chrono::steady_clock::now() >= deadline) {
+      return false;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
+  return true;
+}
+
 // Helper: wait for the ix::WebSocket client to reach Open state (up to timeout_ms).
 static bool wait_for_client_open(ix::WebSocket& client, int timeout_ms = 2000) {
-  auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
-  while (std::chrono::steady_clock::now() < deadline) {
-    if (client.getReadyState() == ix::ReadyState::Open) {
-      return true;
-    }
-    std::this_thread::sleep_for(std::chrono::milliseconds(10));
-  }
-  return false;
+  return wait_until(
+      [&] { return client.getReadyState() == ix::ReadyState::Open; }, std::chrono::milliseconds(timeout_ms));
+}
+
+// Helper: point @p client at the local server on @p port, ignoring what it receives, and start it.
+static void start_client(ix::WebSocket& client, int port) {
+  client.setUrl("ws://127.0.0.1:" + std::to_string(port));
+  client.setOnMessageCallback([](const ix::WebSocketMessagePtr&) {});
+  client.start();
 }
 
 // Helper: poll receive_request() in a loop until it succeeds or we time out.
@@ -772,10 +786,7 @@ TEST(WebSocketMiddlewareSlowClientTest, StalledClientNeverBlocksSenderOrOtherCli
   });
   const bool sender_finished = sender.wait_for(std::chrono::seconds(2)) == std::future_status::ready;
 
-  auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
-  while (healthy_replies == 0 && std::chrono::steady_clock::now() < deadline) {
-    std::this_thread::sleep_for(std::chrono::milliseconds(10));
-  }
+  wait_until([&] { return healthy_replies > 0; }, std::chrono::seconds(2));
   const int replies_while_stalled = healthy_replies;
 
   slow.release();  // let a blocked sender (pre-fix) finish before asserting
@@ -848,9 +859,7 @@ TEST(WebSocketMiddlewareSlowClientTest, RequestsOfDisconnectedClientAreDiscarded
   ASSERT_TRUE(mw.initialize(18121).has_value());
 
   ix::WebSocket client;
-  client.setUrl("ws://127.0.0.1:18121");
-  client.setOnMessageCallback([](const ix::WebSocketMessagePtr&) {});
-  client.start();
+  start_client(client, 18121);
   ASSERT_TRUE(wait_for_client_open(client));
   for (int i = 0; i < 5; ++i) {
     client.send("{\"command\":\"heartbeat\"}");
@@ -858,11 +867,7 @@ TEST(WebSocketMiddlewareSlowClientTest, RequestsOfDisconnectedClientAreDiscarded
   std::this_thread::sleep_for(std::chrono::milliseconds(200));  // let the server queue them
   client.stop();
 
-  auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
-  while (!disconnected && std::chrono::steady_clock::now() < deadline) {
-    std::this_thread::sleep_for(std::chrono::milliseconds(10));
-  }
-  ASSERT_TRUE(disconnected);
+  ASSERT_TRUE(wait_until([&] { return disconnected.load(); }, std::chrono::seconds(2)));
 
   std::vector<uint8_t> data;
   std::string client_id;
@@ -878,9 +883,7 @@ TEST(WebSocketMiddlewareSlowClientTest, HeardFromClientWithinReflectsWhatTheSock
   ASSERT_TRUE(mw.initialize(18124).has_value());
 
   ix::WebSocket client;
-  client.setUrl("ws://127.0.0.1:18124");
-  client.setOnMessageCallback([](const ix::WebSocketMessagePtr&) {});
-  client.start();
+  start_client(client, 18124);
   const std::string id = register_client(mw, client);
   ASSERT_FALSE(id.empty());
 
@@ -910,17 +913,11 @@ TEST(WebSocketMiddlewareSlowClientTest, ShutdownWaitsForARunningDisconnectCallba
   ASSERT_TRUE(mw.initialize(18125).has_value());
 
   ix::WebSocket client;
-  client.setUrl("ws://127.0.0.1:18125");
-  client.setOnMessageCallback([](const ix::WebSocketMessagePtr&) {});
-  client.start();
+  start_client(client, 18125);
   ASSERT_FALSE(register_client(mw, client).empty());
   client.stop();
 
-  auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
-  while (!entered && std::chrono::steady_clock::now() < deadline) {
-    std::this_thread::sleep_for(std::chrono::milliseconds(1));
-  }
-  ASSERT_TRUE(entered);
+  ASSERT_TRUE(wait_until([&] { return entered.load(); }, std::chrono::seconds(2)));
   mw.shutdown();
   EXPECT_TRUE(finished) << "shutdown() returned while the disconnect callback was still running";
 }

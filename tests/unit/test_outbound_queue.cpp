@@ -128,7 +128,9 @@ TEST(OutboundQueueTest, ReplyBudgetOverflowClosesTheQueue) {
   // the bridge's memory without bound.
   OutboundQueue queue(10, /*max_reply_bytes=*/8);
   EXPECT_TRUE(queue.push_text("12345"));
-  EXPECT_FALSE(queue.push_text("67890")) << "over the reply budget";
+  EXPECT_TRUE(queue.push_text("67890")) << "accepted: the waiting replies were under budget";
+  EXPECT_FALSE(queue.push_text("x")) << "over the reply budget";
+  EXPECT_TRUE(queue.reply_budget_exceeded());
   EXPECT_FALSE(queue.push_normal("frame")) << "the queue is closed";
   EXPECT_FALSE(queue.pop().has_value());
 }
@@ -169,4 +171,70 @@ TEST(OutboundQueueTest, OversizedNormalFrameIsKeptAlone) {
   queue.push_normal("bbbbbbbb");
   EXPECT_EQ(queue.dropped_total(), 1u);
   EXPECT_EQ(drain(queue, 1), (std::vector<std::string>{"bbbbbbbb"}));
+}
+
+TEST(OutboundQueueTest, DroppingFramesRestartsTheHeavyTurnCount) {
+  // After a pause or timeout drops the backlog, the count of normal frames
+  // served while a heavy frame waited starts over: a heavy frame queued
+  // after the drop must not jump ahead of a normal frame queued before it.
+  OutboundQueue queue(2);
+  queue.push_heavy("/cloud", "old-cloud");
+  queue.push_normal("n1");
+  queue.push_normal("n2");
+  ASSERT_EQ(drain(queue, 2), (std::vector<std::string>{"n1", "n2"}));
+  queue.drop_frames();
+  queue.push_normal("n3");
+  queue.push_heavy("/cloud", "new-cloud");
+  EXPECT_EQ(drain(queue, 2), (std::vector<std::string>{"n3", "new-cloud"}));
+}
+
+TEST(OutboundQueueTest, OneReplyLargerThanTheBudgetIsStillSent) {
+  // The budget bounds replies that pile up unread; a single large reply (a
+  // big get_topics with schemas) on an idle queue must not close the client.
+  OutboundQueue queue(10, /*max_reply_bytes=*/8);
+  EXPECT_TRUE(queue.push_text("0123456789"));
+  ASSERT_TRUE(queue.pop().has_value());
+  EXPECT_FALSE(queue.reply_budget_exceeded());
+}
+
+TEST(OutboundQueueTest, KeptFrameSurvivesOverflow) {
+  // A latched-topic replay (/tf_static, /map) is published once: if the
+  // backlog dropped it, the client would never get it.
+  OutboundQueue queue(2);
+  queue.push_text("subscribe-reply");
+  queue.push_kept("latched");
+  queue.push_normal("n1");
+  queue.push_normal("n2");
+  queue.push_normal("n3");
+  EXPECT_EQ(queue.dropped_total(), 1u);
+  EXPECT_EQ(drain(queue, 4), (std::vector<std::string>{"subscribe-reply", "latched", "n2", "n3"}));
+}
+
+TEST(OutboundQueueTest, KeptFrameLargerThanTheByteLimitSurvives) {
+  OutboundQueue queue(100, OutboundQueue::kDefaultMaxReplyBytes, /*max_normal_bytes=*/4);
+  queue.push_kept("large-latched-map");
+  queue.push_normal("n1");
+  auto first = queue.pop();
+  ASSERT_TRUE(first.has_value());
+  EXPECT_EQ(first->data, "large-latched-map");
+  EXPECT_TRUE(first->binary);
+}
+
+TEST(OutboundQueueTest, HeavyFrameNeverOvertakesAnEarlierKeptFrame) {
+  // A latched replay must arrive before a newer live sample of the topic.
+  OutboundQueue queue(1);
+  queue.push_heavy("/map", "old");
+  queue.push_normal("n1");
+  ASSERT_EQ(drain(queue, 1), (std::vector<std::string>{"n1"}));  // the heavy lane is now due a turn
+  queue.push_kept("latched-replay");
+  queue.push_heavy("/map", "live");  // replaces "old"
+  EXPECT_EQ(drain(queue, 2), (std::vector<std::string>{"latched-replay", "live"}));
+}
+
+TEST(OutboundQueueTest, DropFramesAlsoDropsKeptFramesAndFreesTheirBudget) {
+  OutboundQueue queue(10, /*max_reply_bytes=*/8);
+  queue.push_kept("12345678");
+  queue.drop_frames();
+  EXPECT_EQ(queue.dropped_total(), 1u);
+  EXPECT_TRUE(queue.push_text("12345678")) << "the dropped frame's budget was freed";
 }

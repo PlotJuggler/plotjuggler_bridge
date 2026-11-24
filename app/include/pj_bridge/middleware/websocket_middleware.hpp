@@ -59,13 +59,13 @@ struct TlsConfig {
 /// Thread safety: all public methods may be called from any thread.
 class WebSocketMiddleware : public MiddlewareInterface {
  public:
-  /// @param client_backlog_size max kNormal frames queued per client before the oldest is dropped.
   /// Default per-client limit of queued normal frames: about 20 s at the
   /// default 50 Hz publish rate, enough to keep small topics whole while a
   /// large frame crosses a slow link. Memory is bounded separately, by bytes
   /// (OutboundQueue::kDefaultMaxNormalBytes).
   static constexpr int kDefaultClientBacklogSize = 1000;
 
+  /// @param client_backlog_size max kNormal frames queued per client before the oldest is dropped.
   explicit WebSocketMiddleware(
       size_t client_backlog_size = kDefaultClientBacklogSize, std::optional<TlsConfig> tls = std::nullopt);
   ~WebSocketMiddleware() override;
@@ -111,13 +111,6 @@ class WebSocketMiddleware : public MiddlewareInterface {
     std::vector<uint8_t> data;
   };
 
-  /// Shared between a client's sender thread and the middleware.
-  struct SenderState {
-    std::atomic<bool> done{false};  ///< the sender thread has returned
-    /// IXWebSocket's connection thread no longer uses the WebSocket.
-    std::atomic<bool> connection_ended{false};
-  };
-
   /// A connected (or departed, not yet reaped) client. The entry owns a
   /// reference to the WebSocket until both its sender thread and IXWebSocket's
   /// connection thread are done with it, so the WebSocket is always destroyed
@@ -127,11 +120,17 @@ class WebSocketMiddleware : public MiddlewareInterface {
     std::shared_ptr<ix::WebSocket> ws;
     std::shared_ptr<OutboundQueue> queue;
     std::thread sender;
-    std::shared_ptr<SenderState> state;
+    std::shared_ptr<std::atomic<bool>> sender_done;  ///< set by the sender thread as it returns
+    bool connection_ended = false;                   ///< IXWebSocket's connection thread is done (clients_mutex_)
   };
 
-  /// Copy of a connected client's handles, or an empty Client if unknown.
+  /// Copy of a connected client's handles (ws, queue), or an empty Client if unknown.
   Client find_client(const std::string& client_identity) const;
+  // Close @p client if its queue overflowed the reply budget. @return false.
+  static bool close_if_not_reading(const Client& client, const std::string& client_identity);
+  /// Lifetime total of one OutboundQueue counter: departed clients plus live
+  /// ones. Requires clients_mutex_.
+  uint64_t sum_counter(uint64_t departed, uint64_t (OutboundQueue::*counter)() const) const;
   /// Fold a departing client's counters into the lifetime totals, stop its
   /// queue and park the client until it can be reaped. Requires clients_mutex_.
   void retire_client(Client& client);

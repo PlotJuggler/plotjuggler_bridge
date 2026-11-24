@@ -198,19 +198,19 @@ tl::expected<void, std::string> WebSocketMiddleware::initialize(uint16_t port) {
         client.id = client_id;
         client.ws = ws;
         client.queue = std::make_shared<OutboundQueue>(client_backlog_size_);
-        client.state = std::make_shared<SenderState>();
+        client.sender_done = std::make_shared<std::atomic<bool>>(false);
         // The client's sender thread: the only caller of IXWebSocket's
         // blocking send for this client.
         // A raw pointer: the Client entry keeps the WebSocket alive until
         // this thread is joined.
-        client.sender = std::thread([ws = client.ws.get(), queue = client.queue, state = client.state] {
+        client.sender = std::thread([ws = client.ws.get(), queue = client.queue, done = client.sender_done] {
           while (auto item = queue->pop()) {
             if (!ws->send(item->data, item->binary).success) {
               break;  // the connection is closing; its Close event retires this client
             }
           }
           queue->close();
-          state->done = true;
+          *done = true;
         });
         clients_[client_id] = std::move(client);
       }
@@ -405,7 +405,7 @@ void WebSocketMiddleware::mark_connection_ended(const std::string& client_id) {
   connection_fds_.erase(client_id);
   auto mark = [&](Client& client) {
     if (client.id == client_id) {
-      client.state->connection_ended = true;
+      client.connection_ended = true;
     }
   };
   for (auto& client : retired_) {
@@ -430,7 +430,7 @@ void WebSocketMiddleware::reap_finished_senders() {
 
 std::vector<WebSocketMiddleware::Client> WebSocketMiddleware::take_retired(bool all) {
   auto keep = std::partition(retired_.begin(), retired_.end(), [all](const Client& client) {
-    return !all && !(client.state->done && client.state->connection_ended);
+    return !all && !(*client.sender_done && client.connection_ended);
   });
   std::vector<Client> taken(std::make_move_iterator(keep), std::make_move_iterator(retired_.end()));
   retired_.erase(keep, retired_.end());
@@ -483,8 +483,15 @@ WebSocketMiddleware::Client WebSocketMiddleware::find_client(const std::string& 
   Client copy;
   copy.ws = it->second.ws;
   copy.queue = it->second.queue;
-  copy.state = it->second.state;
   return copy;
+}
+
+bool WebSocketMiddleware::close_if_not_reading(const Client& client, const std::string& client_identity) {
+  if (client.queue->reply_budget_exceeded()) {
+    spdlog::warn("Client '{}' is not reading its replies; closing the connection", client_identity);
+    client.ws->close();
+  }
+  return false;
 }
 
 bool WebSocketMiddleware::send_reply(const std::string& client_identity, const std::vector<uint8_t>& data) {
@@ -492,26 +499,27 @@ bool WebSocketMiddleware::send_reply(const std::string& client_identity, const s
   if (!client.queue) {
     return false;
   }
-  if (!client.queue->push_text(std::string(data.begin(), data.end()))) {
-    if (client.queue->reply_budget_exceeded()) {
-      spdlog::warn("Client '{}' is not reading its replies; closing the connection", client_identity);
-      client.ws->close();
-    }
-    return false;
-  }
-  return true;
+  return client.queue->push_text(std::string(reinterpret_cast<const char*>(data.data()), data.size())) ||
+         close_if_not_reading(client, client_identity);
 }
 
 bool WebSocketMiddleware::send_binary(
     const std::string& client_identity, const std::vector<uint8_t>& data, FramePriority priority,
     const std::string& key) {
-  auto queue = find_client(client_identity).queue;
-  if (!queue) {
+  auto client = find_client(client_identity);
+  if (!client.queue) {
     return false;
   }
   std::string frame(reinterpret_cast<const char*>(data.data()), data.size());
-  return priority == FramePriority::kHeavy ? queue->push_heavy(key, std::move(frame))
-                                           : queue->push_normal(std::move(frame));
+  switch (priority) {
+    case FramePriority::kHeavy:
+      return client.queue->push_heavy(key, std::move(frame));
+    case FramePriority::kLatched:
+      return client.queue->push_kept(std::move(frame)) || close_if_not_reading(client, client_identity);
+    case FramePriority::kNormal:
+      break;
+  }
+  return client.queue->push_normal(std::move(frame));
 }
 
 bool WebSocketMiddleware::heard_from_client_within(
@@ -546,22 +554,22 @@ void WebSocketMiddleware::drop_pending(const std::string& client_identity) {
   }
 }
 
-uint64_t WebSocketMiddleware::dropped_frame_count() const {
-  std::lock_guard<std::mutex> lock(clients_mutex_);
-  uint64_t total = dropped_from_departed_;
+uint64_t WebSocketMiddleware::sum_counter(uint64_t departed, uint64_t (OutboundQueue::*counter)() const) const {
+  uint64_t total = departed;
   for (const auto& [client_id, client] : clients_) {
-    total += client.queue->dropped_total();
+    total += (client.queue.get()->*counter)();
   }
   return total;
 }
 
+uint64_t WebSocketMiddleware::dropped_frame_count() const {
+  std::lock_guard<std::mutex> lock(clients_mutex_);
+  return sum_counter(dropped_from_departed_, &OutboundQueue::dropped_total);
+}
+
 uint64_t WebSocketMiddleware::heavy_shed_count() const {
   std::lock_guard<std::mutex> lock(clients_mutex_);
-  uint64_t total = shed_from_departed_;
-  for (const auto& [client_id, client] : clients_) {
-    total += client.queue->shed_total();
-  }
-  return total;
+  return sum_counter(shed_from_departed_, &OutboundQueue::shed_total);
 }
 
 bool WebSocketMiddleware::is_ready() const {

@@ -542,24 +542,25 @@ are not affected, and it is not disconnected for being slow (see the reply limit
 
 Each client has its own outbound queue, drained by its own sender thread:
 
-- **Replies and normal frames** (aggregated small topics, latched replays)
+- **Replies, latched replays and normal frames** (aggregated small topics)
   share one FIFO lane, so a reply always precedes the frames sent after it.
-  Replies are never dropped. When more than `client_backlog_size` binary
-  frames, or more than 32 MiB of them, wait in this lane, the **oldest** are
-  dropped. The default (1000 frames, about 20 s at 50 Hz) keeps small topics
+  Replies and latched replays are never dropped. When more than
+  `client_backlog_size` normal frames, or more than 32 MiB of them, wait in
+  this lane, the **oldest** are dropped. The default (1000 frames, about 20 s at 50 Hz) keeps small topics
   complete while a large frame crosses a slow link.
-- **Heavy frames** ([size-class frames](#size-class-frames), one large
-  message each) wait in a second lane, at most one per topic: a newer heavy
-  frame replaces a queued one of the same topic. A slow client therefore
+- **Heavy frames** ([size-class frames](#size-class-frames): a topic's large
+  messages of one publish cycle) wait in a second lane, at most one per topic:
+  a newer heavy frame replaces a queued one of the same topic. A client that
+  keeps up receives every message. A slow client therefore
   receives the newest point cloud or image instead of a growing backlog of
   old ones.
 - The sender empties the FIFO lane first, then sends the oldest heavy frame.
   A waiting heavy frame still goes out after at most `client_backlog_size`
   FIFO items, so steady small-topic traffic cannot starve it, but never
-  ahead of a response queued before it (a subscribe response always precedes
-  the topic's data). A replaced heavy frame keeps its place in line.
+  ahead of a response or latched replay queued before it (a subscribe
+  response always precedes the topic's data). A replaced heavy frame keeps its place in line.
 - A client that keeps sending requests without reading the replies (more than
-  64 MiB of replies queued) is disconnected; this is the only case in which a
+  64 MiB of replies and latched replays queued) is disconnected; this is the only case in which a
   slow client is dropped.
 
 The kernel is kept from buffering a backlog of its own: every client socket
@@ -600,7 +601,7 @@ dropped; the 32 MiB byte limit is fixed) is configurable:
 The server's periodic statistics report the dropped normal frames and the
 replaced ("shed") heavy frames.
 
-The per-message size at or above which a message is isolated into its own heavy
+The per-message size at or above which a message goes into its topic's heavy
 frame is configurable:
 
 - **ROS2**: int parameter `heavy_frame_threshold_bytes`, default `262144`
@@ -698,17 +699,18 @@ The magic bytes allow clients to validate frame integrity before decompression.
 
 Advertised by the `size_class_frames` capability. To keep a large topic (e.g. a
 `PointCloud2`) from starving small topics under slow-link backpressure, the server
-does **not** weld small and large messages into one frame. Instead, each message
+does **not** weld small and large messages into one frame. Instead, messages
 whose serialized size is at or above a server-configured threshold
-(`heavy_frame_threshold_bytes`, default 256 KiB; `0` disables splitting) is sent as
-its own frame, while smaller messages stay aggregated in a single frame. Server-side
+(`heavy_frame_threshold_bytes`, default 256 KiB; `0` disables splitting) are sent
+in a frame of their own topic (one per topic per publish cycle), while smaller
+messages stay aggregated in a single frame. Server-side
 these large frames are treated as "heavy": queued after the small-topic frames, and
 replaced by a newer frame of the same topic while a slow client still waits for them
 (see [Slow clients / backpressure](#slow-clients--backpressure)).
 
 This is purely a framing change — the payload format is identical, and a publish
 cycle may now emit several binary frames (at most one aggregated light frame, plus
-one per heavy message — and no light frame at all when every admitted message in a
+one per topic with heavy messages — and no light frame at all when every admitted message in a
 group is heavy) instead of one. Each frame is self-describing via its
 `message_count`, so a client decodes them all the same way and needs no changes.
 
