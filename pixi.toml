@@ -11,7 +11,9 @@ ninja = "*"
 colcon-common-extensions = "*"
 zstd = "*"
 spdlog = "*"
-ixwebsocket = "*"
+libboost-headers = "*"
+openssl = "*"
+ixwebsocket = "*"  # WebSocket client of the tests
 nlohmann_json = "*"
 
 [feature.humble]
@@ -32,10 +34,17 @@ channels = ["robostack-kilted", "conda-forge"]
 [feature.kilted.dependencies]
 ros-kilted-desktop = "*"
 
+[feature.lyrical]
+channels = ["robostack-lyrical", "conda-forge"]
+
+[feature.lyrical.dependencies]
+ros-lyrical-desktop = "*"
+
 [environments]
 humble = ["humble"]
 jazzy = ["jazzy"]
 kilted = ["kilted"]
+lyrical = ["lyrical"]
 
 [activation]
 scripts = ["install/setup.sh"]

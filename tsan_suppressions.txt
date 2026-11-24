@@ -5,3 +5,8 @@
 # in ROS2 Humble's libfastrtps.so — upstream issues, not actionable here.
 deadlock:libfastrtps.so
 mutex:libfastrtps.so
+
+# IXWebSocket client (the tests' WebSocket client only): its DNS lookup runs on
+# a detached thread that races with the connecting thread freeing the lookup.
+race:ix::DNSLookup
+race:ix::SocketConnect::connect

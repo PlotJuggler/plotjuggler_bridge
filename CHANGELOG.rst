@@ -4,11 +4,30 @@ Changelog for package pj_ros_bridge
 
 Forthcoming
 -----------
+* The WebSocket server is now Boost.Beast (header-only, Boost >= 1.74), with
+  OpenSSL for ``wss://``. One io thread serves every connection with
+  asynchronous reads and writes, so a slow or stalled client costs nothing to
+  the others; IXWebSocket needed two threads per client and has a data race
+  in its own close path. New dependencies: Boost headers and OpenSSL
+  (declared for rosdep, pixi, conda and Conan). The previous IXWebSocket
+  transport can still be built with ``-DPJ_BRIDGE_WS_IX=ON`` for this release;
+  it will be removed. IXWebSocket remains a test-only dependency.
+* Large messages are sent in 64 KiB WebSocket fragments, so the server answers
+  a client's Ping (and Close) between fragments instead of after a whole
+  point cloud has crossed a slow link.
+* A request larger than 1 MiB closes the connection (close code 1009);
+  requests are small JSON commands.
+* At most 128 connections are served at once, counting those still in the
+  handshake (as IXWebSocket did); a further one is closed at once.
+* TLS 1.0 and 1.1 are refused; TLS and WebSocket handshakes time out after 30 s.
+* FastDDS/RTI: ``--client-backlog-size`` now defaults to 1000, as documented
+  (it was still 100).
+* Pixi: ROS 2 Lyrical environment, CI, AppImage and conda package.
 * Slow clients no longer stall the bridge. IXWebSocket's server-side send
   blocks until the kernel takes every byte, and it ran on the thread that also
   handles requests, publishing and session timeouts: one client on a slow link
   delayed every other client and got healthy clients' sessions timed out.
-  Each client now has its own outbound queue and sender thread.
+  Each client now has its own outbound queue, drained without blocking.
 * Bounded latency on slow links (`#19`): client sockets get
   ``TCP_NOTSENT_LOWAT`` (128 KiB) so the backlog stays in the bridge's queue
   instead of the kernel's send buffer, and a queued heavy frame is replaced by
@@ -34,8 +53,8 @@ Forthcoming
   50 Hz, so on a slow link most small-topic data (e.g. ``/odom`` next to
   ``/tf``) was dropped while a point cloud was in flight, although it needed
   only a few KiB/s.
-* Shutdown waits for IXWebSocket callbacks already running instead of
-  swapping IXWebSocket's callback object, which raced with its dispatch.
+* Shutdown waits for connect/disconnect callbacks already running, so none
+  outlives the bridge; a second concurrent ``shutdown()`` waits for the first.
 * A client that sends requests without reading the replies is disconnected once
   64 MiB of replies and latched replays are queued for it (a single larger
   reply on an idle queue still goes out).

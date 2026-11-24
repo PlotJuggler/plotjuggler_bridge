@@ -17,18 +17,25 @@
  * along with pj_bridge. If not, see <https://www.gnu.org/licenses/>.
  */
 
+#include <arpa/inet.h>
 #include <dlfcn.h>
 #include <gtest/gtest.h>
 #include <ixwebsocket/IXWebSocket.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <unistd.h>
 
 #include <atomic>
+#include <cerrno>
 #include <chrono>
 #include <condition_variable>
 #include <cstdlib>
+#include <deque>
 #include <filesystem>
 #include <functional>
 #include <future>
 #include <mutex>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <vector>
@@ -36,6 +43,12 @@
 #include "pj_bridge/middleware/websocket_middleware.hpp"
 
 using namespace pj_bridge;
+
+// Whether this build serves wss://: the IX transport needs an IXWebSocket built
+// with TLS, the Beast one PJ_BRIDGE_TLS.
+#if (defined(PJ_BRIDGE_WS_IX) && defined(IXWEBSOCKET_USE_TLS)) || (!defined(PJ_BRIDGE_WS_IX) && defined(PJ_BRIDGE_TLS))
+#define PJ_TEST_SERVER_TLS 1
+#endif
 
 class WebSocketMiddlewareTest : public ::testing::Test {
  protected:
@@ -591,11 +604,15 @@ TEST(WebSocketMiddlewareTlsTest, MissingCertFileFailsInitializeWithPathInMessage
 
   auto result = middleware.initialize(18099);
   ASSERT_FALSE(result.has_value());
+#ifdef PJ_TEST_SERVER_TLS
   EXPECT_NE(result.error().find("/nonexistent/cert.pem"), std::string::npos)
       << "Error message should mention the missing cert file path: " << result.error();
+#else
+  EXPECT_NE(result.error().find("without TLS support"), std::string::npos) << result.error();
+#endif
 }
 
-#ifdef IXWEBSOCKET_USE_TLS
+#if defined(IXWEBSOCKET_USE_TLS) && defined(PJ_TEST_SERVER_TLS)
 namespace {
 
 // Generates a throwaway self-signed cert/key pair under `dir` using the
@@ -679,7 +696,7 @@ TEST(WebSocketMiddlewareTlsTest, TlsRoundTrip) {
 
   std::filesystem::remove_all(dir);
 }
-#endif  // IXWEBSOCKET_USE_TLS
+#endif  // TLS
 
 // ---------------------------------------------------------------------------
 // Slow / stalled clients
@@ -921,6 +938,333 @@ TEST(WebSocketMiddlewareSlowClientTest, ShutdownWaitsForARunningDisconnectCallba
   mw.shutdown();
   EXPECT_TRUE(finished) << "shutdown() returned while the disconnect callback was still running";
 }
+
+// BridgeServer's disconnect callback takes locks that its publish cycle can
+// hold while compressing frames: running it on the transport's I/O thread
+// stalled every other client meanwhile.
+TEST(WebSocketMiddlewareSlowClientTest, BlockedDisconnectCallbackDoesNotStallOtherClients) {
+  WebSocketMiddleware mw;
+  std::promise<void> release;
+  std::shared_future<void> released = release.get_future().share();
+  std::atomic<bool> entered{false};
+  mw.set_on_disconnect([&entered, released](const std::string&) {
+    entered = true;
+    released.wait();
+  });
+  ASSERT_TRUE(mw.initialize(18126).has_value());
+
+  ix::WebSocket leaving;
+  ix::WebSocket staying;
+  start_client(leaving, 18126);
+  start_client(staying, 18126);
+  ASSERT_FALSE(register_client(mw, leaving).empty());
+  ASSERT_FALSE(register_client(mw, staying).empty());
+  leaving.stop();
+  ASSERT_TRUE(wait_until([&] { return entered.load(); }, std::chrono::seconds(2)));
+
+  staying.send("still here");
+  std::vector<uint8_t> data;
+  std::string client_id;
+  const bool received = poll_receive_request(mw, data, client_id, 1000);
+  release.set_value();
+  EXPECT_TRUE(received) << "a running disconnect callback stalled another client's requests";
+  staying.stop();
+  mw.shutdown();
+}
+
+#ifndef PJ_BRIDGE_WS_IX  // Beast transport only: the legacy IXWebSocket one lacks these guarantees
+
+// Requests are small JSON: a huge message must not be buffered (Beast's
+// default limit is 16 MiB per message, times 1024 queued requests).
+TEST(WebSocketMiddlewareSlowClientTest, OversizedRequestClosesTheConnection) {
+  WebSocketMiddleware mw;
+  std::atomic<bool> disconnected{false};
+  mw.set_on_disconnect([&](const std::string&) { disconnected = true; });
+  ASSERT_TRUE(mw.initialize(18127).has_value());
+
+  ix::WebSocket client;
+  start_client(client, 18127);
+  ASSERT_FALSE(register_client(mw, client).empty());
+  client.send(std::string(2U << 20, 'x'));  // 2 MiB
+  EXPECT_TRUE(wait_until([&] { return disconnected.load(); }, std::chrono::seconds(2)))
+      << "a 2 MiB request was accepted";
+  std::vector<uint8_t> data;
+  std::string client_id;
+  EXPECT_FALSE(mw.receive_request(data, client_id));
+  client.stop();
+}
+
+// An exception thrown by a callback must not take the server down.
+TEST(WebSocketMiddlewareSlowClientTest, ThrowingCallbackKeepsTheServerRunning) {
+  WebSocketMiddleware mw;
+  std::atomic<bool> threw{false};
+  mw.set_on_disconnect([&threw](const std::string&) {
+    threw = true;
+    throw std::runtime_error("callback failed");
+  });
+  ASSERT_TRUE(mw.initialize(18128).has_value());
+
+  ix::WebSocket first;
+  start_client(first, 18128);
+  ASSERT_FALSE(register_client(mw, first).empty());
+  first.stop();
+  ASSERT_TRUE(wait_until([&] { return threw.load(); }, std::chrono::seconds(2))) << "the callback never ran";
+
+  ix::WebSocket second;
+  start_client(second, 18128);
+  EXPECT_FALSE(register_client(mw, second).empty()) << "the server stopped after a callback threw";
+  second.stop();
+  mw.shutdown();
+}
+
+namespace {
+
+// A plain TCP connection to the local server that never sends the WebSocket
+// upgrade request. Closes itself.
+class RawConnection {
+ public:
+  explicit RawConnection(int port) : fd_(socket(AF_INET, SOCK_STREAM, 0)) {
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(static_cast<uint16_t>(port));
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    connected_ = fd_ >= 0 && connect(fd_, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0;
+  }
+  ~RawConnection() {
+    if (fd_ >= 0) {
+      close(fd_);
+    }
+  }
+  RawConnection(const RawConnection&) = delete;
+  RawConnection& operator=(const RawConnection&) = delete;
+
+  bool connected() const {
+    return connected_;
+  }
+
+  /// recv() of one byte, waiting at most @p timeout: 0 is an orderly close by
+  /// the server, -1 with errno ECONNRESET a reset, -1 with EAGAIN a timeout.
+  ssize_t recv_one(std::chrono::milliseconds timeout) {
+    timeval tv{};
+    tv.tv_sec = static_cast<time_t>(timeout.count() / 1000);
+    tv.tv_usec = static_cast<suseconds_t>((timeout.count() % 1000) * 1000);
+    setsockopt(fd_, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    char byte = 0;
+    return recv(fd_, &byte, 1, 0);
+  }
+
+ private:
+  int fd_;
+  bool connected_ = false;
+};
+
+// Runs a function when the scope ends, also when an ASSERT returns early.
+template <class F>
+struct OnExit {
+  F f;
+  ~OnExit() {
+    f();
+  }
+};
+template <class F>
+OnExit(F) -> OnExit<F>;
+
+// A gate a callback can wait on; open() may be called any number of times.
+class Gate {
+ public:
+  void open() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    open_ = true;
+    cv_.notify_all();
+  }
+  void wait() {
+    std::unique_lock<std::mutex> lock(mutex_);
+    cv_.wait(lock, [this] { return open_; });
+  }
+
+ private:
+  std::mutex mutex_;
+  std::condition_variable cv_;
+  bool open_ = false;
+};
+
+}  // namespace
+
+// A connection that never completes the WebSocket handshake must not keep
+// shutdown() waiting for its deadline.
+TEST(WebSocketMiddlewareSlowClientTest, ShutdownClosesConnectionsStillInTheHandshake) {
+  WebSocketMiddleware mw;
+  ASSERT_TRUE(mw.initialize(18129).has_value());
+
+  RawConnection raw(18129);
+  ASSERT_TRUE(raw.connected());
+  // Connections are accepted in order: once a later one is open, the server
+  // has accepted the raw one and its session waits for the upgrade request.
+  ix::WebSocket later;
+  start_client(later, 18129);
+  ASSERT_TRUE(wait_for_client_open(later));
+
+  const auto start = std::chrono::steady_clock::now();
+  mw.shutdown();
+  const auto elapsed = std::chrono::steady_clock::now() - start;
+  later.stop();
+  // The session closed the socket: an orderly end of stream (a connection
+  // the server never accepted is reset instead when the listener closes).
+  EXPECT_EQ(raw.recv_one(std::chrono::seconds(2)), 0) << "the session did not close the connection";
+  EXPECT_LT(elapsed, std::chrono::seconds(1)) << "shutdown() waited for a connection still in the handshake";
+}
+
+// shutdown() may be called from several threads (a signal handler and a
+// destructor): none may return while a callback that captured the caller's
+// state is still running.
+TEST(WebSocketMiddlewareSlowClientTest, ConcurrentShutdownWaitsForARunningCallback) {
+  Gate gate;
+  std::atomic<bool> entered{false};
+  std::atomic<bool> finished{false};
+  std::atomic<bool> second_started{false};
+  WebSocketMiddleware mw;
+  mw.set_on_disconnect([&](const std::string&) {
+    entered = true;
+    gate.wait();
+    finished = true;
+  });
+  ASSERT_TRUE(mw.initialize(18131).has_value());
+  std::future<void> first;
+  std::future<void> second;
+  OnExit open_gate{[&] { gate.open(); }};  // destroyed first: no early return leaves the callback parked
+
+  ix::WebSocket client;
+  start_client(client, 18131);
+  ASSERT_FALSE(register_client(mw, client).empty());
+  client.stop();
+  ASSERT_TRUE(wait_until([&] { return entered.load(); }, std::chrono::seconds(2)));
+
+  first = std::async(std::launch::async, [&] { mw.shutdown(); });
+  const bool first_began = wait_until([&] { return !mw.is_ready(); }, std::chrono::seconds(2));
+  second = std::async(std::launch::async, [&] {
+    second_started = true;
+    mw.shutdown();
+  });
+  const bool second_began = wait_until([&] { return second_started.load(); }, std::chrono::seconds(2));
+  const bool second_returned_early = second.wait_for(std::chrono::milliseconds(300)) == std::future_status::ready;
+  gate.open();
+  first.wait();
+  second.wait();
+  EXPECT_TRUE(first_began);
+  EXPECT_TRUE(second_began);
+  EXPECT_FALSE(second_returned_early) << "a second shutdown() returned while the callback was still running";
+  EXPECT_TRUE(finished);
+}
+
+// A client that does not read its replies is disconnected once they pass the
+// reply budget, instead of queuing them without limit.
+TEST(WebSocketMiddlewareSlowClientTest, ClientNotReadingItsRepliesIsDisconnected) {
+  WebSocketMiddleware mw;
+  std::atomic<bool> disconnected{false};
+  mw.set_on_disconnect([&](const std::string&) { disconnected = true; });
+  ASSERT_TRUE(mw.initialize(18133).has_value());
+
+  StalledClient slow(18133);
+  const std::string id = register_client(mw, slow.ws());
+  ASSERT_FALSE(id.empty());
+  ASSERT_TRUE(mw.send_binary(id, std::vector<uint8_t>(1, 0), FramePriority::kNormal, ""));  // parks the client
+
+  const std::vector<uint8_t> reply(1U << 20, '"');
+  int accepted = 0;
+  while (accepted < 256 && mw.send_reply(id, reply)) {
+    ++accepted;
+  }
+  EXPECT_GE(accepted, 64) << "replies were refused before the 64 MiB budget was used";
+  EXPECT_LT(accepted, 256) << "256 MiB of unread replies were all queued";
+  EXPECT_TRUE(wait_until([&] { return disconnected.load(); }, std::chrono::seconds(2)))
+      << "the client over its reply budget was not disconnected";
+  mw.shutdown();
+}
+
+// Every connection costs a session, so the server keeps a limit, as the
+// IXWebSocket server did; connections still in the handshake count too.
+TEST(WebSocketMiddlewareSlowClientTest, ConnectionsBeyondTheLimitAreRefused) {
+  WebSocketMiddleware mw;
+  ASSERT_TRUE(mw.initialize(18132).has_value());
+
+  std::deque<RawConnection> held;  // fill every slot with a connection in the handshake
+  for (size_t i = 0; i < WebSocketMiddleware::kMaxConnections; ++i) {
+    held.emplace_back(18132);
+    ASSERT_TRUE(held.back().connected());
+  }
+  // Accepted after all the others: refused at once, not left waiting.
+  RawConnection probe(18132);
+  ASSERT_TRUE(probe.connected());
+  const ssize_t got = probe.recv_one(std::chrono::seconds(2));
+  EXPECT_TRUE(got == 0 || (got < 0 && errno == ECONNRESET)) << "a connection beyond the limit was not closed";
+
+  held.pop_back();  // frees one slot
+  std::this_thread::sleep_for(std::chrono::milliseconds(200));
+  ix::WebSocket admitted;
+  start_client(admitted, 18132);
+  EXPECT_TRUE(wait_for_client_open(admitted, 2000)) << "a freed slot was not reused";
+  admitted.stop();
+  mw.shutdown();
+}
+
+// A client's Ping must not wait behind a large message crossing a slow link:
+// a client with a short Pong deadline would drop a healthy connection.
+TEST(WebSocketMiddlewareSlowClientTest, PongIsNotHeldBehindALargeMessage) {
+  WebSocketMiddleware mw;
+  ASSERT_TRUE(mw.initialize(18130).has_value());
+
+  std::mutex mutex;
+  std::condition_variable cv;
+  bool released = false;
+  bool parked = false;
+  std::vector<std::string> events;  // what the client received, in order
+  auto release = [&] {
+    std::lock_guard<std::mutex> lock(mutex);
+    released = true;
+    cv.notify_all();
+  };
+  ix::WebSocket client;
+  OnExit unpark{release};  // destroyed before the client, whose stop() joins the parked callback
+  client.setUrl("ws://127.0.0.1:18130");
+  client.setOnMessageCallback([&](const ix::WebSocketMessagePtr& msg) {
+    std::unique_lock<std::mutex> lock(mutex);
+    if (msg->type == ix::WebSocketMessageType::Pong) {
+      events.emplace_back("pong");
+    } else if (msg->type == ix::WebSocketMessageType::Message && msg->binary) {
+      if (msg->str.size() == 1) {  // the first frame parks the client: it stops reading
+        parked = true;
+        cv.notify_all();
+        cv.wait(lock, [&] { return released; });
+        return;
+      }
+      events.emplace_back("message");
+    }
+    cv.notify_all();
+  });
+  client.start();
+  const std::string id = register_client(mw, client);
+  ASSERT_FALSE(id.empty());
+
+  ASSERT_TRUE(mw.send_binary(id, std::vector<uint8_t>(1, 0), FramePriority::kNormal, ""));
+  {
+    std::unique_lock<std::mutex> lock(mutex);
+    ASSERT_TRUE(cv.wait_for(lock, std::chrono::seconds(2), [&] { return parked; }));
+  }
+  // Far more than the socket buffers hold, so the server is mid-write when the Ping arrives.
+  ASSERT_TRUE(mw.send_binary(id, std::vector<uint8_t>(32U << 20, 0x5A), FramePriority::kNormal, ""));
+  std::this_thread::sleep_for(std::chrono::milliseconds(200));
+  client.ping("are you there");
+  std::this_thread::sleep_for(std::chrono::milliseconds(200));
+  release();
+  {
+    std::unique_lock<std::mutex> lock(mutex);
+    ASSERT_TRUE(cv.wait_for(lock, std::chrono::seconds(10), [&] { return events.size() == 2; }));
+  }
+  EXPECT_EQ(events, (std::vector<std::string>{"pong", "message"})) << "the Pong waited for the whole large message";
+  client.stop();
+  mw.shutdown();
+}
+#endif  // PJ_BRIDGE_WS_IX
 
 int main(int argc, char** argv) {
   // rcl_logging_spdlog registers a periodic flush thread on spdlog's global

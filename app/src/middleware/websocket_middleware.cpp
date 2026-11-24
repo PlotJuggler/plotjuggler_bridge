@@ -19,522 +19,530 @@
 
 #include "pj_bridge/middleware/websocket_middleware.hpp"
 
-#include <ixwebsocket/IXConnectionState.h>
-#include <ixwebsocket/IXSocket.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <spdlog/spdlog.h>
 #include <sys/socket.h>
 
 #include <algorithm>
+#include <boost/asio/ip/tcp.hpp>
+#include <boost/asio/post.hpp>
+#include <boost/asio/steady_timer.hpp>
+#include <boost/asio/thread_pool.hpp>
+#include <boost/beast/core.hpp>
+#include <boost/beast/websocket.hpp>
 #include <chrono>
 #include <fstream>
-#include <iterator>
+#include <future>
+#include <thread>
+#include <type_traits>
+
+#ifdef PJ_BRIDGE_TLS
+#include <boost/asio/ssl.hpp>
+#include <boost/beast/ssl.hpp>
+#include <boost/beast/websocket/ssl.hpp>
+#endif
 
 namespace pj_bridge {
 
-namespace {
+namespace asio = boost::asio;
+namespace beast = boost::beast;
+namespace websocket = beast::websocket;
+using tcp = asio::ip::tcp;
 
-// IXWebSocket has no accessor for a connection's file descriptor; this reads
-// ix::Socket's protected member through a derived-class member pointer.
-struct SocketFdAccess : ix::Socket {
-  static int fd(const ix::Socket& socket) {
-    return (socket.*(&SocketFdAccess::_sockfd)).load();
-  }
+#ifdef PJ_BRIDGE_TLS
+using TlsStream = beast::ssl_stream<beast::tcp_stream>;
+#endif
+
+struct WebSocketMiddleware::Io {
+#ifdef PJ_BRIDGE_TLS
+  std::optional<asio::ssl::context> ssl;  // declared first: outlives every TLS stream
+#endif
+  asio::io_context ioc{1};
+  tcp::acceptor acceptor{ioc};
+  asio::steady_timer accept_retry{ioc};
+  /// Every session not yet destroyed, including those still in the handshake,
+  /// so shutdown() can close them all. Io thread only.
+  std::vector<std::weak_ptr<Session>> sessions;
+  /// Runs the connect/disconnect callbacks, in order, off the io thread: they
+  /// may take locks the bridge holds for a while.
+  asio::thread_pool callbacks{1};
+  std::promise<void> done;  // set when the io thread ends
+  std::thread thread;
 };
 
-// WebSocketServer that sets TCP_NOTSENT_LOWAT on each accepted socket before
-// the WebSocket upgrade. The body otherwise repeats
-// ix::WebSocketServer::handleConnection (11.x and 12.x): handleUpgrade, then
-// mark the connection terminated.
-class LowLatencyWebSocketServer : public ix::WebSocketServer {
+/// One connection. All members are used on the io thread only, except the
+/// immutable ones and `queue` (thread-safe), which the bridge's threads fill.
+class WebSocketMiddleware::Session : public std::enable_shared_from_this<Session> {
  public:
-  using ix::WebSocketServer::WebSocketServer;
+  Session(
+      WebSocketMiddleware& mw, Io& io, std::string client_id, size_t backlog, int socket_fd, asio::any_io_executor ex)
+      : id(std::move(client_id)), queue(backlog), fd(socket_fd), executor(std::move(ex)), mw_(mw), io_(io) {}
+  virtual ~Session() = default;
+  Session(const Session&) = delete;
+  Session& operator=(const Session&) = delete;
 
-  /// Called on the connection's thread with the accepted socket, before the
-  /// WebSocket upgrade. Set before listen().
-  std::function<void(const std::string&, int)> on_connection_start;
-  /// Called on the connection's thread once IXWebSocket no longer uses its
-  /// WebSocket. Set before listen().
-  std::function<void(const std::string&)> on_connection_end;
+  virtual void start() = 0;  ///< TLS handshake (if any), then the WebSocket handshake
+  virtual void kick() = 0;   ///< start sending the next queued item, unless a write is in progress
+  virtual void close() = 0;  ///< send a Close frame, then drop the connection
+  virtual void abort() = 0;  ///< drop the connection now
 
- private:
-  void handleConnection(
-      std::unique_ptr<ix::Socket> socket, std::shared_ptr<ix::ConnectionState> connection_state) override {
-    if (on_connection_start) {
-      on_connection_start(connection_state->getId(), SocketFdAccess::fd(*socket));
-    }
-#ifdef TCP_NOTSENT_LOWAT
-    const int max_unsent = WebSocketMiddleware::kMaxUnsentBytes;
-    if (setsockopt(SocketFdAccess::fd(*socket), IPPROTO_TCP, TCP_NOTSENT_LOWAT, &max_unsent, sizeof(max_unsent)) != 0) {
-      spdlog::warn("Could not set TCP_NOTSENT_LOWAT; a slow client may see extra latency");
+  const std::string id;
+  OutboundQueue queue;
+  const int fd;
+  const asio::any_io_executor executor;
+
+ protected:
+  WebSocketMiddleware& mw_;
+  Io& io_;
+};
+
+template <class Stream>
+class WebSocketMiddleware::SessionImpl final : public WebSocketMiddleware::Session {
+ public:
+  template <class... Args>
+  SessionImpl(
+      WebSocketMiddleware& mw, Io& io, std::string client_id, size_t backlog, tcp::socket&& socket, Args&... args)
+      : Session(mw, io, std::move(client_id), backlog, socket.native_handle(), socket.get_executor()),
+        ws_(std::move(socket), args...) {}
+
+  void start() override {
+#ifdef PJ_BRIDGE_TLS
+    if constexpr (std::is_same_v<Stream, TlsStream>) {
+      beast::get_lowest_layer(ws_).expires_after(std::chrono::seconds(30));
+      ws_.next_layer().async_handshake(asio::ssl::stream_base::server, [self = shared()](beast::error_code ec) {
+        if (ec) {
+          return self->fail(ec);
+        }
+        self->accept();
+      });
+      return;
     }
 #endif
-    handleUpgrade(std::move(socket), connection_state);
-    if (on_connection_end) {
-      on_connection_end(connection_state->getId());
-    }
-    connection_state->setTerminated();
+    accept();
   }
+
+  void kick() override {
+    if (!open_ || closing_ || closed_ || writing_) {
+      return;
+    }
+    auto item = queue.try_pop();
+    if (!item) {
+      return;
+    }
+    writing_ = true;
+    out_ = std::move(item->data);
+    ws_.binary(item->binary);
+    ws_.async_write(asio::buffer(out_), [self = shared()](beast::error_code ec, std::size_t) {
+      self->writing_ = false;
+      std::string().swap(self->out_);  // release a large frame now, not at the next write
+      if (ec) {
+        return self->fail(ec);
+      }
+      self->kick();
+    });
+  }
+
+  void close() override {
+    if (closing_ || closed_) {
+      return;
+    }
+    if (!open_) {
+      return abort();
+    }
+    closing_ = true;  // no data frame may follow the Close frame
+    // Waits behind a write in progress; shutdown() bounds the wait.
+    ws_.async_close(websocket::close_code::going_away, [self = shared()](beast::error_code) { self->fail({}); });
+  }
+
+  void abort() override {
+    fail({});
+  }
+
+ private:
+  std::shared_ptr<SessionImpl> shared() {
+    return std::static_pointer_cast<SessionImpl>(shared_from_this());
+  }
+
+  void accept() {
+    beast::get_lowest_layer(ws_).expires_never();  // the WebSocket stream has its own timeouts
+    auto timeout = websocket::stream_base::timeout::suggested(beast::role_type::server);
+    // No idle timeout: dead clients are found by BridgeServer's heartbeat timeout,
+    // and a client on a slow link may have nothing to send for a long time.
+    timeout.idle_timeout = websocket::stream_base::none();
+    ws_.set_option(timeout);
+    // Default options leave permessage-deflate disabled, so the server declines
+    // it: binary frames are already zstd-compressed.
+    ws_.set_option(websocket::permessage_deflate{});
+    // Large messages go out in fragments: Beast sends a Pong (or Close) between
+    // two of them, so it never waits behind a whole frame on a slow link.
+    ws_.auto_fragment(true);
+    ws_.write_buffer_bytes(kFragmentBytes);
+    ws_.read_message_max(kMaxRequestBytes);  // requests are small JSON; a larger one closes the connection
+    ws_.async_accept([self = shared()](beast::error_code ec) {
+      if (ec || self->closed_) {  // closed_: aborted while this completion was queued
+        return self->fail(ec);
+      }
+      self->open_ = true;
+      self->mw_.on_open(self->io_, self);
+      self->read();
+      self->kick();
+    });
+  }
+
+  void read() {
+    ws_.async_read(buffer_, [self = shared()](beast::error_code ec, std::size_t) {
+      if (ec || self->closed_) {  // closed_: a request read before an abort() belongs to a departed client
+        return self->fail(ec);
+      }
+      if (self->ws_.got_text()) {
+        self->mw_.on_message(self->id, beast::buffers_to_string(self->buffer_.data()));
+      }
+      self->buffer_.consume(self->buffer_.size());
+      self->read();
+    });
+  }
+
+  /// The connection is over: report it once, then close the socket, which
+  /// completes every pending operation (each ends up here again).
+  void fail(beast::error_code ec) {
+    if (closed_) {
+      return;
+    }
+    closed_ = true;
+    if (ec && ec != websocket::error::closed && ec != asio::error::operation_aborted) {
+      spdlog::debug("WebSocket client '{}': {}", id, ec.message());
+    }
+    if (open_) {
+      mw_.on_closed(io_, id);
+    }
+    beast::get_lowest_layer(ws_).close();
+  }
+
+  websocket::stream<Stream> ws_;
+  beast::flat_buffer buffer_;
+  std::string out_;  // the item being written
+  bool open_ = false;
+  bool closing_ = false;  // close() sent (or is sending) the Close frame
+  bool closed_ = false;
+  bool writing_ = false;
 };
 
-}  // namespace
-
 WebSocketMiddleware::WebSocketMiddleware(size_t client_backlog_size, std::optional<TlsConfig> tls)
-    : client_backlog_size_(client_backlog_size), tls_(std::move(tls)), initialized_(false) {}
+    : client_backlog_size_(client_backlog_size), tls_(std::move(tls)) {}
 
 WebSocketMiddleware::~WebSocketMiddleware() {
   shutdown();
-
-  // Join any stop thread that outlived its shutdown timeout. Blocking here
-  // is deliberate: letting it run detached past main() races static
-  // destruction.
-  std::thread pending;
-  {
-    std::lock_guard<std::mutex> lock(state_mutex_);
-    pending = std::move(pending_stop_thread_);
-  }
-  if (pending.joinable()) {
-    pending.join();
-  }
 }
 
 tl::expected<void, std::string> WebSocketMiddleware::initialize(uint16_t port) {
+  std::lock_guard<std::mutex> lifecycle(lifecycle_mutex_);
   std::lock_guard<std::mutex> lock(state_mutex_);
-
   if (initialized_) {
     return tl::unexpected<std::string>("WebSocket middleware already initialized");
   }
 
+  auto io = std::make_unique<Io>();
   if (tls_.has_value()) {
-#ifndef IXWEBSOCKET_USE_TLS
-    return tl::unexpected<std::string>("TLS requested but IXWebSocket was built without TLS support");
+#ifndef PJ_BRIDGE_TLS
+    return tl::unexpected<std::string>("TLS requested but pj_bridge was built without TLS support");
 #else
-    std::ifstream cert_stream(tls_->certfile);
-    if (!cert_stream.good()) {
+    if (!std::ifstream(tls_->certfile).good()) {
       return tl::unexpected<std::string>("TLS certificate file not found or not readable: " + tls_->certfile);
     }
-    std::ifstream key_stream(tls_->keyfile);
-    if (!key_stream.good()) {
+    if (!std::ifstream(tls_->keyfile).good()) {
       return tl::unexpected<std::string>("TLS key file not found or not readable: " + tls_->keyfile);
     }
+    try {
+      io->ssl.emplace(asio::ssl::context::tls_server);
+      io->ssl->set_options(
+          asio::ssl::context::default_workarounds | asio::ssl::context::no_tlsv1 | asio::ssl::context::no_tlsv1_1);
+      io->ssl->use_certificate_chain_file(tls_->certfile);
+      io->ssl->use_private_key_file(tls_->keyfile, asio::ssl::context::pem);
+    } catch (const boost::system::system_error& e) {
+      return tl::unexpected<std::string>(std::string("TLS setup failed: ") + e.what());
+    }
 #endif
   }
 
-  auto server = std::make_shared<LowLatencyWebSocketServer>(port, "0.0.0.0");
-  auto gate = std::make_shared<CallbackGate>();
-  gate_ = gate;
-  server->on_connection_start = [this, gate](const std::string& client_id, int fd) {
-    std::shared_lock<std::shared_mutex> gate_lock(gate->mutex);
-    if (gate->open) {
-      std::lock_guard<std::mutex> lock(clients_mutex_);
-      connection_fds_[client_id] = fd;
-    }
-  };
-  server->on_connection_end = [this, gate](const std::string& client_id) {
-    std::shared_lock<std::shared_mutex> gate_lock(gate->mutex);
-    if (gate->open) {
-      mark_connection_ended(client_id);
-    }
-  };
-  server_ = server;
-  // Binary frames are already zstd-compressed; deflating them again is wasted work.
-  server_->disablePerMessageDeflate();
-
-#ifdef IXWEBSOCKET_USE_TLS
-  if (tls_.has_value()) {
-    ix::SocketTLSOptions tls_options;
-    tls_options.tls = true;
-    tls_options.certFile = tls_->certfile;
-    tls_options.keyFile = tls_->keyfile;
-    tls_options.caFile = "NONE";
-    server_->setTLSOptions(tls_options);
+  beast::error_code ec;
+  const tcp::endpoint endpoint(tcp::v4(), port);
+  io->acceptor.open(endpoint.protocol(), ec);
+  if (!ec) {
+    io->acceptor.set_option(asio::socket_base::reuse_address(true), ec);
   }
-#endif
-
-  {
-    std::lock_guard<std::mutex> clients_lock(clients_mutex_);
-    accepting_clients_ = true;
+  if (!ec) {
+    io->acceptor.bind(endpoint, ec);
+  }
+  if (!ec) {
+    io->acceptor.listen(asio::socket_base::max_listen_connections, ec);
+  }
+  if (ec) {
+    return tl::unexpected<std::string>("Failed to listen on port " + std::to_string(port) + ": " + ec.message());
   }
 
-  server_->setOnClientMessageCallback([this, gate](
-                                          std::shared_ptr<ix::ConnectionState> connection_state,
-                                          ix::WebSocket& web_socket, const ix::WebSocketMessagePtr& msg) {
-    std::shared_lock<std::shared_mutex> gate_lock(gate->mutex);
-    if (!gate->open) {
-      return;
-    }
-    // Copy the server pointer under the same lock as the initialized_ check:
-    // shutdown() concurrently moves server_ away, so touching the member
-    // after releasing the lock would dereference a null shared_ptr.
-    std::shared_ptr<ix::WebSocketServer> server;
-    {
-      std::lock_guard<std::mutex> state_lock(state_mutex_);
-      if (!initialized_ || !server_) {
-        return;
-      }
-      server = server_;
-    }
-
-    std::string client_id = connection_state->getId();
-
-    if (msg->type == ix::WebSocketMessageType::Open) {
-      std::shared_ptr<ix::WebSocket> ws;
-      for (const auto& client : server->getClients()) {
-        if (client.get() == &web_socket) {
-          ws = client;
-          break;
-        }
-      }
-      if (!ws) {
-        return;
-      }
-      {
-        std::lock_guard<std::mutex> clients_lock(clients_mutex_);
-        if (!accepting_clients_) {
-          return;  // shutdown() already collected the clients to join
-        }
-        Client client;
-        client.id = client_id;
-        client.ws = ws;
-        client.queue = std::make_shared<OutboundQueue>(client_backlog_size_);
-        client.sender_done = std::make_shared<std::atomic<bool>>(false);
-        // The client's sender thread: the only caller of IXWebSocket's
-        // blocking send for this client.
-        // A raw pointer: the Client entry keeps the WebSocket alive until
-        // this thread is joined.
-        client.sender = std::thread([ws = client.ws.get(), queue = client.queue, done = client.sender_done] {
-          while (auto item = queue->pop()) {
-            if (!ws->send(item->data, item->binary).success) {
-              break;  // the connection is closing; its Close event retires this client
-            }
-          }
-          queue->close();
-          *done = true;
-        });
-        clients_[client_id] = std::move(client);
-      }
-
-      ConnectionCallback cb;
-      {
-        std::lock_guard<std::mutex> state_lock(state_mutex_);
-        cb = on_connect_;
-      }
-      if (cb) {
-        cb(client_id);
-      }
-
-    } else if (msg->type == ix::WebSocketMessageType::Close) {
-      // Close may run on the client's sender thread (IXWebSocket reports a
-      // failed write synchronously), so nothing here may join that thread.
-      {
-        std::lock_guard<std::mutex> clients_lock(clients_mutex_);
-        auto it = clients_.find(client_id);
-        if (it != clients_.end()) {
-          retire_client(it->second);
-          clients_.erase(it);
-        }
-        // Requests the client sent before leaving would otherwise re-create
-        // its session (once per request) when the bridge gets to them. Under
-        // clients_mutex_, so the Message branch cannot add one afterwards.
-        std::lock_guard<std::mutex> queue_lock(queue_mutex_);
-        incoming_queue_.erase(
-            std::remove_if(
-                incoming_queue_.begin(), incoming_queue_.end(),
-                [&](const IncomingRequest& req) { return req.client_id == client_id; }),
-            incoming_queue_.end());
-      }
-
-      ConnectionCallback cb;
-      {
-        std::lock_guard<std::mutex> state_lock(state_mutex_);
-        cb = on_disconnect_;
-      }
-      if (cb) {
-        cb(client_id);
-      }
-
-    } else if (msg->type == ix::WebSocketMessageType::Message) {
-      if (!msg->binary) {
-        IncomingRequest req;
-        req.client_id = client_id;
-        req.data.assign(msg->str.begin(), msg->str.end());
-
-        {
-          // Lock order clients_mutex_ -> queue_mutex_, as in the Close branch:
-          // a request is queued only while its client is still connected.
-          std::lock_guard<std::mutex> clients_lock(clients_mutex_);
-          if (clients_.find(client_id) == clients_.end()) {
-            return;
-          }
-          std::lock_guard<std::mutex> queue_lock(queue_mutex_);
-          if (incoming_queue_.size() >= kMaxIncomingQueueSize) {
-            spdlog::warn(
-                "Incoming queue full ({} messages), dropping message from client '{}'", kMaxIncomingQueueSize,
-                client_id);
-            return;
-          }
-          incoming_queue_.push_back(std::move(req));
-        }
+  do_accept(*io);
+  io->thread = std::thread([raw = io.get()] {
+    // A handler that throws must not leave the bridge without a server.
+    for (;;) {
+      try {
+        raw->ioc.run();
+        break;
+      } catch (const std::exception& e) {
+        spdlog::error("WebSocket io handler threw: {}", e.what());
       }
     }
+    raw->done.set_value();
   });
-
-  auto listen_result = server_->listen();
-  if (!listen_result.first) {
-    server_.reset();
-    return tl::unexpected<std::string>(
-        "Failed to listen on port " + std::to_string(port) + ": " + listen_result.second);
-  }
-
-  server_->start();
+  io_ = std::move(io);
   initialized_ = true;
-
   return {};
 }
 
+void WebSocketMiddleware::do_accept(Io& io) {
+  io.acceptor.async_accept([this, &io](beast::error_code ec, tcp::socket socket) {
+    if (!io.acceptor.is_open()) {
+      return;  // shutdown() closed it
+    }
+    if (ec) {
+      // Back off: an error such as EMFILE persists until descriptors free up.
+      spdlog::warn("WebSocket accept failed: {}", ec.message());
+      io.accept_retry.expires_after(kAcceptRetryDelay);
+      io.accept_retry.async_wait([this, &io](beast::error_code wait_ec) {
+        if (!wait_ec && io.acceptor.is_open()) {
+          do_accept(io);
+        }
+      });
+      return;
+    }
+    do_accept(io);  // first: a throw below must not leave the server without a pending accept
+    beast::error_code ignored;
+    socket.set_option(tcp::no_delay(true), ignored);
+    // A peer that vanishes without FIN or RST (power loss, cable pulled) would
+    // otherwise keep its socket, and a connection slot, forever: there is no
+    // idle timeout, since a client may legitimately send nothing for a while.
+    socket.set_option(asio::socket_base::keep_alive(true), ignored);
+#ifdef TCP_KEEPIDLE
+    const int idle_s = kKeepAliveIdleSeconds;
+    const int interval_s = kKeepAliveIntervalSeconds;
+    const int probes = kKeepAliveProbes;
+    setsockopt(socket.native_handle(), IPPROTO_TCP, TCP_KEEPIDLE, &idle_s, sizeof(idle_s));
+    setsockopt(socket.native_handle(), IPPROTO_TCP, TCP_KEEPINTVL, &interval_s, sizeof(interval_s));
+    setsockopt(socket.native_handle(), IPPROTO_TCP, TCP_KEEPCNT, &probes, sizeof(probes));
+#endif
+#ifdef TCP_NOTSENT_LOWAT
+    const int max_unsent = kMaxUnsentBytes;
+    if (setsockopt(socket.native_handle(), IPPROTO_TCP, TCP_NOTSENT_LOWAT, &max_unsent, sizeof(max_unsent)) != 0) {
+      spdlog::warn("Could not set TCP_NOTSENT_LOWAT; a slow client may see extra latency");
+    }
+#endif
+    io.sessions.erase(
+        std::remove_if(
+            io.sessions.begin(), io.sessions.end(), [](const std::weak_ptr<Session>& s) { return s.expired(); }),
+        io.sessions.end());
+    if (io.sessions.size() >= kMaxConnections) {
+      spdlog::warn("WebSocket connection refused: {} connections already open", kMaxConnections);
+      return;  // closes the socket
+    }
+    std::string id = std::to_string(next_client_id_++);
+    std::shared_ptr<Session> session;
+#ifdef PJ_BRIDGE_TLS
+    if (io.ssl) {
+      session =
+          std::make_shared<SessionImpl<TlsStream>>(*this, io, id, client_backlog_size_, std::move(socket), *io.ssl);
+    }
+#endif
+    if (!session) {
+      session =
+          std::make_shared<SessionImpl<beast::tcp_stream>>(*this, io, id, client_backlog_size_, std::move(socket));
+    }
+    io.sessions.push_back(session);
+    session->start();
+  });
+}
+
+void WebSocketMiddleware::on_open(Io& io, const std::shared_ptr<Session>& session) {
+  {
+    std::lock_guard<std::mutex> lock(clients_mutex_);
+    clients_[session->id] = session;
+  }
+  notify(io, &WebSocketMiddleware::on_connect_, session->id);
+}
+
+void WebSocketMiddleware::notify(Io& io, ConnectionCallback WebSocketMiddleware::*which, const std::string& client_id) {
+  asio::post(io.callbacks, [this, which, client_id] {
+    ConnectionCallback cb;
+    {
+      std::lock_guard<std::mutex> lock(state_mutex_);
+      cb = this->*which;  // read when it runs: shutdown() clears the callbacks
+    }
+    if (!cb) {
+      return;
+    }
+    try {
+      cb(client_id);
+    } catch (const std::exception& e) {
+      spdlog::error("WebSocket connection callback for client '{}' threw: {}", client_id, e.what());
+    } catch (...) {
+      spdlog::error("WebSocket connection callback for client '{}' threw", client_id);
+    }
+  });
+}
+
+void WebSocketMiddleware::on_message(const std::string& client_id, std::string text) {
+  std::lock_guard<std::mutex> lock(queue_mutex_);
+  if (incoming_queue_.size() >= kMaxIncomingQueueSize) {
+    spdlog::warn(
+        "Incoming queue full ({} messages), dropping message from client '{}'", kMaxIncomingQueueSize, client_id);
+    return;
+  }
+  incoming_queue_.push_back(IncomingRequest{client_id, std::vector<uint8_t>(text.begin(), text.end())});
+}
+
+void WebSocketMiddleware::on_closed(Io& io, const std::string& client_id) {
+  {
+    std::lock_guard<std::mutex> lock(clients_mutex_);
+    auto it = clients_.find(client_id);
+    if (it != clients_.end()) {
+      auto& queue = it->second->queue;
+      queue.close();  // first, so no producer adds to the counters read below
+      dropped_from_departed_ += queue.dropped_total();
+      shed_from_departed_ += queue.shed_total();
+      clients_.erase(it);
+    }
+    // Requests the client sent before leaving would otherwise re-create its
+    // session when the bridge gets to them.
+    std::lock_guard<std::mutex> queue_lock(queue_mutex_);
+    incoming_queue_.erase(
+        std::remove_if(
+            incoming_queue_.begin(), incoming_queue_.end(),
+            [&](const IncomingRequest& req) { return req.client_id == client_id; }),
+        incoming_queue_.end());
+  }
+  notify(io, &WebSocketMiddleware::on_disconnect_, client_id);
+}
+
 void WebSocketMiddleware::shutdown() {
-  std::shared_ptr<ix::WebSocketServer> server_to_stop;
-
-  // Close the callback gate first: no IXWebSocket callback runs into this
-  // object (or, through on_connect_/on_disconnect_, its owner) after this,
-  // including one that was already running. Callbacks take no lock that is
-  // held here, and shutdown() is never called from a callback.
-  std::shared_ptr<CallbackGate> gate;
+  std::lock_guard<std::mutex> lifecycle(lifecycle_mutex_);
+  std::unique_ptr<Io> io;
   {
     std::lock_guard<std::mutex> lock(state_mutex_);
-    gate = gate_;
-  }
-  if (gate) {
-    std::unique_lock<std::shared_mutex> gate_lock(gate->mutex);
-    gate->open = false;
-  }
-
-  {
-    std::lock_guard<std::mutex> lock(state_mutex_);
-
     if (!initialized_) {
       return;
     }
-
     initialized_ = false;
     on_connect_ = nullptr;
     on_disconnect_ = nullptr;
-    server_to_stop = std::move(server_);
+    io = std::move(io_);
   }
 
-  // Stop every sender before closing the sockets, so none starts a new send.
-  {
-    std::lock_guard<std::mutex> clients_lock(clients_mutex_);
-    accepting_clients_ = false;
-    for (auto& [client_id, client] : clients_) {
-      retire_client(client);
-    }
-    clients_.clear();
-    connection_fds_.clear();
-  }
-
-  if (server_to_stop) {
-    // Initiate graceful close on all connected clients before calling stop().
-    // This also cancels a sender thread blocked in a send to a stalled client.
-    spdlog::debug("[shutdown] Pre-closing {} WebSocket client(s)...", server_to_stop->getClients().size());
-    for (const auto& client : server_to_stop->getClients()) {
-      client->close();
-    }
-
-    // Run stop() on a dedicated thread with a timeout.
-    spdlog::debug("[shutdown] Starting server stop thread...");
-    auto done = std::make_shared<std::atomic<bool>>(false);
-    std::thread stop_thread([server_to_stop, done]() {
-      server_to_stop->stop();
-      done->store(true);
-    });
-
-    auto start = std::chrono::steady_clock::now();
-    auto deadline = start + std::chrono::seconds(kShutdownTimeoutSeconds);
-    while (!done->load() && std::chrono::steady_clock::now() < deadline) {
-      std::this_thread::sleep_for(std::chrono::milliseconds(50));
-    }
-    auto elapsed_ms =
-        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
-
-    if (done->load()) {
-      stop_thread.join();
-      spdlog::debug("[shutdown] Server stop completed (took {}ms)", elapsed_ms);
-    } else {
-      // Timeout reached. Keep the thread joinable and hand it to the
-      // destructor: a detached thread still running IXWebSocket teardown
-      // during static destruction (after main() returns) is undefined
-      // behavior. shutdown() itself stays bounded; only final destruction
-      // waits for a hung stop() to complete.
-      spdlog::warn(
-          "[shutdown] Server stop timed out after {}s ({}ms elapsed), deferring join to destructor",
-          kShutdownTimeoutSeconds, elapsed_ms);
-      std::lock_guard<std::mutex> lock(state_mutex_);
-      if (pending_stop_thread_.joinable()) {
-        pending_stop_thread_.join();
+  // On the io thread: stop accepting and close every connection. The io
+  // thread then runs out of work and returns, unless a client stops reading;
+  // the deadline below covers that.
+  asio::post(io->ioc, [raw = io.get()] {
+    beast::error_code ignored;
+    raw->acceptor.close(ignored);
+    raw->accept_retry.cancel();
+    for (const auto& weak : raw->sessions) {
+      if (auto session = weak.lock()) {
+        session->close();  // a session still in the handshake is dropped at once
       }
-      pending_stop_thread_ = std::move(stop_thread);
     }
+  });
+  if (io->done.get_future().wait_for(std::chrono::seconds(kShutdownTimeoutSeconds)) != std::future_status::ready) {
+    spdlog::warn("[shutdown] WebSocket clients did not close within {}s; dropping them", kShutdownTimeoutSeconds);
+    io->ioc.stop();
   }
+  io->thread.join();
+  // No callback is queued after the io thread ends, and the ones still queued
+  // see the cleared callbacks; this waits for one still running.
+  io->callbacks.join();
 
-  // Sockets are closed now, so a sender blocked in a send has returned.
-  std::vector<Client> senders;
-  {
-    std::lock_guard<std::mutex> clients_lock(clients_mutex_);
-    senders = take_retired(true);
-  }
-  join_senders(senders);
-
-  {
-    std::lock_guard<std::mutex> queue_lock(queue_mutex_);
-    incoming_queue_.clear();
-  }
-}
-
-void WebSocketMiddleware::retire_client(Client& client) {
-  client.queue->close();  // first, so no producer adds to the counters read below
-  dropped_from_departed_ += client.queue->dropped_total();
-  shed_from_departed_ += client.queue->shed_total();
-  client.queue.reset();  // the sender keeps its own reference while it runs
-  retired_.push_back(std::move(client));
-}
-
-void WebSocketMiddleware::mark_connection_ended(const std::string& client_id) {
-  std::lock_guard<std::mutex> lock(clients_mutex_);
-  connection_fds_.erase(client_id);
-  auto mark = [&](Client& client) {
-    if (client.id == client_id) {
-      client.connection_ended = true;
-    }
-  };
-  for (auto& client : retired_) {
-    mark(client);
-  }
-  if (auto it = clients_.find(client_id); it != clients_.end()) {
-    mark(it->second);
-  }
-}
-
-void WebSocketMiddleware::reap_finished_senders() {
-  std::vector<Client> finished;
   {
     std::lock_guard<std::mutex> lock(clients_mutex_);
-    if (retired_.empty()) {
-      return;
+    for (auto& [id, session] : clients_) {
+      session->queue.close();
+      dropped_from_departed_ += session->queue.dropped_total();
+      shed_from_departed_ += session->queue.shed_total();
     }
-    finished = take_retired(false);
+    clients_.clear();  // before the io_context their sockets belong to
   }
-  join_senders(finished);
-}
-
-std::vector<WebSocketMiddleware::Client> WebSocketMiddleware::take_retired(bool all) {
-  auto keep = std::partition(retired_.begin(), retired_.end(), [all](const Client& client) {
-    return !all && !(*client.sender_done && client.connection_ended);
-  });
-  std::vector<Client> taken(std::make_move_iterator(keep), std::make_move_iterator(retired_.end()));
-  retired_.erase(keep, retired_.end());
-  return taken;
-}
-
-void WebSocketMiddleware::join_senders(std::vector<Client>& clients) {
-  for (auto& client : clients) {
-    if (client.sender.joinable()) {
-      client.sender.join();
-    }
+  {
+    std::lock_guard<std::mutex> lock(queue_mutex_);
+    incoming_queue_.clear();
   }
+  // io is destroyed here: the io_context destroys its pending handlers, and
+  // with them the last sessions.
 }
 
 bool WebSocketMiddleware::receive_request(std::vector<uint8_t>& data, std::string& client_identity) {
-  {
-    std::lock_guard<std::mutex> state_lock(state_mutex_);
-    if (!initialized_) {
-      return false;
-    }
-  }
-
-  // The bridge polls here continually, from its own thread: a good place to
-  // join the sender threads of clients that left.
-  reap_finished_senders();
-
-  // Truly non-blocking: callers poll from timers/event loops, so waiting on
-  // the condition variable here would park the caller's thread (up to 10 ms
-  // per empty poll) and delay everything else it drives.
   std::lock_guard<std::mutex> lock(queue_mutex_);
-
   if (incoming_queue_.empty()) {
     return false;
   }
-
   auto req = std::move(incoming_queue_.front());
   incoming_queue_.pop_front();
-
   data = std::move(req.data);
   client_identity = std::move(req.client_id);
   return true;
 }
 
-WebSocketMiddleware::Client WebSocketMiddleware::find_client(const std::string& client_identity) const {
+template <class Push>
+bool WebSocketMiddleware::push_to(const std::string& client_identity, Push&& push) {
   std::lock_guard<std::mutex> lock(clients_mutex_);
   auto it = clients_.find(client_identity);
   if (it == clients_.end()) {
-    return {};
+    return false;
   }
-  Client copy;
-  copy.ws = it->second.ws;
-  copy.queue = it->second.queue;
-  return copy;
-}
-
-bool WebSocketMiddleware::close_if_not_reading(const Client& client, const std::string& client_identity) {
-  if (client.queue->reply_budget_exceeded()) {
-    spdlog::warn("Client '{}' is not reading its replies; closing the connection", client_identity);
-    client.ws->close();
+  const auto& session = it->second;
+  if (!push(session->queue)) {
+    if (session->queue.reply_budget_exceeded()) {
+      spdlog::warn("Client '{}' is not reading its replies; closing the connection", client_identity);
+      asio::post(session->executor, [session] { session->abort(); });
+    }
+    return false;
   }
-  return false;
+  asio::post(session->executor, [session] { session->kick(); });
+  return true;
 }
 
 bool WebSocketMiddleware::send_reply(const std::string& client_identity, const std::vector<uint8_t>& data) {
-  auto client = find_client(client_identity);
-  if (!client.queue) {
-    return false;
-  }
-  return client.queue->push_text(std::string(reinterpret_cast<const char*>(data.data()), data.size())) ||
-         close_if_not_reading(client, client_identity);
+  std::string text(data.begin(), data.end());
+  return push_to(client_identity, [&](OutboundQueue& queue) { return queue.push_text(std::move(text)); });
 }
 
 bool WebSocketMiddleware::send_binary(
     const std::string& client_identity, const std::vector<uint8_t>& data, FramePriority priority,
     const std::string& key) {
-  auto client = find_client(client_identity);
-  if (!client.queue) {
-    return false;
-  }
   std::string frame(reinterpret_cast<const char*>(data.data()), data.size());
-  switch (priority) {
-    case FramePriority::kHeavy:
-      return client.queue->push_heavy(key, std::move(frame));
-    case FramePriority::kLatched:
-      return client.queue->push_kept(std::move(frame)) || close_if_not_reading(client, client_identity);
-    case FramePriority::kNormal:
-      break;
-  }
-  return client.queue->push_normal(std::move(frame));
+  return push_to(client_identity, [&](OutboundQueue& queue) {
+    switch (priority) {
+      case FramePriority::kHeavy:
+        return queue.push_heavy(key, std::move(frame));
+      case FramePriority::kLatched:
+        return queue.push_kept(std::move(frame));
+      case FramePriority::kNormal:
+        break;
+    }
+    return queue.push_normal(std::move(frame));
+  });
 }
 
+// Reads are never blocked by a write in the common case, but Beast's read
+// does wait for a write in progress when it must answer a Ping (or Close), so
+// a client that pings would have its heartbeats unread for as long as a large
+// frame takes to cross a slow link. The kernel's receive time has no such gap.
 bool WebSocketMiddleware::heard_from_client_within(
     const std::string& client_identity, std::chrono::milliseconds window) const {
 #ifdef __linux__
   std::lock_guard<std::mutex> lock(clients_mutex_);
-  auto fd = connection_fds_.find(client_identity);
-  if (fd == connection_fds_.end() || clients_.find(client_identity) == clients_.end()) {
+  auto it = clients_.find(client_identity);
+  if (it == clients_.end()) {
     return false;
   }
-  // The kernel's time since it last received data from the peer: it counts a
-  // heartbeat that arrived even if IXWebSocket has not read it yet.
   tcp_info info{};
   socklen_t len = sizeof(info);
-  if (getsockopt(fd->second, IPPROTO_TCP, TCP_INFO, &info, &len) != 0) {
+  if (getsockopt(it->second->fd, IPPROTO_TCP, TCP_INFO, &info, &len) != 0) {
     return false;
   }
   return std::chrono::milliseconds(info.tcpi_last_data_recv) <= window;
@@ -546,30 +554,29 @@ bool WebSocketMiddleware::heard_from_client_within(
 }
 
 void WebSocketMiddleware::drop_pending(const std::string& client_identity) {
-  // The client's logical session was destroyed server-side (e.g. heartbeat
-  // timeout) while its socket may still be open: discard its queued frames so
-  // stale data can't flush into a future session on the same connection.
-  if (auto queue = find_client(client_identity).queue) {
-    queue->drop_frames();
+  std::lock_guard<std::mutex> lock(clients_mutex_);
+  auto it = clients_.find(client_identity);
+  if (it != clients_.end()) {
+    it->second->queue.drop_frames();
   }
-}
-
-uint64_t WebSocketMiddleware::sum_counter(uint64_t departed, uint64_t (OutboundQueue::*counter)() const) const {
-  uint64_t total = departed;
-  for (const auto& [client_id, client] : clients_) {
-    total += (client.queue.get()->*counter)();
-  }
-  return total;
 }
 
 uint64_t WebSocketMiddleware::dropped_frame_count() const {
   std::lock_guard<std::mutex> lock(clients_mutex_);
-  return sum_counter(dropped_from_departed_, &OutboundQueue::dropped_total);
+  uint64_t total = dropped_from_departed_;
+  for (const auto& [id, session] : clients_) {
+    total += session->queue.dropped_total();
+  }
+  return total;
 }
 
 uint64_t WebSocketMiddleware::heavy_shed_count() const {
   std::lock_guard<std::mutex> lock(clients_mutex_);
-  return sum_counter(shed_from_departed_, &OutboundQueue::shed_total);
+  uint64_t total = shed_from_departed_;
+  for (const auto& [id, session] : clients_) {
+    total += session->queue.shed_total();
+  }
+  return total;
 }
 
 bool WebSocketMiddleware::is_ready() const {

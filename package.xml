@@ -20,6 +20,9 @@
   <build_depend>spdlog</build_depend>
   <build_depend>nlohmann-json-dev</build_depend>
   <build_depend>libzstd-dev</build_depend>
+  <!-- WebSocket server: Boost.Beast/Asio (header-only) and OpenSSL for wss:// -->
+  <build_depend>libboost-dev</build_depend>
+  <depend>libssl-dev</depend>
 
   <exec_depend>ros2launch</exec_depend>
   <exec_depend>launch_ros</exec_depend>
