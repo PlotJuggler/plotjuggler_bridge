@@ -152,7 +152,7 @@ if(PJ_BRIDGE_WS_IX)
   target_compile_definitions(pj_bridge_app PUBLIC PJ_BRIDGE_WS_IX)
   target_link_libraries(pj_bridge_app PUBLIC ixwebsocket::ixwebsocket)
 else()
-  target_link_libraries(pj_bridge_app PRIVATE Boost::headers)
+  target_link_libraries(pj_bridge_app PRIVATE Boost::boost)  # Boost::headers needs CMake 3.15 in module mode
   if(PJ_BRIDGE_TLS)
     target_compile_definitions(pj_bridge_app PUBLIC PJ_BRIDGE_TLS)
     target_link_libraries(pj_bridge_app PUBLIC OpenSSL::SSL OpenSSL::Crypto)

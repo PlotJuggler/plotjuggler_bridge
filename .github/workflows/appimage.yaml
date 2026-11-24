@@ -17,7 +17,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        environment: [humble, jazzy, kilted]
+        environment: [humble, jazzy, kilted, lyrical]
     runs-on: ubuntu-latest
     name: appimage-${{ matrix.environment }}
 

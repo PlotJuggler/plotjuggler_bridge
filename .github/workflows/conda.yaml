@@ -14,6 +14,7 @@ on:
           - humble
           - jazzy
           - kilted
+          - lyrical
         default: all
 
 permissions:
@@ -33,7 +34,7 @@ jobs:
       - id: set
         run: |
           if [[ "$DISTRO" == "all" || -z "$DISTRO" ]]; then
-            echo 'matrix={"include":[{"ros_distro":"humble","robostack_channel":"robostack-humble"},{"ros_distro":"jazzy","robostack_channel":"robostack-jazzy"},{"ros_distro":"kilted","robostack_channel":"robostack-kilted"}]}' >> "$GITHUB_OUTPUT"
+            echo 'matrix={"include":[{"ros_distro":"humble","robostack_channel":"robostack-humble"},{"ros_distro":"jazzy","robostack_channel":"robostack-jazzy"},{"ros_distro":"kilted","robostack_channel":"robostack-kilted"},{"ros_distro":"lyrical","robostack_channel":"robostack-lyrical"}]}' >> "$GITHUB_OUTPUT"
           else
             echo "matrix={\"include\":[{\"ros_distro\":\"$DISTRO\",\"robostack_channel\":\"robostack-$DISTRO\"}]}" >> "$GITHUB_OUTPUT"
           fi

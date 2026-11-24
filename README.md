@@ -36,7 +36,7 @@ independently.
 
 |  | Humble | Jazzy | Kilted | Lyrical |
 |--|--------|-------|--------|---------|
-| **Pixi** | [![Pixi: Humble](https://github.com/PlotJuggler/plotjuggler_bridge/actions/workflows/pixi_humble.yaml/badge.svg?branch=main)](https://github.com/PlotJuggler/plotjuggler_bridge/actions/workflows/pixi_humble.yaml) | [![Pixi: Jazzy](https://github.com/PlotJuggler/plotjuggler_bridge/actions/workflows/pixi_jazzy.yaml/badge.svg?branch=main)](https://github.com/PlotJuggler/plotjuggler_bridge/actions/workflows/pixi_jazzy.yaml) | [![Pixi: Kilted](https://github.com/PlotJuggler/plotjuggler_bridge/actions/workflows/pixi_kilted.yaml/badge.svg?branch=main)](https://github.com/PlotJuggler/plotjuggler_bridge/actions/workflows/pixi_kilted.yaml) | — |
+| **Pixi** | [![Pixi: Humble](https://github.com/PlotJuggler/plotjuggler_bridge/actions/workflows/pixi_humble.yaml/badge.svg?branch=main)](https://github.com/PlotJuggler/plotjuggler_bridge/actions/workflows/pixi_humble.yaml) | [![Pixi: Jazzy](https://github.com/PlotJuggler/plotjuggler_bridge/actions/workflows/pixi_jazzy.yaml/badge.svg?branch=main)](https://github.com/PlotJuggler/plotjuggler_bridge/actions/workflows/pixi_jazzy.yaml) | [![Pixi: Kilted](https://github.com/PlotJuggler/plotjuggler_bridge/actions/workflows/pixi_kilted.yaml/badge.svg?branch=main)](https://github.com/PlotJuggler/plotjuggler_bridge/actions/workflows/pixi_kilted.yaml) | [![Pixi: Lyrical](https://github.com/PlotJuggler/plotjuggler_bridge/actions/workflows/pixi_lyrical.yaml/badge.svg?branch=main)](https://github.com/PlotJuggler/plotjuggler_bridge/actions/workflows/pixi_lyrical.yaml) |
 | **colcon** | [![ROS: Humble](https://github.com/PlotJuggler/plotjuggler_bridge/actions/workflows/ros_humble.yaml/badge.svg?branch=main)](https://github.com/PlotJuggler/plotjuggler_bridge/actions/workflows/ros_humble.yaml) | [![ROS: Jazzy](https://github.com/PlotJuggler/plotjuggler_bridge/actions/workflows/ros_jazzy.yaml/badge.svg?branch=main)](https://github.com/PlotJuggler/plotjuggler_bridge/actions/workflows/ros_jazzy.yaml) | [![ROS: Kilted](https://github.com/PlotJuggler/plotjuggler_bridge/actions/workflows/ros_kilted.yaml/badge.svg?branch=main)](https://github.com/PlotJuggler/plotjuggler_bridge/actions/workflows/ros_kilted.yaml) | [![ROS: Lyrical](https://github.com/PlotJuggler/plotjuggler_bridge/actions/workflows/ros_lyrical.yaml/badge.svg?branch=main)](https://github.com/PlotJuggler/plotjuggler_bridge/actions/workflows/ros_lyrical.yaml) |
 
 ## Configuration Parameters
@@ -85,7 +85,7 @@ independently.
 Install the pre-built package from the [PlotJuggler conda channel](https://prefix.dev/channels/plotjuggler) — no build step required.
 
 ```bash
-# Install (change humble to jazzy or kilted as needed)
+# Install (change humble to jazzy, kilted or lyrical as needed)
 pixi global install pj-bridge-ros2-humble \
   -c https://prefix.dev/plotjuggler -c robostack-humble -c conda-forge
 
@@ -109,9 +109,11 @@ chmod +x pj_bridge_ros2-humble-x86_64.AppImage
 
 ## Build Instructions
 
-All dependencies (spdlog, nlohmann_json, ZSTD) are provided by the dependency manager. IXWebSocket is resolved via `find_package` first, with a FetchContent fallback for colcon builds. Only `tl::expected` is vendored.
+All dependencies (spdlog, nlohmann_json, ZSTD, Boost headers ≥ 1.74, OpenSSL) are provided by the dependency manager. The WebSocket server is Boost.Beast (header-only). IXWebSocket is only needed for the tests' WebSocket client: `find_package` first, with a FetchContent fallback. Only `tl::expected` is vendored.
 
-TLS (`wss://`) support depends on IXWebSocket being built with OpenSSL. The CMake option `PJ_BRIDGE_TLS` (default `ON`) controls this for the FetchContent path (`-DPJ_BRIDGE_TLS=OFF` to disable); a system/conda-provided IXWebSocket must likewise have been built with TLS. See [docs/API.md](docs/API.md#tls--wss) for details.
+TLS (`wss://`) uses OpenSSL. The CMake option `PJ_BRIDGE_TLS` (default `ON`) controls it (`-DPJ_BRIDGE_TLS=OFF` to build without OpenSSL). See [docs/API.md](docs/API.md#tls--wss) for details.
+
+`-DPJ_BRIDGE_WS_IX=ON` builds the previous IXWebSocket server transport instead. It is kept for one release as a fallback and will be removed.
 
 ### ROS2 — Pixi
 
@@ -120,7 +122,7 @@ TLS (`wss://`) support depends on IXWebSocket being built with OpenSSL. The CMak
 From the cloned **plotjuggler_bridge** directory:
 
 ```bash
-# Build and test (change humble to jazzy or kilted as needed)
+# Build and test (change humble to jazzy, kilted or lyrical as needed)
 pixi run -e humble build
 pixi run -e humble test
 
@@ -131,7 +133,7 @@ ros2 run pj_bridge pj_bridge_ros2
 
 ### ROS2 — colcon
 
-Standard ROS2 build using `colcon`. Dependencies are installed via `rosdep`; only IXWebSocket is fetched automatically via CMake FetchContent.
+Standard ROS2 build using `colcon`. Dependencies are installed via `rosdep`; IXWebSocket (tests only) is fetched automatically via CMake FetchContent when not installed.
 
 ```bash
 # Set up workspace

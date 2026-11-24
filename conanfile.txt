@@ -1,6 +1,11 @@
 [requires]
 fast-dds/3.4.3
 cli11/2.6.2
+boost/1.86.0
+openssl/3.4.1
+
+[options]
+boost/*:header_only=True
 
 [generators]
 CMakeDeps
